@@ -54,6 +54,7 @@ pub struct Renderer {
     atlas: Atlas,
     pad: u32,
     force_full: bool,
+    last_cursor: Option<(usize, usize)>,
 }
 
 impl Renderer {
@@ -91,17 +92,13 @@ impl Renderer {
         // Prefer a non-sRGB format so packed colors pass straight through.
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
-        let present_mode = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
-            .into_iter()
-            .find(|m| caps.present_modes.contains(m))
-            .unwrap_or(wgpu::PresentMode::Fifo);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode,
-            desired_maximum_frame_latency: 1,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
         };
@@ -209,6 +206,7 @@ impl Renderer {
             atlas,
             pad,
             force_full: true,
+            last_cursor: None,
         }
     }
 
@@ -241,6 +239,20 @@ impl Renderer {
     }
 
     pub fn render(&mut self, grid: &Mutex<Grid>) {
+        // Fast check before acquiring a Metal swapchain drawable: if no cells
+        // or cursor state changed since the last frame, skip presenting entirely
+        // so non-visual escape sequences never exhaust swapchain drawables.
+        if !self.force_full {
+            let g = grid.lock();
+            if !g.all_dirty
+                && self.instances.len() == g.cols * g.rows
+                && g.cursor_pos() == self.last_cursor
+                && !g.dirty.iter().any(|&d| d)
+            {
+                return;
+            }
+        }
+
         // Acquire first: with Fifo this may block until V-Sync, and we must not
         // hold the grid lock (which would stall the PTY parser) while waiting.
         let frame = match self.surface.get_current_texture() {
@@ -289,7 +301,9 @@ impl Renderer {
             g.dirty.fill(false);
             g.all_dirty = false;
             self.force_full = false;
-            (cols, rows, lo, hi, g.cursor_pos())
+            let cur = g.cursor_pos();
+            self.last_cursor = cur;
+            (cols, rows, lo, hi, cur)
         };
 
         if lo <= hi {

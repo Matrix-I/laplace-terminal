@@ -89,6 +89,7 @@ pub struct Grid {
     pub cursor_visible: bool,
     pub app_cursor: bool,
     pub bracketed_paste: bool,
+    pub sync_output: bool,
     autowrap: bool,
 
     /// Per visible row dirty flags, plus a "everything changed" shortcut.
@@ -123,6 +124,7 @@ impl Grid {
             cursor_visible: true,
             app_cursor: false,
             bracketed_paste: false,
+            sync_output: false,
             autowrap: true,
             dirty: vec![true; rows],
             all_dirty: true,
@@ -758,6 +760,7 @@ impl Perform for Grid {
                         47 | 1047 => self.set_alt(on, false),
                         1049 => self.set_alt(on, true),
                         2004 => self.bracketed_paste = on,
+                        2026 => self.sync_output = on,
                         _ => {}
                     }
                 }
@@ -782,7 +785,7 @@ impl Perform for Grid {
                     25 => if self.cursor_visible { 1 } else { 2 },
                     1049 => if self.alt_active { 1 } else { 2 },
                     2004 => if self.bracketed_paste { 1 } else { 2 },
-                    2026 => 2,
+                    2026 => if self.sync_output { 1 } else { 2 },
                     _ => 0,
                 };
                 let _ = write!(self.response, "\x1b[?{mode};{state}$y");

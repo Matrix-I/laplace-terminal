@@ -103,6 +103,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.wakeup_queued.store(false, Ordering::Release);
                 if let Some(s) = &mut self.state {
                     s.renderer.render(&s.grid);
+                    s.window.request_redraw();
                 }
             }
             AppEvent::ChildExit => event_loop.exit(),

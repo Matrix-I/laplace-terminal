@@ -43,7 +43,13 @@ impl Pty {
         let argv = [argv0.as_ptr(), std::ptr::null()];
 
         let mut env: Vec<CString> = std::env::vars()
-            .filter(|(k, _)| !matches!(k.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION"))
+            .filter(|(k, _)| {
+                !matches!(k.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION")
+                    && !k.starts_with("GHOSTTY_")
+                    && !k.starts_with("KITTY_")
+                    && !k.starts_with("ITERM_")
+                    && !k.starts_with("WEZTERM_")
+            })
             .map(|(k, v)| cstr(format!("{k}={v}")))
             .collect();
         env.push(cstr("TERM=xterm-256color"));
@@ -128,8 +134,9 @@ impl Pty {
     }
 
     /// Spawn Thread 1: blocking reads into a fixed 64 KB stack buffer, parsed by
-    /// `vte` directly into the locked grid. `notify` is called after each chunk,
-    /// `on_exit` when the shell goes away.
+    /// `vte` directly into the locked grid. Coalesces back-to-back shell writes
+    /// (e.g. `\r\n` + `PROMPT_SP` + multi-line Powerline prompt) so intermediate
+    /// incomplete states don't trigger redundant GPU frames.
     pub fn spawn_reader(
         &self,
         grid: Arc<Mutex<Grid>>,
@@ -161,18 +168,58 @@ impl Pty {
                     if n == 0 {
                         break;
                     }
-                    {
-                        let mut g = grid.lock();
-                        for &b in &buf[..n as usize] {
-                            parser.advance(&mut *g, b);
+
+                    let mut chunk_len = n as usize;
+                    let mut total_bytes = 0usize;
+                    let batch_start = std::time::Instant::now();
+                    let mut was_bracketed = grid.lock().bracketed_paste;
+                    loop {
+                        total_bytes += chunk_len;
+                        let (sync_active, now_bracketed) = {
+                            let mut g = grid.lock();
+                            for &b in &buf[..chunk_len] {
+                                parser.advance(&mut *g, b);
+                            }
+                            if !g.response.is_empty() {
+                                std::mem::swap(&mut g.response, &mut reply);
+                            }
+                            (g.sync_output, g.bracketed_paste)
+                        };
+                        if now_bracketed {
+                            was_bracketed = true;
                         }
-                        if !g.response.is_empty() {
-                            std::mem::swap(&mut g.response, &mut reply);
+                        if !reply.is_empty() {
+                            write_all(fd, &reply);
+                            reply.clear();
                         }
-                    }
-                    if !reply.is_empty() {
-                        write_all(fd, &reply);
-                        reply.clear();
+
+                        // When the user presses Enter at a prompt, zsh turns off bracketed paste
+                        // (`\x1b[?2004l`), emits `PROMPT_SP` (`%\r \r\x1b[J`, < 512 bytes), runs
+                        // prompt git status (~25-35ms), and then emits the prompt + `\x1b[?2004h`.
+                        // Waiting up to 40ms for the prompt to arrive avoids rendering an
+                        // intermediate blank-line jump before the prompt appears.
+                        let awaiting_prompt = was_bracketed && !now_bracketed && total_bytes < 512;
+                        let max_batch_ms = if sync_active || awaiting_prompt { 45 } else { 3 };
+                        if batch_start.elapsed().as_millis() >= max_batch_ms {
+                            break;
+                        }
+                        let wait_ms = if awaiting_prompt {
+                            40
+                        } else if sync_active {
+                            6
+                        } else {
+                            1
+                        };
+                        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                        let pr = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
+                        if pr <= 0 || (pfd.revents & libc::POLLIN) == 0 {
+                            break;
+                        }
+                        let n2 = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                        if n2 <= 0 {
+                            break;
+                        }
+                        chunk_len = n2 as usize;
                     }
                     notify();
                 }

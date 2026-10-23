@@ -207,16 +207,21 @@ impl Atlas {
         }
 
         // 5. macOS CoreText system font cascade (Apple Symbols, PingFang, Supplemental, etc.).
+        // Skip Private Use Area codepoints (0xE000..=0xF8FF, 0xF0000..=0x10FFFF) because
+        // macOS system fonts do not map Nerd Font PUA glyphs and searching the CoreText
+        // cascade list for unmapped PUA characters takes ~50ms on first encounter.
         #[cfg(target_os = "macos")]
-        if macos_coretext_rasterize(
-            &mut self.scratch,
-            self.cell_w,
-            self.cell_h,
-            self.baseline,
-            self.px,
-            ch,
-        ) {
-            return;
+        if !(0xE000..=0xF8FF).contains(&cp) && cp < 0xF0000 {
+            if macos_coretext_rasterize(
+                &mut self.scratch,
+                self.cell_w,
+                self.cell_h,
+                self.baseline,
+                self.px,
+                ch,
+            ) {
+                return;
+            }
         }
     }
 
