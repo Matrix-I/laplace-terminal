@@ -9,7 +9,6 @@ name = "laplace"
 path = "src/main.rs"
 
 [dependencies]
-winit = "0.30"
 fontdue = "0.9"
 vte = "0.13"
 libc = "0.2"
@@ -17,15 +16,17 @@ parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
 pollster = "0.4"
 
-# Phase 5: only compile the one GPU backend each platform needs (no DX12 / GL / WebGPU).
+# Phase 5: OS-specific windowing and GPU backends only (Metal on macOS, Vulkan on Linux).
 [target.'cfg(target_os = "macos")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 wgpu = { version = "24", default-features = false, features = ["wgsl", "metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-wgpu = { version = "24", default-features = false, features = ["wgsl"] }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+wgpu = { version = "24", default-features = false, features = ["wgsl", "vulkan-portability"] }
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
