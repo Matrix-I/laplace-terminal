@@ -8,7 +8,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use winit::window::Window;
 
-use crate::atlas::Atlas;
+use crate::atlas::{Atlas, FontSet};
 use crate::grid::{Grid, DEFAULT_BG, DEFAULT_FG};
 
 /// Per-cell GPU instance: 12 bytes, mirrors `Cell` with codepoint → atlas slot.
@@ -57,7 +57,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, font: Arc<fontdue::Font>, font_px: f32) -> Self {
+    pub fn new(window: Arc<Window>, font: Arc<FontSet>, font_px: f32) -> Self {
         let size = window.inner_size();
 
         #[cfg(target_os = "macos")]
