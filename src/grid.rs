@@ -7,6 +7,9 @@
 //! is O(1): bump `top` and clear one row in place. Nothing is allocated while
 //! printing or scrolling; allocation only happens on window resize.
 
+use std::io::Write;
+use vte::{Params, Perform};
+
 /// Number of scrollback lines kept above the visible screen.
 pub const SCROLLBACK: usize = 5000;
 
@@ -427,5 +430,461 @@ impl Grid {
         self.wrap_pending = false;
         self.dirty = vec![true; rows];
         self.all_dirty = true;
+    }
+
+    // ------------------------------------------------------------------
+    // SGR
+    // ------------------------------------------------------------------
+
+    fn sgr(&mut self, params: &Params) {
+        if params.is_empty() {
+            self.cur.pen = Pen::default();
+            return;
+        }
+        let mut it = params.iter();
+        while let Some(sp) = it.next() {
+            let pen = &mut self.cur.pen;
+            match sp[0] {
+                0 => *pen = Pen::default(),
+                1 => pen.attrs |= ATTR_BOLD,
+                2 => pen.attrs |= ATTR_DIM,
+                3 => pen.attrs |= ATTR_ITALIC,
+                4 => pen.attrs |= ATTR_UNDERLINE,
+                7 => pen.attrs |= ATTR_INVERSE,
+                8 => pen.attrs |= ATTR_HIDDEN,
+                21 | 22 => pen.attrs &= !(ATTR_BOLD | ATTR_DIM),
+                23 => pen.attrs &= !ATTR_ITALIC,
+                24 => pen.attrs &= !ATTR_UNDERLINE,
+                27 => pen.attrs &= !ATTR_INVERSE,
+                28 => pen.attrs &= !ATTR_HIDDEN,
+                n @ 30..=37 => pen.fg = palette((n - 30) as u8) | FG_SET,
+                38 => {
+                    if let Some(c) = ext_color(sp, &mut it) {
+                        self.cur.pen.fg = c | FG_SET;
+                    }
+                }
+                39 => pen.fg = 0,
+                n @ 40..=47 => pen.bg = palette((n - 40) as u8) | BG_SET,
+                48 => {
+                    if let Some(c) = ext_color(sp, &mut it) {
+                        self.cur.pen.bg = c | BG_SET;
+                    }
+                }
+                49 => pen.bg = 0,
+                n @ 90..=97 => pen.fg = palette((n - 90 + 8) as u8) | FG_SET,
+                n @ 100..=107 => pen.bg = palette((n - 100 + 8) as u8) | BG_SET,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Parse `38;5;n`, `38;2;r;g;b` and their colon sub-parameter forms.
+fn ext_color<'a>(sp: &[u16], it: &mut impl Iterator<Item = &'a [u16]>) -> Option<u32> {
+    if sp.len() > 1 {
+        match sp[1] {
+            5 => sp.get(2).map(|&n| palette(n as u8)),
+            2 => {
+                let o = if sp.len() >= 6 { 3 } else { 2 };
+                Some(rgb(*sp.get(o)?, *sp.get(o + 1)?, *sp.get(o + 2)?))
+            }
+            _ => None,
+        }
+    } else {
+        match it.next()?[0] {
+            5 => Some(palette(it.next()?[0] as u8)),
+            2 => {
+                let r = it.next()?[0];
+                let g = it.next()?[0];
+                let b = it.next()?[0];
+                Some(rgb(r, g, b))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[inline]
+fn rgb(r: u16, g: u16, b: u16) -> u32 {
+    ((r.min(255) as u32) << 24) | ((g.min(255) as u32) << 16) | ((b.min(255) as u32) << 8)
+}
+
+/// xterm 256-color palette, returned as `0xRRGGBB00`.
+fn palette(i: u8) -> u32 {
+    const BASE: [u32; 16] = [
+        0x3B4252, 0xBF616A, 0xA3BE8C, 0xEBCB8B, 0x81A1C1, 0xB48EAD, 0x88C0D0, 0xE5E9F0, //
+        0x4C566A, 0xD08770, 0xB5D19C, 0xF0D399, 0x8FBCBB, 0xC895BF, 0x93CCDC, 0xECEFF4,
+    ];
+    match i {
+        0..=15 => BASE[i as usize] << 8,
+        16..=231 => {
+            let i = i - 16;
+            let lv = |v: u8| if v == 0 { 0u16 } else { 55 + 40 * v as u16 };
+            rgb(lv(i / 36), lv((i / 6) % 6), lv(i % 6))
+        }
+        _ => {
+            let v = 8 + 10 * (i - 232) as u16;
+            rgb(v, v, v)
+        }
+    }
+}
+
+/// Display width of a character: 0 (combining), 1, or 2 (CJK / emoji).
+fn char_width(c: char) -> usize {
+    let c = c as u32;
+    match c {
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
+        | 0x200B..=0x200F | 0xFE00..=0xFE0F => 0,
+        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F | 0x1F900..=0x1F9FF | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
+/// DEC Special Graphics (ESC ( 0) used by tmux, mc, etc. for box drawing.
+fn dec_line_drawing(c: char) -> char {
+    match c {
+        '`' => '◆', 'a' => '▒', 'f' => '°', 'g' => '±', 'j' => '┘', 'k' => '┐', 'l' => '┌',
+        'm' => '└', 'n' => '┼', 'o' => '⎺', 'p' => '⎻', 'q' => '─', 'r' => '⎼', 's' => '⎽',
+        't' => '├', 'u' => '┤', 'v' => '┴', 'w' => '┬', 'x' => '│', 'y' => '≤', 'z' => '≥',
+        '{' => 'π', '|' => '≠', '}' => '£', '~' => '·',
+        _ => c,
+    }
+}
+
+impl Perform for Grid {
+    fn print(&mut self, c: char) {
+        let c = if self.cur.line_drawing { dec_line_drawing(c) } else { c };
+        let mut w = char_width(c);
+        if w == 0 {
+            return;
+        }
+        if w == 2 && self.cols < 2 {
+            w = 1;
+        }
+        if self.wrap_pending {
+            self.wrap_pending = false;
+            if self.autowrap {
+                self.cur.col = 0;
+                self.linefeed();
+            }
+        }
+        if w == 2 && self.cur.col + 1 >= self.cols {
+            if !self.autowrap {
+                return;
+            }
+            self.clear_cols(self.cur.row, self.cur.col, self.cols);
+            self.cur.col = 0;
+            self.linefeed();
+        }
+        let (fg, bg) = self.colors();
+        let (row, col) = (self.cur.row, self.cur.col);
+        {
+            let r = self.row_mut(row);
+            r[col] = Cell { codepoint: c as u32, fg, bg };
+            if w == 2 {
+                r[col + 1] = Cell { codepoint: 0, fg, bg };
+            }
+        }
+        self.mark(row);
+        let next = col + w;
+        if next >= self.cols {
+            self.cur.col = self.cols - 1;
+            self.wrap_pending = self.autowrap;
+        } else {
+            self.cur.col = next;
+        }
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            0x08 => {
+                self.cur.col = self.cur.col.saturating_sub(1);
+                self.wrap_pending = false;
+            }
+            0x09 => {
+                self.cur.col = ((self.cur.col / 8 + 1) * 8).min(self.cols - 1);
+            }
+            0x0A..=0x0C => {
+                self.linefeed();
+                self.wrap_pending = false;
+            }
+            0x0D => {
+                self.cur.col = 0;
+                self.wrap_pending = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        if action == 'm' {
+            if intermediates.is_empty() {
+                self.sgr(params);
+            }
+            return;
+        }
+
+        // Flatten the first value of each param into a fixed stack array.
+        let mut p = [0u16; 16];
+        let mut n = 0;
+        for sp in params.iter() {
+            if n < p.len() {
+                p[n] = sp[0];
+                n += 1;
+            }
+        }
+        let raw = |i: usize| if i < n { p[i] as usize } else { 0 };
+        let arg = |i: usize, d: usize| match raw(i) {
+            0 => d,
+            v => v,
+        };
+        let private = intermediates.first() == Some(&b'?');
+        let (rows, cols) = (self.rows, self.cols);
+        self.wrap_pending = false;
+
+        match action {
+            'A' => self.cur.row = self.cur.row.saturating_sub(arg(0, 1)),
+            'B' | 'e' => self.cur.row = (self.cur.row + arg(0, 1)).min(rows - 1),
+            'C' | 'a' => self.cur.col = (self.cur.col + arg(0, 1)).min(cols - 1),
+            'D' => self.cur.col = self.cur.col.saturating_sub(arg(0, 1)),
+            'E' => {
+                self.cur.row = (self.cur.row + arg(0, 1)).min(rows - 1);
+                self.cur.col = 0;
+            }
+            'F' => {
+                self.cur.row = self.cur.row.saturating_sub(arg(0, 1));
+                self.cur.col = 0;
+            }
+            'G' | '`' => self.cur.col = (arg(0, 1) - 1).min(cols - 1),
+            'd' => self.cur.row = (arg(0, 1) - 1).min(rows - 1),
+            'H' | 'f' => {
+                self.cur.row = (arg(0, 1) - 1).min(rows - 1);
+                self.cur.col = (arg(1, 1) - 1).min(cols - 1);
+            }
+            'J' => {
+                let (r, c) = (self.cur.row, self.cur.col);
+                match raw(0) {
+                    0 => {
+                        self.clear_cols(r, c, cols);
+                        self.clear_rows(r + 1, rows);
+                    }
+                    1 => {
+                        self.clear_rows(0, r);
+                        self.clear_cols(r, 0, c + 1);
+                    }
+                    2 => self.clear_rows(0, rows),
+                    3 => {
+                        self.history = 0;
+                        self.display_offset = 0;
+                        self.all_dirty = true;
+                    }
+                    _ => {}
+                }
+            }
+            'K' => {
+                let (r, c) = (self.cur.row, self.cur.col);
+                match raw(0) {
+                    0 => self.clear_cols(r, c, cols),
+                    1 => self.clear_cols(r, 0, c + 1),
+                    2 => self.clear_cols(r, 0, cols),
+                    _ => {}
+                }
+            }
+            'L' => {
+                if (self.scroll_top..=self.scroll_bot).contains(&self.cur.row) {
+                    self.scroll_down_in(self.cur.row, self.scroll_bot, arg(0, 1));
+                    self.cur.col = 0;
+                }
+            }
+            'M' => {
+                if (self.scroll_top..=self.scroll_bot).contains(&self.cur.row) {
+                    self.scroll_up_in(self.cur.row, self.scroll_bot, arg(0, 1), false);
+                    self.cur.col = 0;
+                }
+            }
+            '@' => {
+                let (r, c) = (self.cur.row, self.cur.col);
+                let k = arg(0, 1).min(cols - c);
+                let b = self.blank();
+                let row = self.row_mut(r);
+                row.copy_within(c..cols - k, c + k);
+                row[c..c + k].fill(b);
+                self.mark(r);
+            }
+            'P' => {
+                let (r, c) = (self.cur.row, self.cur.col);
+                let k = arg(0, 1).min(cols - c);
+                let b = self.blank();
+                let row = self.row_mut(r);
+                row.copy_within(c + k..cols, c);
+                row[cols - k..].fill(b);
+                self.mark(r);
+            }
+            'X' => {
+                let (r, c) = (self.cur.row, self.cur.col);
+                self.clear_cols(r, c, c + arg(0, 1));
+            }
+            'S' if !private => self.scroll_up_in(self.scroll_top, self.scroll_bot, arg(0, 1), true),
+            'T' if !private => self.scroll_down_in(self.scroll_top, self.scroll_bot, arg(0, 1)),
+            'r' if !private => {
+                let t = arg(0, 1) - 1;
+                let b = arg(1, rows).min(rows) - 1;
+                if t < b {
+                    self.scroll_top = t;
+                    self.scroll_bot = b;
+                    self.cur.row = 0;
+                    self.cur.col = 0;
+                }
+            }
+            's' if !private => self.saved = self.cur,
+            'u' if !private => {
+                self.cur = self.saved;
+                self.clamp_cursor();
+            }
+            'h' | 'l' if private => {
+                let on = action == 'h';
+                for &mode in &p[..n] {
+                    match mode {
+                        1 => self.app_cursor = on,
+                        7 => self.autowrap = on,
+                        25 => self.cursor_visible = on,
+                        47 | 1047 => self.set_alt(on, false),
+                        1049 => self.set_alt(on, true),
+                        2004 => self.bracketed_paste = on,
+                        _ => {}
+                    }
+                }
+                self.all_dirty = true;
+            }
+            'n' if !private => match raw(0) {
+                5 => self.response.extend_from_slice(b"\x1b[0n"),
+                6 => {
+                    let _ = write!(self.response, "\x1b[{};{}R", self.cur.row + 1, self.cur.col + 1);
+                }
+                _ => {}
+            },
+            'c' if intermediates.is_empty() => self.response.extend_from_slice(b"\x1b[?6c"),
+            'c' if intermediates == b">" => self.response.extend_from_slice(b"\x1b[>0;0;0c"),
+            _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        match (intermediates, byte) {
+            ([], b'7') => self.saved = self.cur,
+            ([], b'8') => {
+                self.cur = self.saved;
+                self.clamp_cursor();
+            }
+            ([], b'D') => self.linefeed(),
+            ([], b'E') => {
+                self.cur.col = 0;
+                self.linefeed();
+            }
+            ([], b'M') => self.reverse_index(),
+            ([], b'c') => self.full_reset(),
+            ([b'('], b'0') => self.cur.line_drawing = true,
+            ([b'('], b'B') => self.cur.line_drawing = false,
+            _ => {}
+        }
+        self.wrap_pending = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(g: &mut Grid, s: &str) {
+        let mut p = vte::Parser::new();
+        for b in s.bytes() {
+            p.advance(g, b);
+        }
+    }
+
+    fn line(g: &Grid, r: usize) -> String {
+        g.display_row(r)
+            .iter()
+            .map(|c| char::from_u32(c.codepoint).filter(|&c| c != '\0').unwrap_or(' '))
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn print_and_wrap() {
+        let mut g = Grid::new(5, 3);
+        feed(&mut g, "hello world");
+        assert_eq!(line(&g, 0), "hello");
+        assert_eq!(line(&g, 1), " worl");
+        assert_eq!(line(&g, 2), "d");
+    }
+
+    #[test]
+    fn scroll_into_history() {
+        let mut g = Grid::new(4, 2);
+        feed(&mut g, "a\r\nb\r\nc\r\nd");
+        assert_eq!(line(&g, 0), "c");
+        assert_eq!(line(&g, 1), "d");
+        g.scroll_display(2);
+        assert_eq!(line(&g, 0), "a");
+        assert_eq!(line(&g, 1), "b");
+    }
+
+    #[test]
+    fn csi_cursor_and_erase() {
+        let mut g = Grid::new(6, 3);
+        feed(&mut g, "abcdef\x1b[2;3HX\x1b[1;1H\x1b[K");
+        assert_eq!(line(&g, 0), "");
+        assert_eq!(line(&g, 1), "  X");
+    }
+
+    #[test]
+    fn sgr_colors() {
+        let mut g = Grid::new(4, 1);
+        feed(&mut g, "\x1b[31;48;2;1;2;3mx");
+        let c = g.display_row(0)[0];
+        assert_eq!(c.fg, palette(1) | FG_SET);
+        assert_eq!(c.bg, 0x0102_0300 | BG_SET);
+    }
+
+    #[test]
+    fn alt_screen_restores() {
+        let mut g = Grid::new(4, 2);
+        feed(&mut g, "main\x1b[?1049hALT");
+        assert_eq!(line(&g, 0), "ALT");
+        feed(&mut g, "\x1b[?1049l");
+        assert_eq!(line(&g, 0), "main");
+    }
+
+    #[test]
+    fn scroll_region() {
+        let mut g = Grid::new(3, 4);
+        feed(&mut g, "1\r\n2\r\n3\r\n4\x1b[2;3r\x1b[3;1H\n");
+        assert_eq!(line(&g, 0), "1");
+        assert_eq!(line(&g, 1), "3");
+        assert_eq!(line(&g, 2), "");
+        assert_eq!(line(&g, 3), "4");
+    }
+
+    #[test]
+    fn resize_keeps_cursor_line() {
+        let mut g = Grid::new(4, 4);
+        feed(&mut g, "a\r\nb\r\nc\r\nd");
+        g.resize(4, 2);
+        assert_eq!(line(&g, 0), "c");
+        assert_eq!(line(&g, 1), "d");
+        g.resize(4, 4);
+        assert_eq!(line(&g, 0), "a");
+        assert_eq!(line(&g, 3), "d");
+    }
+
+    #[test]
+    fn dsr_reply() {
+        let mut g = Grid::new(10, 5);
+        feed(&mut g, "\x1b[3;4H\x1b[6n");
+        assert_eq!(g.response, b"\x1b[3;4R");
     }
 }
