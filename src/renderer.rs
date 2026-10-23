@@ -229,12 +229,12 @@ impl Renderer {
         ((w / self.atlas.cell_w).max(1) as usize, (h / self.atlas.cell_h).max(1) as usize)
     }
 
-    /// Columns and terminal PTY rows when accounting for the 1-row top tab bar
+    /// Columns and terminal PTY rows when accounting for the top tab bar + gap
     /// shown whenever 2 or more tabs are open.
     pub fn grid_size_for_tabs(&self, show_tab_bar: bool) -> (usize, usize) {
         let (cols, total_rows) = self.grid_size();
-        let rows = if show_tab_bar && total_rows > 1 {
-            total_rows - 1
+        let rows = if show_tab_bar && total_rows > 2 {
+            total_rows - 2
         } else {
             total_rows
         };
@@ -266,27 +266,23 @@ impl Renderer {
         if titles.len() <= 1 {
             return None;
         }
-        let top = self.pad as f64;
-        let bottom = (self.pad + self.atlas.cell_h) as f64;
-        if y_px < top || y_px >= bottom {
+        let bar_h = (self.atlas.cell_h as f64) * 1.56;
+        if y_px < 0.0 || y_px >= bar_h {
             return None;
         }
-        let col = ((x_px - self.pad as f64).max(0.0) as u32 / self.atlas.cell_w.max(1)) as usize;
         let (cols, _) = self.grid_size();
-        let max_label = ((cols.saturating_sub(4)) / titles.len().max(1)).clamp(8, 28);
-        let mut x = 0usize;
-        for (i, title) in titles.iter().enumerate() {
-            let label = format_tab_label(i, title, max_label);
-            let w = label.chars().count();
-            if col >= x && col < x + w {
-                return Some(TabBarAction::Select(i));
-            }
-            x += w + 1;
-        }
-        if col >= x && col < x + 3 {
+        let tab_cols_total = cols.saturating_sub(2).max(1);
+        let col = ((x_px - self.pad as f64).max(0.0) as u32 / self.atlas.cell_w.max(1)) as usize;
+        if col >= tab_cols_total {
             return Some(TabBarAction::NewTab);
         }
-        None
+        let n = titles.len();
+        let mut tab_i = (col * n) / tab_cols_total;
+        let next_start = ((tab_i + 1) * tab_cols_total) / n;
+        if col >= next_start && tab_i + 1 < n {
+            tab_i += 1;
+        }
+        Some(TabBarAction::Select(tab_i.min(n - 1)))
     }
 
     pub fn render_with_tabs(&mut self, grid: &Mutex<Grid>, tab_bar: Option<(&[String], usize)>) {
@@ -380,6 +376,10 @@ impl Renderer {
             );
         }
         let (cx, cy) = cursor.unwrap_or((0, 0));
+        let tab_info = match tab_bar {
+            Some((titles, active_idx)) => ((active_idx as u32) << 16) | (titles.len() as u32 & 0xFFFF),
+            None => 0,
+        };
         let u = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
             cell: [self.atlas.cell_w as f32, self.atlas.cell_h as f32],
@@ -391,7 +391,7 @@ impl Renderer {
             cursor_visible: cursor.is_some() as u32,
             default_fg: DEFAULT_FG,
             default_bg: DEFAULT_BG,
-            _pad: 0,
+            _pad: tab_info,
         };
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
@@ -433,64 +433,73 @@ impl Renderer {
     }
 
     fn build_tab_bar_row(&mut self, cols: usize, titles: &[String], active_idx: usize) {
-        const BAR_BG: u32 = 0x13141CFF;
-        const ACTIVE_BG: u32 = 0x7AA2F7FF;
-        const ACTIVE_FG: u32 = 0x15161EFF;
-        const INACTIVE_BG: u32 = 0x24283BFF;
-        const INACTIVE_FG: u32 = 0xA9B1D6FF;
-        const PLUS_BG: u32 = 0x1F2335FF;
-        const PLUS_FG: u32 = 0x7AA2F7FF;
+        const ACTIVE_FG: u32 = 0xF2F2_F7FF;
+        const ACTIVE_BADGE_FG: u32 = 0xA6A8_B3FF;
+        const INACTIVE_FG: u32 = 0x8E90_99FF;
+        const INACTIVE_BADGE_FG: u32 = 0x686A_73FF;
+        const BAR_BG: u32 = 0x1C1D_2080;
 
-        let out = &mut self.instances[0..cols];
-        for dst in out.iter_mut() {
+        for dst in &mut self.instances[0..cols] {
             *dst = Instance { glyph: 0, fg: INACTIVE_FG, bg: BAR_BG };
         }
-        let max_label = ((cols.saturating_sub(4)) / titles.len().max(1)).clamp(8, 28);
-        let mut x = 0usize;
+
+        let tab_cols_total = cols.saturating_sub(2).max(1);
+        let n = titles.len().max(1);
         for (i, title) in titles.iter().enumerate() {
-            let (fg, bg) = if i == active_idx {
-                (ACTIVE_FG, ACTIVE_BG)
+            let c0 = (i * tab_cols_total) / n;
+            let c1 = ((i + 1) * tab_cols_total) / n;
+            let span = c1.saturating_sub(c0);
+            if span < 4 {
+                continue;
+            }
+            let (fg, badge_fg) = if i == active_idx {
+                (ACTIVE_FG, ACTIVE_BADGE_FG)
             } else {
-                (INACTIVE_FG, INACTIVE_BG)
+                (INACTIVE_FG, INACTIVE_BADGE_FG)
             };
-            let label = format_tab_label(i, title, max_label);
-            for ch in label.chars() {
-                if x >= cols {
-                    return;
+
+            // Right-aligned shortcut badge (`⌘1`..`⌘9` on macOS, `^1`..`^9` on Linux).
+            let badge_reserve = if i < 9 && span >= 10 {
+                #[cfg(target_os = "macos")]
+                let mod_ch = '⌘';
+                #[cfg(not(target_os = "macos"))]
+                let mod_ch = '^';
+                let digit = (b'1' + i as u8) as char;
+                let bx = c1 - 3;
+                let s0 = self.atlas.slot(&self.queue, mod_ch as u32);
+                let s1 = self.atlas.slot(&self.queue, digit as u32);
+                self.instances[bx] = Instance { glyph: s0 as u32, fg: badge_fg, bg: BAR_BG };
+                self.instances[bx + 1] = Instance { glyph: s1 as u32, fg: badge_fg, bg: BAR_BG };
+                4
+            } else {
+                1
+            };
+
+            let avail = span.saturating_sub(2 + badge_reserve);
+            if avail == 0 {
+                continue;
+            }
+            let chars: Vec<char> = title.chars().collect();
+            let display: Vec<char> = if chars.len() <= avail {
+                chars
+            } else if avail > 1 {
+                let mut v: Vec<char> = chars.into_iter().take(avail - 1).collect();
+                v.push('…');
+                v
+            } else {
+                vec!['…']
+            };
+
+            let start_col = c0 + 1 + (avail.saturating_sub(display.len())) / 2;
+            for (k, ch) in display.into_iter().enumerate() {
+                let x = start_col + k;
+                if x < c1.saturating_sub(badge_reserve) && x < cols {
+                    let slot = self.atlas.slot(&self.queue, ch as u32);
+                    self.instances[x] = Instance { glyph: slot as u32, fg, bg: BAR_BG };
                 }
-                let slot = self.atlas.slot(&self.queue, ch as u32);
-                self.instances[x] = Instance { glyph: slot as u32, fg, bg };
-                x += 1;
             }
-            if x < cols {
-                let sep_slot = self.atlas.slot(&self.queue, 0xE0B0);
-                self.instances[x] = Instance { glyph: sep_slot as u32, fg: bg, bg: BAR_BG };
-                x += 1;
-            }
-        }
-        for ch in [' ', '+', ' '] {
-            if x >= cols {
-                break;
-            }
-            let slot = self.atlas.slot(&self.queue, ch as u32);
-            self.instances[x] = Instance { glyph: slot as u32, fg: PLUS_FG, bg: PLUS_BG };
-            x += 1;
         }
     }
-}
-
-fn format_tab_label(idx: usize, title: &str, max_chars: usize) -> String {
-    let prefix = format!(" {}: ", idx + 1);
-    let avail = max_chars.saturating_sub(prefix.len() + 1).max(3);
-    let count = title.chars().count();
-    let body: String = if count <= avail {
-        title.to_string()
-    } else {
-        let mut s: String = title.chars().take(avail.saturating_sub(1)).collect();
-        s.push('…');
-        s
-    };
-    format!("{prefix}{body} ")
 }
 
 fn make_bind_group(

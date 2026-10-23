@@ -87,7 +87,7 @@ impl ApplicationHandler<AppEvent> for App {
             &self.wakeup_queued,
         )
         .expect("spawn initial PTY");
-        let title = tab_title(&tab.pty);
+        let title = tab_title(&tab);
 
         self.state = Some(State {
             window,
@@ -242,46 +242,52 @@ fn spawn_tab(
     Ok(Tab { id: tab_id, grid, pty })
 }
 
-fn tab_title(pty: &Pty) -> String {
-    let Some(cwd) = pty.cwd() else {
-        return "shell".into();
-    };
-    if let Ok(home) = std::env::var("HOME") {
-        if cwd == home {
-            return "~".into();
+fn tab_title(tab: &Tab) -> String {
+    {
+        let g = tab.grid.lock();
+        if !g.title.is_empty() {
+            return g.title.clone();
         }
     }
-    if cwd == "/" {
-        return "/".into();
+    let Some(cwd) = tab.pty.cwd() else {
+        return "shell".into();
+    };
+    let short_dir = if let Ok(home) = std::env::var("HOME") {
+        if cwd == home {
+            "~".to_string()
+        } else if let Some(rest) = cwd.strip_prefix(&home) {
+            format!("~{rest}")
+        } else {
+            cwd
+        }
+    } else {
+        cwd
+    };
+    let user = std::env::var("USER").unwrap_or_default();
+    if user.is_empty() {
+        short_dir
+    } else {
+        format!("{user}:{short_dir}")
     }
-    cwd.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(cwd.as_str())
-        .to_string()
 }
 
 fn refresh_tab_titles(s: &mut State) {
     let mut changed = s.tab_titles.len() != s.tabs.len();
     s.tab_titles.resize_with(s.tabs.len(), String::new);
     for (dst, tab) in s.tab_titles.iter_mut().zip(&s.tabs) {
-        let new_title = tab_title(&tab.pty);
+        let new_title = tab_title(tab);
         if *dst != new_title {
             *dst = new_title;
             changed = true;
         }
     }
     if changed {
-        s.renderer.invalidate();
-    }
-    if let Some(active_title) = s.tab_titles.get(s.active) {
-        let win_title = if s.tabs.len() > 1 {
-            format!("Laplace — {active_title} [{}/{}]", s.active + 1, s.tabs.len())
-        } else {
-            format!("Laplace — {active_title}")
-        };
-        s.window.set_title(&win_title);
+        if s.tabs.len() > 1 {
+            s.renderer.invalidate();
+        }
+        if let Some(active_title) = s.tab_titles.get(s.active) {
+            s.window.set_title(active_title);
+        }
     }
 }
 
@@ -289,9 +295,7 @@ fn render_active(s: &mut State) {
     if s.tabs.is_empty() {
         return;
     }
-    if s.tabs.len() > 1 {
-        refresh_tab_titles(s);
-    }
+    refresh_tab_titles(s);
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
     s.renderer.render_with_tabs(&s.tabs[s.active].grid, tab_bar);
 }

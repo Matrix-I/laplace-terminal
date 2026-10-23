@@ -15,8 +15,8 @@ pub const SCROLLBACK: usize = 5000;
 
 /// Default colors, stored as `0xRRGGBB00`. Cells store `0` to mean "default",
 /// which keeps a freshly zeroed buffer valid and lets the shader apply the theme.
-pub const DEFAULT_FG: u32 = 0xD8DE_E900;
-pub const DEFAULT_BG: u32 = 0x1E22_2A00;
+pub const DEFAULT_FG: u32 = 0xE6E6_E600;
+pub const DEFAULT_BG: u32 = 0x1213_1600;
 
 /// `fg` low byte: 0xFF = explicit color, 0x00 = default foreground.
 pub const FG_SET: u32 = 0xFF;
@@ -92,6 +92,9 @@ pub struct Grid {
     pub sync_output: bool,
     autowrap: bool,
 
+    /// Window/tab title set via OSC 0 / OSC 2 (e.g. `user@host:~/dir` or running command).
+    pub title: String,
+
     /// Per visible row dirty flags, plus a "everything changed" shortcut.
     pub dirty: Vec<bool>,
     pub all_dirty: bool,
@@ -126,6 +129,7 @@ impl Grid {
             bracketed_paste: false,
             sync_output: false,
             autowrap: true,
+            title: String::new(),
             dirty: vec![true; rows],
             all_dirty: true,
             response: Vec::with_capacity(256),
@@ -514,8 +518,8 @@ fn rgb(r: u16, g: u16, b: u16) -> u32 {
 /// xterm 256-color palette, returned as `0xRRGGBB00`.
 fn palette(i: u8) -> u32 {
     const BASE: [u32; 16] = [
-        0x3B4252, 0xBF616A, 0xA3BE8C, 0xEBCB8B, 0x81A1C1, 0xB48EAD, 0x88C0D0, 0xE5E9F0, //
-        0x4C566A, 0xD08770, 0xB5D19C, 0xF0D399, 0x8FBCBB, 0xC895BF, 0x93CCDC, 0xECEFF4,
+        0x121316, 0xF38BA8, 0xA6E3A1, 0xF5A97F, 0x00BFE3, 0xCBA6F7, 0x89DCEB, 0xD9E0EE, //
+        0x585B70, 0xF38BA8, 0xA6E3A1, 0xF9E2AF, 0x74C7EC, 0xF5C2E7, 0x94E2D5, 0xFFFFFF,
     ];
     match i {
         0..=15 => BASE[i as usize] << 8,
@@ -798,7 +802,20 @@ impl Perform for Grid {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        if params.len() < 2 || params[1] != b"?" {
+        if params.len() < 2 {
+            return;
+        }
+        if matches!(params[0], b"0" | b"2") {
+            if let Ok(s) = std::str::from_utf8(params[1]) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() && self.title != trimmed {
+                    self.title.clear();
+                    self.title.push_str(trimmed);
+                }
+            }
+            return;
+        }
+        if params[1] != b"?" {
             return;
         }
         let st = if bell_terminated { "\x07" } else { "\x1b\\" };
