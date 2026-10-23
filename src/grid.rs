@@ -749,24 +749,69 @@ impl Perform for Grid {
                     match mode {
                         1 => self.app_cursor = on,
                         7 => self.autowrap = on,
-                        25 => self.cursor_visible = on,
+                        25 => {
+                            if self.cursor_visible != on {
+                                self.cursor_visible = on;
+                                self.mark(self.cur.row);
+                            }
+                        }
                         47 | 1047 => self.set_alt(on, false),
                         1049 => self.set_alt(on, true),
                         2004 => self.bracketed_paste = on,
                         _ => {}
                     }
                 }
-                self.all_dirty = true;
             }
-            'n' if !private => match raw(0) {
+            'n' => match raw(0) {
                 5 => self.response.extend_from_slice(b"\x1b[0n"),
                 6 => {
-                    let _ = write!(self.response, "\x1b[{};{}R", self.cur.row + 1, self.cur.col + 1);
+                    if private {
+                        let _ = write!(self.response, "\x1b[?{};{}R", self.cur.row + 1, self.cur.col + 1);
+                    } else {
+                        let _ = write!(self.response, "\x1b[{};{}R", self.cur.row + 1, self.cur.col + 1);
+                    }
                 }
                 _ => {}
             },
+            'p' if private && intermediates.last() == Some(&b'$') => {
+                // DECRQM (Request Mode): reply with 2 (reset) or 1 (set) so shells never hang waiting.
+                let mode = raw(0);
+                let state = match mode {
+                    1 => if self.app_cursor { 1 } else { 2 },
+                    7 => if self.autowrap { 1 } else { 2 },
+                    25 => if self.cursor_visible { 1 } else { 2 },
+                    1049 => if self.alt_active { 1 } else { 2 },
+                    2004 => if self.bracketed_paste { 1 } else { 2 },
+                    2026 => 2,
+                    _ => 0,
+                };
+                let _ = write!(self.response, "\x1b[?{mode};{state}$y");
+            }
             'c' if intermediates.is_empty() => self.response.extend_from_slice(b"\x1b[?6c"),
             'c' if intermediates == b">" => self.response.extend_from_slice(b"\x1b[>0;0;0c"),
+            'c' if intermediates == b"=" => self.response.extend_from_slice(b"\x1bP!|00000000\x1b\\"),
+            _ => {}
+        }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        if params.len() < 2 || params[1] != b"?" {
+            return;
+        }
+        let st = if bell_terminated { "\x07" } else { "\x1b\\" };
+        match params[0] {
+            b"10" => {
+                let r = (DEFAULT_FG >> 24) & 0xFF;
+                let g = (DEFAULT_FG >> 16) & 0xFF;
+                let b = (DEFAULT_FG >> 8) & 0xFF;
+                let _ = write!(self.response, "\x1b]10;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{st}");
+            }
+            b"11" => {
+                let r = (DEFAULT_BG >> 24) & 0xFF;
+                let g = (DEFAULT_BG >> 16) & 0xFF;
+                let b = (DEFAULT_BG >> 8) & 0xFF;
+                let _ = write!(self.response, "\x1b]11;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{st}");
+            }
             _ => {}
         }
     }

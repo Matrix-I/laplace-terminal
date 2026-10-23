@@ -100,8 +100,9 @@ impl ApplicationHandler<AppEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::WakeUp => {
-                if let Some(s) = &self.state {
-                    s.window.request_redraw();
+                self.wakeup_queued.store(false, Ordering::Release);
+                if let Some(s) = &mut self.state {
+                    s.renderer.render(&s.grid);
                 }
             }
             AppEvent::ChildExit => event_loop.exit(),
@@ -158,7 +159,17 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Wait);
+        // On macOS, `winit` runs `UserEvent` and `RedrawRequested` inside the
+        // `kCFRunLoopBeforeWaiting` observer. If the PTY reader thread sends a
+        // `WakeUp` while `s.renderer.render()` is executing, `CFRunLoopWakeUp`
+        // fires before the run loop actually enters `mach_msg` sleep and gets lost.
+        // Polling for one pass whenever `wakeup_queued` is set guarantees the
+        // prompt redraws immediately while keeping 0% CPU once idle.
+        if self.wakeup_queued.load(Ordering::Acquire) {
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 }
 
