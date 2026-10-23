@@ -1,0 +1,19 @@
+[package]
+name = "laplace-terminal"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal GPU terminal: <15MB RAM, 0% idle CPU (Metal on macOS, Vulkan on Linux)"
+
+[[bin]]
+name = "laplace"
+path = "src/main.rs"
+
+[dependencies]
+winit = "0.30"
+wgpu = "24"
+fontdue = "0.9"
+vte = "0.13"
+libc = "0.2"
+parking_lot = "0.12"
+bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
+pollster = "0.4"
