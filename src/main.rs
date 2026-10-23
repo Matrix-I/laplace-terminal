@@ -12,30 +12,39 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::grid::Grid;
 use crate::pty::Pty;
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, TabBarAction};
 
 const DEFAULT_PT: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy)]
 enum AppEvent {
     WakeUp,
-    ChildExit,
+    ChildExit(u64),
+}
+
+struct Tab {
+    id: u64,
+    grid: Arc<Mutex<Grid>>,
+    pty: Pty,
 }
 
 struct State {
     window: Arc<Window>,
     renderer: Renderer,
-    grid: Arc<Mutex<Grid>>,
-    pty: Pty,
+    tabs: Vec<Tab>,
+    tab_titles: Vec<String>,
+    active: usize,
+    next_tab_id: u64,
     mods: ModifiersState,
     font_pt: f32,
+    mouse_pos: (f64, f64),
 }
 
 struct App {
@@ -63,37 +72,33 @@ impl ApplicationHandler<AppEvent> for App {
         let font_px = (font_pt * window.scale_factor() as f32).round();
 
         let renderer = Renderer::new(window.clone(), font, font_px);
-        let (cols, rows) = renderer.grid_size();
+        let (cols, rows) = renderer.grid_size_for_tabs(false);
         let (cw, ch) = renderer.cell_size();
 
-        let grid = Arc::new(Mutex::new(Grid::new(cols, rows)));
-        let pty = Pty::spawn(cols as u16, rows as u16, cw, ch).expect("spawn PTY");
-
-        // Coalesce wakeups: if a wakeup is already in flight, the PTY reader skips
-        // sending another event and keeps parsing at full memory speed.
-        let p1 = self.proxy.clone();
-        let p2 = self.proxy.clone();
-        let queued = self.wakeup_queued.clone();
-        pty.spawn_reader(
-            grid.clone(),
-            move || {
-                if !queued.swap(true, Ordering::AcqRel) {
-                    let _ = p1.send_event(AppEvent::WakeUp);
-                }
-            },
-            move || {
-                let _ = p2.send_event(AppEvent::ChildExit);
-            },
+        let tab_id = 1;
+        let tab = spawn_tab(
+            tab_id,
+            cols,
+            rows,
+            cw,
+            ch,
+            None,
+            &self.proxy,
+            &self.wakeup_queued,
         )
-        .expect("spawn PTY reader");
+        .expect("spawn initial PTY");
+        let title = tab_title(&tab.pty);
 
         self.state = Some(State {
             window,
             renderer,
-            grid,
-            pty,
+            tabs: vec![tab],
+            tab_titles: vec![title],
+            active: 0,
+            next_tab_id: 2,
             mods: ModifiersState::default(),
             font_pt,
+            mouse_pos: (0.0, 0.0),
         });
     }
 
@@ -102,11 +107,32 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::WakeUp => {
                 self.wakeup_queued.store(false, Ordering::Release);
                 if let Some(s) = &mut self.state {
-                    s.renderer.render(&s.grid);
+                    render_active(s);
                     s.window.request_redraw();
                 }
             }
-            AppEvent::ChildExit => event_loop.exit(),
+            AppEvent::ChildExit(exited_id) => {
+                let Some(s) = &mut self.state else {
+                    event_loop.exit();
+                    return;
+                };
+                if let Some(pos) = s.tabs.iter().position(|t| t.id == exited_id) {
+                    s.tabs.remove(pos);
+                    if s.tabs.is_empty() {
+                        event_loop.exit();
+                        return;
+                    }
+                    if s.active >= s.tabs.len() {
+                        s.active = s.tabs.len() - 1;
+                    } else if pos < s.active {
+                        s.active -= 1;
+                    }
+                    sync_size(s);
+                    refresh_tab_titles(s);
+                    s.renderer.invalidate();
+                    s.window.request_redraw();
+                }
+            }
         }
     }
 
@@ -116,6 +142,23 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::ModifiersChanged(m) => s.mods = m.state(),
+
+            WindowEvent::CursorMoved { position, .. } => {
+                s.mouse_pos = (position.x, position.y);
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
+                    match action {
+                        TabBarAction::Select(idx) => select_tab(s, idx),
+                        TabBarAction::NewTab => duplicate_active_tab(s, &self.proxy, &self.wakeup_queued),
+                    }
+                }
+            }
 
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
@@ -142,17 +185,19 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 };
                 if lines != 0 {
-                    s.grid.lock().scroll_display(lines);
+                    s.tabs[s.active].grid.lock().scroll_display(lines);
                     s.window.request_redraw();
                 }
             }
 
-            WindowEvent::KeyboardInput { event, .. } => handle_key(s, &event),
+            WindowEvent::KeyboardInput { event, .. } => {
+                handle_key(s, &event, event_loop, &self.proxy, &self.wakeup_queued);
+            }
 
             WindowEvent::RedrawRequested => {
                 // Re-arm before rendering so any PTY write during the draw schedules the next frame.
                 self.wakeup_queued.store(false, Ordering::Release);
-                s.renderer.render(&s.grid);
+                render_active(s);
             }
 
             _ => {}
@@ -160,12 +205,6 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // On macOS, `winit` runs `UserEvent` and `RedrawRequested` inside the
-        // `kCFRunLoopBeforeWaiting` observer. If the PTY reader thread sends a
-        // `WakeUp` while `s.renderer.render()` is executing, `CFRunLoopWakeUp`
-        // fires before the run loop actually enters `mach_msg` sleep and gets lost.
-        // Polling for one pass whenever `wakeup_queued` is set guarantees the
-        // prompt redraws immediately while keeping 0% CPU once idle.
         if self.wakeup_queued.load(Ordering::Acquire) {
             event_loop.set_control_flow(ControlFlow::Poll);
         } else {
@@ -174,17 +213,159 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
-fn sync_size(s: &mut State) {
-    let (cols, rows) = s.renderer.grid_size();
-    let (cw, ch) = s.renderer.cell_size();
-    {
-        let mut g = s.grid.lock();
-        if (g.cols, g.rows) == (cols, rows) {
-            return;
+fn spawn_tab(
+    tab_id: u64,
+    cols: usize,
+    rows: usize,
+    cw: u32,
+    ch: u32,
+    cwd: Option<&str>,
+    proxy: &EventLoopProxy<AppEvent>,
+    wakeup_queued: &Arc<AtomicBool>,
+) -> std::io::Result<Tab> {
+    let grid = Arc::new(Mutex::new(Grid::new(cols, rows)));
+    let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd)?;
+    let p1 = proxy.clone();
+    let p2 = proxy.clone();
+    let queued = wakeup_queued.clone();
+    pty.spawn_reader(
+        grid.clone(),
+        move || {
+            if !queued.swap(true, Ordering::AcqRel) {
+                let _ = p1.send_event(AppEvent::WakeUp);
+            }
+        },
+        move || {
+            let _ = p2.send_event(AppEvent::ChildExit(tab_id));
+        },
+    )?;
+    Ok(Tab { id: tab_id, grid, pty })
+}
+
+fn tab_title(pty: &Pty) -> String {
+    let Some(cwd) = pty.cwd() else {
+        return "shell".into();
+    };
+    if let Ok(home) = std::env::var("HOME") {
+        if cwd == home {
+            return "~".into();
         }
-        g.resize(cols, rows);
     }
-    s.pty.resize(cols as u16, rows as u16, cw, ch);
+    if cwd == "/" {
+        return "/".into();
+    }
+    cwd.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cwd.as_str())
+        .to_string()
+}
+
+fn refresh_tab_titles(s: &mut State) {
+    let mut changed = s.tab_titles.len() != s.tabs.len();
+    s.tab_titles.resize_with(s.tabs.len(), String::new);
+    for (dst, tab) in s.tab_titles.iter_mut().zip(&s.tabs) {
+        let new_title = tab_title(&tab.pty);
+        if *dst != new_title {
+            *dst = new_title;
+            changed = true;
+        }
+    }
+    if changed {
+        s.renderer.invalidate();
+    }
+    if let Some(active_title) = s.tab_titles.get(s.active) {
+        let win_title = if s.tabs.len() > 1 {
+            format!("Laplace — {active_title} [{}/{}]", s.active + 1, s.tabs.len())
+        } else {
+            format!("Laplace — {active_title}")
+        };
+        s.window.set_title(&win_title);
+    }
+}
+
+fn render_active(s: &mut State) {
+    if s.tabs.is_empty() {
+        return;
+    }
+    if s.tabs.len() > 1 {
+        refresh_tab_titles(s);
+    }
+    let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
+    s.renderer.render_with_tabs(&s.tabs[s.active].grid, tab_bar);
+}
+
+fn duplicate_active_tab(
+    s: &mut State,
+    proxy: &EventLoopProxy<AppEvent>,
+    wakeup_queued: &Arc<AtomicBool>,
+) {
+    let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
+    let (cols, rows) = s.renderer.grid_size_for_tabs(true);
+    let (cw, ch) = s.renderer.cell_size();
+    let id = s.next_tab_id;
+    s.next_tab_id += 1;
+    match spawn_tab(id, cols, rows, cw, ch, cwd.as_deref(), proxy, wakeup_queued) {
+        Ok(tab) => {
+            let insert_at = (s.active + 1).min(s.tabs.len());
+            s.tabs.insert(insert_at, tab);
+            s.active = insert_at;
+            sync_size(s);
+            refresh_tab_titles(s);
+            s.renderer.invalidate();
+            s.window.request_redraw();
+        }
+        Err(e) => eprintln!("laplace: failed to spawn duplicate tab: {e}"),
+    }
+}
+
+fn select_tab(s: &mut State, idx: usize) {
+    if idx < s.tabs.len() && idx != s.active {
+        s.active = idx;
+        refresh_tab_titles(s);
+        s.renderer.invalidate();
+        s.window.request_redraw();
+    }
+}
+
+fn close_active_tab(s: &mut State, event_loop: &ActiveEventLoop) {
+    if s.tabs.is_empty() {
+        event_loop.exit();
+        return;
+    }
+    s.tabs.remove(s.active);
+    if s.tabs.is_empty() {
+        event_loop.exit();
+        return;
+    }
+    if s.active >= s.tabs.len() {
+        s.active = s.tabs.len() - 1;
+    }
+    sync_size(s);
+    refresh_tab_titles(s);
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
+fn sync_size(s: &mut State) {
+    let show_tabs = s.tabs.len() > 1;
+    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+    let (cw, ch) = s.renderer.cell_size();
+    for tab in &s.tabs {
+        let changed = {
+            let mut g = tab.grid.lock();
+            if (g.cols, g.rows) == (cols, rows) {
+                false
+            } else {
+                g.resize(cols, rows);
+                true
+            }
+        };
+        if changed {
+            tab.pty.resize(cols as u16, rows as u16, cw, ch);
+        }
+    }
 }
 
 fn zoom(s: &mut State, delta_pt: f32) {
@@ -195,7 +376,13 @@ fn zoom(s: &mut State, delta_pt: f32) {
     s.window.request_redraw();
 }
 
-fn handle_key(s: &mut State, ev: &KeyEvent) {
+fn handle_key(
+    s: &mut State,
+    ev: &KeyEvent,
+    event_loop: &ActiveEventLoop,
+    proxy: &EventLoopProxy<AppEvent>,
+    wakeup_queued: &Arc<AtomicBool>,
+) {
     if ev.state != ElementState::Pressed {
         return;
     }
@@ -203,6 +390,112 @@ fn handle_key(s: &mut State, ev: &KeyEvent) {
     let alt = s.mods.alt_key();
     let shift = s.mods.shift_key();
     let super_key = s.mods.super_key();
+
+    // Duplicate tab in same working directory:
+    // - macOS: Cmd+T
+    // - Linux: Ctrl+T (or Ctrl+Shift+T)
+    if let Key::Character(ch) = &ev.logical_key {
+        #[cfg(target_os = "macos")]
+        let is_new_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("t");
+        #[cfg(not(target_os = "macos"))]
+        let is_new_tab = ctrl && !alt && !super_key && ch.eq_ignore_ascii_case("t");
+        if is_new_tab {
+            duplicate_active_tab(s, proxy, wakeup_queued);
+            return;
+        }
+
+        // Close active tab: Cmd+W on macOS, Ctrl+Shift+W on Linux.
+        #[cfg(target_os = "macos")]
+        let is_close_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("w");
+        #[cfg(not(target_os = "macos"))]
+        let is_close_tab = ctrl && shift && !alt && ch.eq_ignore_ascii_case("w");
+        if is_close_tab {
+            close_active_tab(s, event_loop);
+            return;
+        }
+
+        // Switch tabs on macOS via Cmd+Shift+[ / ] (or Cmd+{ / }).
+        #[cfg(target_os = "macos")]
+        if super_key && !ctrl && !alt && s.tabs.len() > 1 {
+            match ch.as_str() {
+                "{" | "[" if shift => {
+                    let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                    select_tab(s, prev);
+                    return;
+                }
+                "}" | "]" if shift => {
+                    let next = (s.active + 1) % s.tabs.len();
+                    select_tab(s, next);
+                    return;
+                }
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !shift => {
+                    let n = (ch.as_bytes()[0] - b'1') as usize;
+                    let target = if n == 8 && s.tabs.len() > 1 {
+                        s.tabs.len() - 1
+                    } else {
+                        n
+                    };
+                    select_tab(s, target);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Switch tabs on Linux via Alt+1..9.
+        #[cfg(not(target_os = "macos"))]
+        if alt && !ctrl && !shift && !super_key && s.tabs.len() > 1 {
+            if let b'1'..=b'9' = ch.as_bytes()[0] {
+                let n = (ch.as_bytes()[0] - b'1') as usize;
+                let target = if n == 8 && s.tabs.len() > 1 {
+                    s.tabs.len() - 1
+                } else {
+                    n
+                };
+                select_tab(s, target);
+                return;
+            }
+        }
+    }
+
+    // Tab navigation with Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PageUp / Ctrl+PageDown,
+    // and Cmd+Option+Left / Right on macOS.
+    if s.tabs.len() > 1 {
+        match &ev.logical_key {
+            Key::Named(NamedKey::Tab) if ctrl && !alt && !super_key => {
+                let next = if shift {
+                    (s.active + s.tabs.len() - 1) % s.tabs.len()
+                } else {
+                    (s.active + 1) % s.tabs.len()
+                };
+                select_tab(s, next);
+                return;
+            }
+            Key::Named(NamedKey::PageUp) if ctrl && !shift && !alt => {
+                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                select_tab(s, prev);
+                return;
+            }
+            Key::Named(NamedKey::PageDown) if ctrl && !shift && !alt => {
+                let next = (s.active + 1) % s.tabs.len();
+                select_tab(s, next);
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            Key::Named(NamedKey::ArrowLeft) if super_key && alt && !ctrl && !shift => {
+                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                select_tab(s, prev);
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            Key::Named(NamedKey::ArrowRight) if super_key && alt && !ctrl && !shift => {
+                let next = (s.active + 1) % s.tabs.len();
+                select_tab(s, next);
+                return;
+            }
+            _ => {}
+        }
+    }
 
     // Font size shortcuts (Cmd on macOS, Ctrl+Shift on Linux).
     #[cfg(target_os = "macos")]
@@ -225,15 +518,15 @@ fn handle_key(s: &mut State, ev: &KeyEvent) {
 
     // Shift+PageUp / PageDown scrolls the scrollback buffer locally.
     if shift {
-        let rows = s.grid.lock().rows.saturating_sub(1).max(1) as isize;
+        let rows = s.tabs[s.active].grid.lock().rows.saturating_sub(1).max(1) as isize;
         match ev.logical_key {
             Key::Named(NamedKey::PageUp) => {
-                s.grid.lock().scroll_display(rows);
+                s.tabs[s.active].grid.lock().scroll_display(rows);
                 s.window.request_redraw();
                 return;
             }
             Key::Named(NamedKey::PageDown) => {
-                s.grid.lock().scroll_display(-rows);
+                s.tabs[s.active].grid.lock().scroll_display(-rows);
                 s.window.request_redraw();
                 return;
             }
@@ -242,7 +535,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent) {
     }
 
     let app_cursor = {
-        let mut g = s.grid.lock();
+        let mut g = s.tabs[s.active].grid.lock();
         g.reset_display();
         g.app_cursor
     };
@@ -360,7 +653,7 @@ fn handle_key(s: &mut State, ev: &KeyEvent) {
             }
         }
     };
-    s.pty.write(bytes);
+    s.tabs[s.active].pty.write(bytes);
 }
 
 fn push_csi_mod(buf: &mut [u8; 32], p1: u8, m: u8, suffix: u8) -> usize {

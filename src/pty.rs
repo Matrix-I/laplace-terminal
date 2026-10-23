@@ -29,7 +29,7 @@ fn cstr(s: impl Into<Vec<u8>>) -> CString {
 }
 
 impl Pty {
-    pub fn spawn(cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> io::Result<Pty> {
+    pub fn spawn_in(cols: u16, rows: u16, cell_w: u32, cell_h: u32, cwd: Option<&str>) -> io::Result<Pty> {
         let shell = std::env::var("SHELL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -42,10 +42,17 @@ impl Pty {
         let argv0 = cstr(format!("-{shell_name}")); // leading '-' = login shell
         let argv = [argv0.as_ptr(), std::ptr::null()];
 
+        let target_dir = cwd
+            .filter(|d| !d.is_empty() && std::path::Path::new(d).is_dir())
+            .map( String::from )
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+
         let mut env: Vec<CString> = std::env::vars()
             .filter(|(k, _)| {
-                !matches!(k.as_str(), "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION")
-                    && !k.starts_with("GHOSTTY_")
+                !matches!(
+                    k.as_str(),
+                    "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION" | "PWD" | "OLDPWD"
+                ) && !k.starts_with("GHOSTTY_")
                     && !k.starts_with("KITTY_")
                     && !k.starts_with("ITERM_")
                     && !k.starts_with("WEZTERM_")
@@ -55,12 +62,13 @@ impl Pty {
         env.push(cstr("TERM=xterm-256color"));
         env.push(cstr("COLORTERM=truecolor"));
         env.push(cstr("TERM_PROGRAM=laplace"));
+        env.push(cstr(format!("PWD={target_dir}")));
         if std::env::var_os("LANG").is_none() && std::env::var_os("LC_ALL").is_none() {
             env.push(cstr("LANG=en_US.UTF-8"));
         }
         let mut envp: Vec<*const libc::c_char> = env.iter().map(|s| s.as_ptr()).collect();
         envp.push(std::ptr::null());
-        let home = cstr(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+        let start_dir = cstr(target_dir);
 
         let mut ws = winsize(cols, rows, cell_w, cell_h);
         let (mut master, mut slave): (libc::c_int, libc::c_int) = (-1, -1);
@@ -109,7 +117,7 @@ impl Pty {
                 let mut set: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut set);
                 libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-                libc::chdir(home.as_ptr());
+                libc::chdir(start_dir.as_ptr());
                 libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
@@ -119,6 +127,18 @@ impl Pty {
             libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
             Ok(Pty { master, pid })
         }
+    }
+
+    /// Query the current working directory of the foreground process group (or
+    /// the login shell itself) directly from the OS kernel.
+    pub fn cwd(&self) -> Option<String> {
+        let pgrp = unsafe { libc::tcgetpgrp(self.master) };
+        if pgrp > 0 && pgrp != self.pid {
+            if let Some(dir) = pid_cwd(pgrp) {
+                return Some(dir);
+            }
+        }
+        pid_cwd(self.pid)
     }
 
     pub fn resize(&self, cols: u16, rows: u16, cell_w: u32, cell_h: u32) {
@@ -253,5 +273,54 @@ fn write_all(fd: RawFd, mut data: &[u8]) {
             return;
         }
         data = &data[n as usize..];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pid_cwd(pid: libc::pid_t) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    unsafe {
+        let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        let ret = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast::<libc::c_void>(),
+            size,
+        );
+        if ret != size {
+            return None;
+        }
+        let cstr = std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast::<libc::c_char>());
+        let s = cstr.to_str().ok()?.to_string();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pid_cwd(pid: libc::pid_t) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()?
+        .into_os_string()
+        .into_string()
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_process_cwd_resolves() {
+        let pid = unsafe { libc::getpid() };
+        let cwd = pid_cwd(pid).expect("pid_cwd for current process");
+        assert!(std::path::Path::new(&cwd).is_dir());
     }
 }
