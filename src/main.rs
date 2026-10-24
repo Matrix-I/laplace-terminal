@@ -279,16 +279,27 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(tab_pos) = s.tabs.iter().position(|t| t.panes.iter().any(|p| p.id == exited_id)) {
                     let tab = &mut s.tabs[tab_pos];
                     if tab.panes.len() > 1 {
+                        let mut ids = Vec::new();
+                        tab.layout.all_pane_ids(&mut ids);
+                        let cur_idx = ids.iter().position(|&id| id == exited_id);
+                        let prev_in_order = cur_idx.and_then(|idx| {
+                            if idx > 0 {
+                                Some(ids[idx - 1])
+                            } else if ids.len() > 1 {
+                                Some(ids[1])
+                            } else {
+                                None
+                            }
+                        });
+
                         tab.panes.retain(|p| p.id != exited_id);
                         tab.layout.remove_pane(exited_id);
                         if tab.zoomed_pane_id == Some(exited_id) {
                             tab.zoomed_pane_id = None;
                         }
                         if tab.active_pane_id == exited_id {
-                            let mut ids = Vec::new();
-                            tab.layout.all_pane_ids(&mut ids);
-                            if let Some(&id) = ids.first() {
-                                tab.active_pane_id = id;
+                            if let Some(pid) = prev_in_order.filter(|id| tab.panes.iter().any(|p| p.id == *id)) {
+                                tab.active_pane_id = pid;
                             } else if let Some(p) = tab.panes.first() {
                                 tab.active_pane_id = p.id;
                             }
@@ -1254,8 +1265,23 @@ fn close_active_pane_or_tab(s: &mut State, event_loop: &ActiveEventLoop) {
     if tab.panes.len() > 1 {
         let closing_id = tab.active_pane_id;
         let rects = tab.compute_pane_rects(total_cols, total_rows);
-        let neighbor = split::find_directional_neighbor(&rects, closing_id, Direction::Left)
-            .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Up))
+
+        let mut ids = Vec::new();
+        tab.layout.all_pane_ids(&mut ids);
+        let cur_idx = ids.iter().position(|&id| id == closing_id);
+        let prev_in_order = cur_idx.and_then(|idx| {
+            if idx > 0 {
+                Some(ids[idx - 1])
+            } else if ids.len() > 1 {
+                Some(ids[1])
+            } else {
+                None
+            }
+        });
+
+        let neighbor = split::find_directional_neighbor(&rects, closing_id, Direction::Up)
+            .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Left))
+            .or(prev_in_order)
             .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Right))
             .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Down));
 

@@ -166,39 +166,30 @@ impl SplitNode {
 
     /// Remove a pane from the tree. Returns true if removed, and the tree is simplified.
     pub fn remove_pane(&mut self, target_id: u64) -> bool {
-        let (found, replacement) = match self {
-            SplitNode::Leaf(id) => (*id == target_id, None),
+        match self {
+            SplitNode::Leaf(id) => *id == target_id,
             SplitNode::Split { first, second, .. } => {
                 if let SplitNode::Leaf(id) = **first {
                     if id == target_id {
-                        (true, Some(*second.clone()))
-                    } else if second.remove_pane(target_id) {
-                        (true, None)
-                    } else {
-                        (false, None)
+                        *self = *second.clone();
+                        return true;
                     }
-                } else if let SplitNode::Leaf(id) = **second {
-                    if id == target_id {
-                        (true, Some(*first.clone()))
-                    } else if first.remove_pane(target_id) {
-                        (true, None)
-                    } else {
-                        (false, None)
-                    }
-                } else if first.remove_pane(target_id) {
-                    (true, None)
-                } else if second.remove_pane(target_id) {
-                    (true, None)
-                } else {
-                    (false, None)
                 }
+                if let SplitNode::Leaf(id) = **second {
+                    if id == target_id {
+                        *self = *first.clone();
+                        return true;
+                    }
+                }
+                if first.remove_pane(target_id) {
+                    return true;
+                }
+                if second.remove_pane(target_id) {
+                    return true;
+                }
+                false
             }
-        };
-
-        if let Some(rep) = replacement {
-            *self = rep;
         }
-        found
     }
 
     /// Collect all pane IDs in traversal order.
@@ -426,5 +417,25 @@ mod tests {
         let mut ids = Vec::new();
         node.all_pane_ids(&mut ids);
         assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_remove_second_child_of_two_panes() {
+        let mut node = SplitNode::new_leaf(1);
+        node.split_pane(1, 2, SplitDirection::Vertical);
+
+        // Crucial test: closing the second pane (id 2) must leave node as Leaf(1)
+        assert!(node.remove_pane(2));
+        assert_eq!(node, SplitNode::Leaf(1));
+    }
+
+    #[test]
+    fn test_remove_first_child_of_two_panes() {
+        let mut node = SplitNode::new_leaf(1);
+        node.split_pane(1, 2, SplitDirection::Vertical);
+
+        // Closing first pane (id 1) must leave node as Leaf(2)
+        assert!(node.remove_pane(1));
+        assert_eq!(node, SplitNode::Leaf(2));
     }
 }
