@@ -87,7 +87,7 @@ impl Default for HistorySearch {
 
 impl HistorySearch {
     pub fn new() -> Self {
-        let mut search = Self {
+        Self {
             is_open: false,
             query: String::new(),
             selected: 0,
@@ -97,9 +97,7 @@ impl HistorySearch {
             session_commands: Vec::new(),
             filtered: Vec::new(),
             file_mtimes: Vec::new(),
-        };
-        search.reload();
-        search
+        }
     }
 
     /// Open or reopen the history search popup.

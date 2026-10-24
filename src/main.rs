@@ -139,6 +139,7 @@ struct State {
     cursor_blink_epoch: std::time::Instant,
     focused: bool,
     history_search: HistorySearch,
+    first_frame: bool,
 }
 
 struct App {
@@ -190,8 +191,6 @@ impl ApplicationHandler<AppEvent> for App {
             cfg.cursor_style.shader_id(),
         );
 
-        #[cfg(target_os = "macos")]
-        macos::apply_macos_window_config(&window, &cfg);
 
         if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
             let (cw, ch) = renderer.cell_size();
@@ -249,6 +248,7 @@ impl ApplicationHandler<AppEvent> for App {
             cursor_blink_epoch: std::time::Instant::now(),
             focused: true,
             history_search: HistorySearch::new(),
+            first_frame: true,
         });
 
         #[cfg(target_os = "macos")]
@@ -935,6 +935,17 @@ fn render_active(s: &mut State) {
         blink_on,
         Some(&s.history_search),
     );
+
+    if s.first_frame {
+        s.first_frame = false;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            extern "C" {
+                fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+            }
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
 }
 
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {

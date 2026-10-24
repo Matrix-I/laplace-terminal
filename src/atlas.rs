@@ -1350,9 +1350,6 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         .map(String::from),
     );
 
-    let (discovered_mono_nerd, discovered_symbols) = discover_nerd_fonts();
-    primary_candidates.extend(discovered_mono_nerd.clone());
-
     #[cfg(not(target_os = "macos"))]
     primary_candidates.extend(
         [
@@ -1383,20 +1380,54 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
             }
         }
     }
+    // Only if none of the standard system/configured fonts were found, fall back to scanning for Nerd Fonts.
+    if primary.is_none() {
+        let (discovered_mono_nerd, _) = discover_nerd_fonts();
+        for path in &discovered_mono_nerd {
+            if let Some(f) = try_parse_font(path) {
+                primary_path = Some(path.clone());
+                primary = Some(f);
+                break;
+            }
+        }
+    }
     let primary = primary.expect("laplace: no usable monospace font found; set font-family in the config");
 
     let mut fallbacks: Vec<fontdue::Font> = configured.map(|(_, f)| f).collect();
-    for path in &discovered_symbols {
-        if primary_path.as_deref() == Some(path) {
-            continue;
-        }
-        if let Some(f) = try_parse_font(path) {
-            fallbacks.push(f);
-            break;
-        }
+    if let Some(f) = find_first_symbol_font(primary_path.as_deref()) {
+        fallbacks.push(f);
     }
 
     Arc::new(FontSet { primary, fallbacks })
+}
+
+fn find_first_symbol_font(exclude_path: Option<&str>) -> Option<fontdue::Font> {
+    let mut candidates = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/Library/Fonts/SymbolsNerdFont-Regular.ttf"));
+        candidates.push(format!("{home}/Library/Fonts/SymbolsNerdFontMono-Regular.ttf"));
+        candidates.push(format!("{home}/.local/share/fonts/SymbolsNerdFont-Regular.ttf"));
+        candidates.push(format!("{home}/.fonts/SymbolsNerdFont-Regular.ttf"));
+    }
+    candidates.extend(
+        [
+            "/Library/Fonts/SymbolsNerdFont-Regular.ttf",
+            "/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/opt/homebrew/share/fonts/SymbolsNerdFont-Regular.ttf",
+            "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFont-Regular.ttf",
+            "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
+        ]
+        .map(String::from),
+    );
+    for path in &candidates {
+        if exclude_path == Some(path.as_str()) {
+            continue;
+        }
+        if let Some(f) = try_parse_font(path) {
+            return Some(f);
+        }
+    }
+    None
 }
 
 fn try_parse_font(path: &str) -> Option<fontdue::Font> {

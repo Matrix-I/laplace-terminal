@@ -182,7 +182,10 @@ impl Grid {
     pub fn new(cols: usize, rows: usize) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        let cap = SCROLLBACK + rows;
+        let max_cap = SCROLLBACK + rows;
+        // Start lean: allocate only 2x rows (minimum 64) instead of the full 5000+ scrollback ring.
+        // The ring buffer doubles dynamically on demand up to max_cap when lines scroll off screen.
+        let cap = (rows * 2).max(64).min(max_cap);
         Grid {
             cols,
             rows,
@@ -680,6 +683,25 @@ impl Grid {
         self.mark(dst);
     }
 
+    fn grow_capacity(&mut self) {
+        let max_cap = SCROLLBACK + self.rows;
+        if self.cap >= max_cap {
+            return;
+        }
+        let new_cap = (self.cap * 2).min(max_cap);
+        let mut new_cells = bytemuck::zeroed_vec::<Cell>(self.cols * new_cap);
+        let n_lines = self.history + self.rows;
+        let w = self.cols;
+        for i in 0..n_lines {
+            let op = (self.top + self.cap - self.history + i) % self.cap;
+            let src = op * self.cols;
+            new_cells[i * self.cols..i * self.cols + w].copy_from_slice(&self.cells[src..src + w]);
+        }
+        self.cells = new_cells;
+        self.cap = new_cap;
+        self.top = self.history;
+    }
+
     /// Scroll rows `t..=b` up by `n`. When the region is the whole main screen
     /// and `to_history` is set, this is an O(1) ring rotation into scrollback.
     fn scroll_up_in(&mut self, t: usize, b: usize, n: usize, to_history: bool) {
@@ -692,6 +714,9 @@ impl Grid {
         }
         if to_history && !self.alt_active && t == 0 && b == self.rows - 1 {
             for _ in 0..n {
+                if self.history + self.rows >= self.cap && self.cap < SCROLLBACK + self.rows {
+                    self.grow_capacity();
+                }
                 self.top = (self.top + 1) % self.cap;
                 if self.history < self.cap - self.rows {
                     self.history += 1;
@@ -817,7 +842,9 @@ impl Grid {
         if cols == self.cols && rows == self.rows {
             return;
         }
-        let new_cap = SCROLLBACK + rows;
+        let max_cap = SCROLLBACK + rows;
+        let needed = (self.history + self.rows + 1).max(rows * 2).max(64);
+        let new_cap = needed.min(max_cap);
         let mut cells = bytemuck::zeroed_vec::<Cell>(cols * new_cap);
 
         // Logical line 0 = oldest history line; the screen starts at `history`.
@@ -1457,5 +1484,27 @@ mod tests {
         assert!(path2.is_path);
 
         assert!(g.find_hyperlink_at(0, 2, None).is_none());
+    }
+
+    #[test]
+    fn dynamic_ring_buffer_growth_and_scrolling() {
+        let mut g = Grid::new(20, 4);
+        assert!(g.cap <= 64, "initial cap should be lean, was {}", g.cap);
+
+        for i in 0..150 {
+            feed(&mut g, &format!("line {:03}\r\n", i));
+        }
+        assert_eq!(g.history, 147);
+        assert!(g.cap >= g.history + g.rows);
+
+        // Scroll back to line 0 and verify contents
+        g.scroll_display(g.history as isize);
+        assert_eq!(line(&g, 0), "line 000");
+
+        // Reset, resize, and scroll back to line 0 again
+        g.reset_display();
+        g.resize(30, 8);
+        g.scroll_display(g.history as isize);
+        assert_eq!(line(&g, 0), "line 000");
     }
 }
