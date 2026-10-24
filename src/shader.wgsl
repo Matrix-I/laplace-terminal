@@ -70,17 +70,7 @@ fn vs_main(
     let is_preview = (bg & 4u) != 0u;
 
     var px: vec2<f32>;
-    if (is_preview) {
-        // Always render preview pill anchored at the bottom-left corner
-        var x = (f32(col) + corner.x) * u.cell.x + u.offset.x;
-        if (col == 0u && corner.x == 0.0) {
-            x = 0.0;
-        }
-        px = vec2<f32>(
-            x,
-            u.screen.y - (1.0 - corner.y) * u.cell.y,
-        );
-    } else if (is_tab_row) {
+    if (is_tab_row) {
         var x = (f32(col) + corner.x) * u.cell.x + u.offset.x;
         if (col == 0u && corner.x == 0.0) {
             x = 0.0;
@@ -288,7 +278,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
     var out_alpha = 1.0;
     let def_bg = unpack(u.default_bg);
-    if (!on_divider && (v.flags & 2u) == 0u && (v.flags & 4u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
+    if (!on_divider && (v.flags & 2u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
         out_alpha = mix(u.bg_opacity, 1.0, a);
     }
 

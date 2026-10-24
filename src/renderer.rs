@@ -533,16 +533,17 @@ impl Renderer {
         self.last_cursor = active_cur;
 
         if let Some(link) = hovered_link {
-            let max_chars = cols.saturating_sub(4).min(120);
-            let raw_url = if link.url.chars().count() > max_chars {
+            let max_chars = cols.saturating_sub(2).min(120);
+            let display_url = if link.url.chars().count() > max_chars {
                 format!("{}...", link.url.chars().take(max_chars.saturating_sub(3)).collect::<String>())
             } else {
                 link.url.clone()
             };
-            let display_url = format!(" {} ", raw_url);
             let preview_row = total_rows - 1;
             let row_start = preview_row * cols;
-            const PREVIEW_BG: u32 = 0x1617_1E80 | 4;
+            // Naturally blend with terminal background without any background box or borders:
+            // bit 2 is set so is_preview=true (suppresses cursor), while bit 7 is 0 so background matches default_bg.
+            const PREVIEW_BG: u32 = 4;
             const PREVIEW_FG: u32 = 0xF2F2_F7FF;
             for (col, ch) in display_url.chars().enumerate() {
                 if col < cols {
@@ -553,6 +554,14 @@ impl Renderer {
                         bg: PREVIEW_BG,
                     };
                 }
+            }
+            let end_col = display_url.chars().count();
+            for col in end_col..cols {
+                self.instances[row_start + col] = Instance {
+                    glyph: 0,
+                    fg: PREVIEW_FG,
+                    bg: PREVIEW_BG,
+                };
             }
             lo = lo.min(preview_row);
             hi = hi.max(preview_row);
