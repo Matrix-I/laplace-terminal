@@ -26,6 +26,7 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **Copy Selection** | `Cmd + C` | `Ctrl + Shift + C` *(or `Super + C`)* | Bare `Ctrl+C` sends SIGINT (`\x03`). |
 | **Paste Clipboard** | `Cmd + V` | `Ctrl + Shift + V` *(or `Super + V`)* | Bare `Ctrl+V` sends verbatim escape (`\x16`). |
 | **Quit Application** | `Cmd + Q` | `Ctrl + Shift + Q` *(or `Super + Q`)* | Bare `Ctrl+Q` is XON resume flow control. |
+| **Minimize Window** | `Cmd + M` | `Ctrl + Shift + M` *(or `Super + M`)* | Bare `Ctrl+M` is carriage return (`\r`) in terminal. |
 | **Open Config** | `Cmd + ,` | `Ctrl + ,` *(or `Super + ,`)* | Opens `~/.laplace/config` in `$EDITOR`. |
 | **Reload Config** | `Cmd + Shift + ,` (or `Cmd + <`) | `Ctrl + Shift + ,` (or `Ctrl + <`) | Reloads config on the fly. |
 | **Select Tab 1..9** | `Cmd + 1..9` | `Ctrl + 1..9` *(matches `^1..^9` badge)*, `Alt + 1..9`, `Super + 1..9` | Tab 9 jumps to last tab if $\ge 9$ tabs. |

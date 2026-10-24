@@ -944,6 +944,17 @@ fn handle_key(
             return;
         }
 
+        // Minimize window: Cmd+M on macOS, Ctrl+Shift+M (or Super+M) on Linux.
+        #[cfg(target_os = "macos")]
+        let is_minimize = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("m");
+        #[cfg(not(target_os = "macos"))]
+        let is_minimize = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt))
+            && ch.eq_ignore_ascii_case("m");
+        if is_minimize {
+            s.window.set_minimized(true);
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         let is_config = super_key && !ctrl && !alt && (ch == "," || (shift && ch == "<"));
         #[cfg(not(target_os = "macos"))]

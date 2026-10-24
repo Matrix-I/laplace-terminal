@@ -419,13 +419,18 @@ extern "C" {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn apply_macos_window_config(_window: &winit::window::Window, _cfg: &crate::config::Config) {}
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn register_reopen_handler(_proxy: winit::event_loop::EventLoopProxy<crate::AppEvent>) {}
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn activate_app() {}
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn set_window_represented_filename(_window: &winit::window::Window, _path: &str) {}
+
