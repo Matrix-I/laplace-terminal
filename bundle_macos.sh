@@ -32,6 +32,7 @@ cp "resources/Laplace.icns" "$RESOURCES/Laplace.icns"
 
 # Sign ad-hoc so macOS Gatekeeper allows immediate execution without quarantine warnings
 codesign --force --deep --sign - "$APP_DIR"
+touch "$APP_DIR"
 
 echo "==> $APP_NAME created at $APP_DIR"
 
@@ -40,6 +41,7 @@ if [ -d "$HOME/Applications" ]; then
     rm -rf "$HOME/Applications/$APP_NAME" 2>/dev/null || true
     cp -R "$APP_DIR" "$HOME/Applications/" 2>/dev/null || true
     codesign --force --deep --sign - "$HOME/Applications/$APP_NAME" 2>/dev/null || true
+    touch "$HOME/Applications/$APP_NAME" 2>/dev/null || true
 fi
 
 # Also package a convenient drag-and-drop DMG for distribution

@@ -71,9 +71,13 @@ fn vs_main(
 
     var px: vec2<f32>;
     if (is_preview) {
-        // Always render preview pill at the very last visible row (absolute bottom edge)
+        // Always render preview pill anchored at the bottom-left corner
+        var x = (f32(col) + corner.x) * u.cell.x + u.offset.x;
+        if (col == 0u && corner.x == 0.0) {
+            x = 0.0;
+        }
         px = vec2<f32>(
-            (f32(col) + corner.x) * u.cell.x + u.offset.x,
+            x,
             u.screen.y - (1.0 - corner.y) * u.cell.y,
         );
     } else if (is_tab_row) {
@@ -259,17 +263,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    if ((v.flags & 4u) != 0u) {
-        // Ghostty bottom-left floating preview badge styling:
-        // Top border 1px
-        if (v.local.y * u.cell.y <= 1.0) {
-            cell_color = vec3<f32>(0.32, 0.35, 0.46); // Crisp top border #525975
-        }
-        // Right border 1px on trailing edge
-        if ((v.flags & 8u) != 0u && v.local.x * u.cell.x >= u.cell.x - 1.0) {
-            cell_color = vec3<f32>(0.32, 0.35, 0.46); // Crisp right border #525975
-        }
-    }
 
     var on_divider = false;
     let is_div_r = (v.flags & 16u) != 0u;

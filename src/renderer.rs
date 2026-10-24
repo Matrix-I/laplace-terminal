@@ -533,12 +533,13 @@ impl Renderer {
         self.last_cursor = active_cur;
 
         if let Some(link) = hovered_link {
-            let max_chars = cols.saturating_sub(2).min(120);
-            let display_url = if link.url.chars().count() > max_chars {
-                format!("{}...", link.url.chars().take(max_chars - 3).collect::<String>())
+            let max_chars = cols.saturating_sub(4).min(120);
+            let raw_url = if link.url.chars().count() > max_chars {
+                format!("{}...", link.url.chars().take(max_chars.saturating_sub(3)).collect::<String>())
             } else {
                 link.url.clone()
             };
+            let display_url = format!(" {} ", raw_url);
             let preview_row = total_rows - 1;
             let row_start = preview_row * cols;
             const PREVIEW_BG: u32 = 0x1617_1E80 | 4;
@@ -552,16 +553,6 @@ impl Renderer {
                         bg: PREVIEW_BG,
                     };
                 }
-            }
-            let end_col = display_url.chars().count();
-            if end_col < cols {
-                self.instances[row_start + end_col] = Instance {
-                    glyph: 0,
-                    fg: PREVIEW_FG,
-                    bg: PREVIEW_BG | 8,
-                };
-            } else if cols > 0 {
-                self.instances[row_start + cols - 1].bg |= 8;
             }
             lo = lo.min(preview_row);
             hi = hi.max(preview_row);
