@@ -82,36 +82,72 @@ pub fn apply_macos_window_config(window: &Window, cfg: &Config) {
             }
         }
 
-        // 2. Opacity and background color
-        if cfg.background_opacity < 1.0 {
-            let set_opaque_sel = sel_registerName(b"setOpaque:\0".as_ptr());
-            let f: extern "C" fn(*mut c_void, *mut c_void, bool) =
-                std::mem::transmute(objc_msgSend as *const ());
-            f(ns_window, set_opaque_sel, false);
+        // 2. Seamless titlebar (Ghostty-style: transparent titlebar, no separator line, matching background)
+        let set_transparent_sel = sel_registerName(b"setTitlebarAppearsTransparent:\0".as_ptr());
+        let f_trans: extern "C" fn(*mut c_void, *mut c_void, bool) =
+            std::mem::transmute(objc_msgSend as *const ());
+        f_trans(ns_window, set_transparent_sel, true);
 
-            let nscolor_cls = objc_getClass(b"NSColor\0".as_ptr());
-            let clear_col = msg_send_ptr(nscolor_cls, "clearColor\0");
-            if !clear_col.is_null() {
-                let set_bg_sel = sel_registerName(b"setBackgroundColor:\0".as_ptr());
-                let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
-                    std::mem::transmute(objc_msgSend as *const ());
-                f(ns_window, set_bg_sel, clear_col);
-            }
-        } else {
-            let set_opaque_sel = sel_registerName(b"setOpaque:\0".as_ptr());
-            let f: extern "C" fn(*mut c_void, *mut c_void, bool) =
+        // Remove titlebar separator line (NSTitlebarSeparatorStyleNone = 1)
+        let sep_sel = sel_registerName(b"setTitlebarSeparatorStyle:\0".as_ptr());
+        let responds_sel = sel_registerName(b"respondsToSelector:\0".as_ptr());
+        let responds_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> bool =
+            std::mem::transmute(objc_msgSend as *const ());
+        if responds_fn(ns_window, responds_sel, sep_sel) {
+            let f_sep: extern "C" fn(*mut c_void, *mut c_void, i64) =
                 std::mem::transmute(objc_msgSend as *const ());
-            f(ns_window, set_opaque_sel, true);
+            f_sep(ns_window, sep_sel, 1);
+        }
 
-            let nscolor_cls = objc_getClass(b"NSColor\0".as_ptr());
-            let black_col = msg_send_ptr(nscolor_cls, "blackColor\0");
-            if !black_col.is_null() {
-                let set_bg_sel = sel_registerName(b"setBackgroundColor:\0".as_ptr());
-                let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        // Set dark/light appearance so title text and window controls contrast cleanly
+        let r = ((cfg.background >> 24) & 0xFF) as f64 / 255.0;
+        let g = ((cfg.background >> 16) & 0xFF) as f64 / 255.0;
+        let b = ((cfg.background >> 8) & 0xFF) as f64 / 255.0;
+        let a = cfg.background_opacity as f64;
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+
+        let appearance_cls = objc_getClass(b"NSAppearance\0".as_ptr());
+        if !appearance_cls.is_null() {
+            let app_name = if luminance > 0.5 {
+                "NSAppearanceNameAqua"
+            } else {
+                "NSAppearanceNameDarkAqua"
+            };
+            let app_str = ns_string(app_name);
+            if !app_str.is_null() {
+                let app_named_sel = sel_registerName(b"appearanceNamed:\0".as_ptr());
+                let app_named_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
                     std::mem::transmute(objc_msgSend as *const ());
-                f(ns_window, set_bg_sel, black_col);
+                let appearance = app_named_fn(appearance_cls, app_named_sel, app_str);
+                if !appearance.is_null() {
+                    let set_app_sel = sel_registerName(b"setAppearance:\0".as_ptr());
+                    let set_app_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+                        std::mem::transmute(objc_msgSend as *const ());
+                    set_app_fn(ns_window, set_app_sel, appearance);
+                }
             }
         }
+
+        // Set window background color exactly matching terminal background
+        let nscolor_cls = objc_getClass(b"NSColor\0".as_ptr());
+        if !nscolor_cls.is_null() {
+            let color_sel = sel_registerName(b"colorWithSRGBRed:green:blue:alpha:\0".as_ptr());
+            let color_fn: extern "C" fn(*mut c_void, *mut c_void, f64, f64, f64, f64) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            let bg_color = color_fn(nscolor_cls, color_sel, r, g, b, a);
+            if !bg_color.is_null() {
+                let set_bg_sel = sel_registerName(b"setBackgroundColor:\0".as_ptr());
+                let set_bg_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                set_bg_fn(ns_window, set_bg_sel, bg_color);
+            }
+        }
+
+        let is_opaque = cfg.background_opacity >= 1.0;
+        let set_opaque_sel = sel_registerName(b"setOpaque:\0".as_ptr());
+        let f_op: extern "C" fn(*mut c_void, *mut c_void, bool) =
+            std::mem::transmute(objc_msgSend as *const ());
+        f_op(ns_window, set_opaque_sel, is_opaque);
 
         // 3. Background blur (NSVisualEffectView behind window content)
         if cfg.background_blur > 0 && cfg.background_opacity < 1.0 {
@@ -327,6 +363,48 @@ pub fn activate_app() {
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn ns_string(s: &str) -> *mut c_void {
+    let str_cls = objc_getClass(b"NSString\0".as_ptr());
+    if str_cls.is_null() {
+        return std::ptr::null_mut();
+    }
+    let sel = sel_registerName(b"stringWithUTF8String:\0".as_ptr());
+    let mut null_terminated = Vec::with_capacity(s.len() + 1);
+    null_terminated.extend_from_slice(s.as_bytes());
+    if !s.ends_with('\0') {
+        null_terminated.push(0);
+    }
+    let f: extern "C" fn(*mut c_void, *mut c_void, *const u8) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(str_cls, sel, null_terminated.as_ptr())
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_window_represented_filename(window: &Window, path: &str) {
+    let Ok(handle) = window.window_handle() else { return };
+    let winit::raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr() as *mut c_void;
+    if ns_view.is_null() {
+        return;
+    }
+    unsafe {
+        let ns_window = msg_send_ptr(ns_view, "window\0");
+        if ns_window.is_null() {
+            return;
+        }
+        let sel = sel_registerName(b"setRepresentedFilename:\0".as_ptr());
+        let str_obj = ns_string(path);
+        if !str_obj.is_null() {
+            let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+                std::mem::transmute(objc_msgSend as *const ());
+            f(ns_window, sel, str_obj);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[link(name = "objc", kind = "dylib")]
 extern "C" {
     fn objc_getClass(name: *const u8) -> *mut c_void;
@@ -348,3 +426,6 @@ pub fn register_reopen_handler(_proxy: winit::event_loop::EventLoopProxy<crate::
 
 #[cfg(not(target_os = "macos"))]
 pub fn activate_app() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_window_represented_filename(_window: &winit::window::Window, _path: &str) {}

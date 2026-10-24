@@ -552,6 +552,12 @@ fn refresh_tab_titles(s: &mut State) {
         }
         if let Some(active_title) = s.tab_titles.get(s.active) {
             s.window.set_title(active_title);
+            #[cfg(target_os = "macos")]
+            if let Some(tab) = s.tabs.get(s.active) {
+                if let Some(cwd) = tab.pty.cwd() {
+                    macos::set_window_represented_filename(&s.window, &cwd);
+                }
+            }
         }
     }
 }
