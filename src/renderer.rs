@@ -33,13 +33,10 @@ struct Uniforms {
     cursor_visible: u32,
     default_fg: u32,
     default_bg: u32,
-    tab_info: u32,
-    url_len: u32,
-    _pad_url: [u32; 3],
-    url_slots: [[u32; 4]; 32],
+    _pad: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 592);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 64);
 const _: () = assert!(std::mem::size_of::<Instance>() == 12);
 
 pub struct Renderer {
@@ -359,7 +356,7 @@ impl Renderer {
             }
         };
 
-        let (cols, total_rows, lo, hi, cursor) = {
+        let (cols, total_rows, mut lo, mut hi, cursor) = {
             let mut g = grid.lock();
             let (cols, rows) = (g.cols, g.rows);
             let total_rows = rows + top_rows;
@@ -409,6 +406,40 @@ impl Renderer {
             (cols, total_rows, lo, hi, cur.map(|(cx, cy)| (cx, cy + top_rows)))
         };
 
+        if let Some(link) = hovered_link {
+            let max_chars = cols.saturating_sub(2).min(120);
+            let display_url = if link.url.chars().count() > max_chars {
+                format!("{}...", link.url.chars().take(max_chars - 3).collect::<String>())
+            } else {
+                link.url.clone()
+            };
+            let preview_row = total_rows - 1;
+            let row_start = preview_row * cols;
+            // Ghostty bottom-left URL preview pill: dark slate background #16171e (rgb<<8 | 0x80), white text #f2f2f7, flag 4 = top border
+            const PREVIEW_BG: u32 = 0x1617_1E80 | 4;
+            const PREVIEW_FG: u32 = 0xF2F2_F7FF;
+            for (col, ch) in display_url.chars().enumerate() {
+                if col < cols {
+                    let slot = self.atlas.slot(&self.queue, ch as u32);
+                    self.instances[row_start + col] = Instance {
+                        glyph: slot as u32,
+                        fg: PREVIEW_FG,
+                        bg: PREVIEW_BG,
+                    };
+                }
+            }
+            let end_col = display_url.chars().count();
+            if end_col < cols {
+                self.instances[row_start + end_col] = Instance {
+                    glyph: 0,
+                    fg: PREVIEW_FG,
+                    bg: PREVIEW_BG,
+                };
+            }
+            lo = lo.min(preview_row);
+            hi = hi.max(preview_row);
+        }
+
         if lo <= hi {
             let a = lo * cols;
             let b = (hi + 1) * cols;
@@ -424,22 +455,6 @@ impl Renderer {
             None => 0,
         };
 
-        let mut url_slots = [[0u32; 4]; 32];
-        let mut url_len = 0u32;
-        if let Some(link) = hovered_link {
-            let max_chars = 120;
-            let display_url = if link.url.chars().count() > max_chars {
-                format!("{}...", link.url.chars().take(max_chars - 3).collect::<String>())
-            } else {
-                link.url.clone()
-            };
-            for (i, ch) in display_url.chars().take(128).enumerate() {
-                let slot = self.atlas.slot(&self.queue, ch as u32);
-                url_slots[i / 4][i % 4] = slot as u32;
-                url_len += 1;
-            }
-        }
-
         let u = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
             cell: [self.atlas.cell_w as f32, self.atlas.cell_h as f32],
@@ -451,10 +466,7 @@ impl Renderer {
             cursor_visible: cursor.is_some() as u32,
             default_fg: DEFAULT_FG,
             default_bg: DEFAULT_BG,
-            tab_info,
-            url_len,
-            _pad_url: [0; 3],
-            url_slots,
+            _pad: tab_info,
         };
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
