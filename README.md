@@ -16,10 +16,10 @@
 - **Native GPU Rendering:** Powered by `wgpu` targeting native **Metal** on macOS and **Vulkan** on Linux. Renders the entire terminal grid in a **single instanced draw call** using a custom WGSL shader.
 - **Zero-Allocation Ring Buffer:** Character cells are packed into just **12 bytes** (`codepoint`, packed `fg`, packed `bg`). Scrolling and heavy logging stream directly through an in-place circular ring buffer without runtime heap thrashing.
 - **True 0.0% Idle CPU:** Pure event-driven execution using `ControlFlow::Wait`. Laplace sleeps completely when inactive, never running unnecessary polling loops.
-- **Ghostty-Compatible Configuration:** Reads `~/.laplace/config` and automatically falls back to `~/.config/ghostty/config`. Supports live config reloading (`Cmd+,` / `Cmd+Shift+,`) and auto-reloads on window focus.
-- **Native macOS Lifecycle:** Closing the last tab or window keeps Laplace running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Laplace` immediately restores a fresh tab. Press `Cmd+Q` to quit.
-- **Tabs with CWD Inheritance:** Seamless multi-tab experience (`Cmd+T`, `Cmd+N`, `Cmd+W`, `Cmd+Shift+[` / `]`). New tabs automatically open in the current working directory of the active tab.
-- **Smart Hyperlink & Path Detection:** `Cmd+Click` on URLs or local filesystem paths (`~/...`, `./...`, or absolute paths) to open them directly in your default browser or editor.
+- **Ghostty-Compatible Configuration:** Reads `~/.laplace/config` and automatically falls back to `~/.config/ghostty/config`. Supports live config reloading (`Cmd+,` / `Ctrl+,` and `Cmd+Shift+,` / `Ctrl+Shift+,`) and auto-reloads on window focus.
+- **Native macOS Lifecycle:** Closing the last tab or window keeps Laplace running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Laplace` immediately restores a fresh tab. Press `Cmd+Q` (or `Ctrl+Shift+Q` on Linux) to quit.
+- **Tabs with CWD Inheritance:** Seamless multi-tab experience (`Cmd+T`/`Ctrl+Shift+T`, `Cmd+W`/`Ctrl+Shift+W`, tab cycling, 1..9 direct jumps). New tabs automatically open in the current working directory of the active tab.
+- **Smart Hyperlink & Path Detection:** `Cmd+Click` (macOS) / `Ctrl+Click` (Linux) on URLs or local filesystem paths (`~/...`, `./...`, or absolute paths) to open them directly in your default browser or editor.
 - **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and built-in palettes.
 
 ---
@@ -69,38 +69,27 @@ Laplace decouples I/O throughput from rendering to guarantee smooth UI interacti
 
 ## ⌨️ Default Shortcuts
 
-### macOS
+Laplace provides complete shortcut parity across macOS and Linux, adhering strictly to terminal conventions on each platform:
 
-| Shortcut | Action |
-| :--- | :--- |
-| <kbd>Cmd</kbd> + <kbd>T</kbd> / <kbd>Cmd</kbd> + <kbd>N</kbd> | New tab (inherits active CWD) |
-| <kbd>Cmd</kbd> + <kbd>W</kbd> | Close active tab (keeps app in Dock if last tab) |
-| <kbd>Cmd</kbd> + <kbd>Q</kbd> | Quit Laplace |
-| <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> | Previous tab |
-| <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>]</kbd> | Next tab |
-| <kbd>Cmd</kbd> + <kbd>1</kbd> .. <kbd>9</kbd> | Jump to tab 1 through 9 (9 = last tab) |
-| <kbd>Cmd</kbd> + <kbd>C</kbd> | Copy selected text to clipboard |
-| <kbd>Cmd</kbd> + <kbd>V</kbd> | Paste from clipboard (bracketed paste aware) |
-| <kbd>Cmd</kbd> + <kbd>+</kbd> / <kbd>=</kbd> | Increase font size |
-| <kbd>Cmd</kbd> + <kbd>-</kbd> | Decrease font size |
-| <kbd>Cmd</kbd> + <kbd>0</kbd> | Reset font size |
-| <kbd>Cmd</kbd> + <kbd>,</kbd> | Open configuration file in default editor |
-| <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Reload configuration file |
-| <kbd>Cmd</kbd> + <kbd>Click</kbd> | Open clicked hyperlink or file path |
-| <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | Scroll scrollback buffer locally |
-
-### Linux
-
-| Shortcut | Action |
-| :--- | :--- |
-| <kbd>Ctrl</kbd> + <kbd>T</kbd> / <kbd>Ctrl</kbd> + <kbd>N</kbd> | New tab |
-| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd> | Close tab |
-| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> | Quit application |
-| <kbd>Ctrl</kbd> + <kbd>Tab</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Tab</kbd> | Switch next / previous tab |
-| <kbd>Alt</kbd> + <kbd>1</kbd> .. <kbd>9</kbd> | Switch to tab 1..9 |
-| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> | Copy |
-| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>V</kbd> | Paste |
-| <kbd>Ctrl</kbd> + <kbd>,</kbd> | Open config |
+| Action | macOS (`Cmd`) | Linux (`Ctrl` / `Super`) | Notes |
+| :--- | :--- | :--- | :--- |
+| **New tab** *(inherits active CWD)* | <kbd>Cmd</kbd> + <kbd>T</kbd> / <kbd>Cmd</kbd> + <kbd>N</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> / <kbd>N</kbd> *(or <kbd>Super</kbd> + <kbd>T/N</kbd>)* | Preserves bare `Ctrl+T` (transpose/fzf) and `Ctrl+N` (history) |
+| **Close active tab** | <kbd>Cmd</kbd> + <kbd>W</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd> *(or <kbd>Super</kbd> + <kbd>W</kbd>)* | Preserves bare `Ctrl+W` (backward-kill-word) |
+| **Quit Laplace** | <kbd>Cmd</kbd> + <kbd>Q</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> *(or <kbd>Super</kbd> + <kbd>Q</kbd>)* | Preserves bare `Ctrl+Q` (XON flow control) |
+| **Cycle tabs (Prev / Next)** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd> | Circular tab switching |
+| **Cycle tabs (Next / Prev)** | <kbd>Ctrl</kbd> + <kbd>Tab</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Tab</kbd> | <kbd>Ctrl</kbd> + <kbd>Tab</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Tab</kbd> | Cross-platform standard |
+| **Navigate tabs (Left / Right)** | <kbd>Cmd</kbd> + <kbd>Option</kbd> + <kbd>←</kbd> / <kbd>→</kbd> | <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>←</kbd> / <kbd>→</kbd> *(or <kbd>Super</kbd> + <kbd>Alt</kbd>)* | Direct spatial switching |
+| **Jump to tab 1..9** | <kbd>Cmd</kbd> + <kbd>1</kbd> .. <kbd>9</kbd> | <kbd>Ctrl</kbd> + <kbd>1</kbd> .. <kbd>9</kbd>, <kbd>Alt</kbd> + <kbd>1</kbd> .. <kbd>9</kbd> | Matches `^1`..`^9` badges; `9` jumps to last tab |
+| **Copy selection** | <kbd>Cmd</kbd> + <kbd>C</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> *(or <kbd>Super</kbd> + <kbd>C</kbd>)* | Preserves `Ctrl+C` (SIGINT) |
+| **Paste clipboard** | <kbd>Cmd</kbd> + <kbd>V</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>V</kbd> *(or <kbd>Super</kbd> + <kbd>V</kbd>)* | Bracketed paste aware; preserves `Ctrl+V` (literal escape) |
+| **Zoom in (+1.0 pt)** | <kbd>Cmd</kbd> + <kbd>+</kbd> / <kbd>=</kbd> | <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>=</kbd> *(with/without Shift, or Super)* | Font size clamps between 6.0 – 72.0 pt |
+| **Zoom out (-1.0 pt)** | <kbd>Cmd</kbd> + <kbd>-</kbd> | <kbd>Ctrl</kbd> + <kbd>-</kbd> / <kbd>_</kbd> *(with/without Shift, or Super)* | Font size clamps between 6.0 – 72.0 pt |
+| **Reset zoom** | <kbd>Cmd</kbd> + <kbd>0</kbd> | <kbd>Ctrl</kbd> + <kbd>0</kbd> *(with/without Shift, or Super)* | Resets to configured default font size |
+| **Open config editor** | <kbd>Cmd</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>,</kbd> *(or <kbd>Super</kbd> + <kbd>,</kbd>)* | Opens `~/.laplace/config` in `$EDITOR` |
+| **Reload config file** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Live reload without losing shell session |
+| **Open URL or path** | <kbd>Cmd</kbd> + <kbd>Click</kbd> | <kbd>Ctrl</kbd> + <kbd>Click</kbd> *(or <kbd>Super</kbd> + <kbd>Click</kbd>)* | Opens in default browser / editor via `open` or `xdg-open` |
+| **Hover URL preview** | <kbd>Cmd</kbd> + <kbd>Mouse Move</kbd> | <kbd>Ctrl</kbd> + <kbd>Mouse Move</kbd> *(or <kbd>Super</kbd>)* | Underlines URL and displays preview pill |
+| **Scroll history locally** | <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | Scrolls active tab's scrollback buffer |
 
 ---
 
