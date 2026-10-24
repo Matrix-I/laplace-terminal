@@ -44,8 +44,8 @@ pub fn find_family(family: &str) -> Option<FaceRef> {
     // 3. Known aliases on macOS:
     #[cfg(target_os = "macos")]
     {
-        if want == "sfmono" || want.starts_with("sfmono") || want == "sfnsmono" {
-            for alias in ["sfmono", "sfnsmono"] {
+        if want == "sfmono" || want.starts_with("sfmono") || want == "sfnsmono" || want.starts_with("ligasfmono") {
+            for alias in ["ligasfmono", "sfmono", "sfnsmono"] {
                 if let Some(face) = search_files(&files, alias) {
                     return Some(face);
                 }
