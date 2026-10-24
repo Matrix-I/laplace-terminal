@@ -139,6 +139,32 @@ shell-integration-features = "cursor,title"
 
 ---
 
+## 📦 Installation
+
+### macOS (Pre-built DMG / App)
+
+1. Download **`Laplace.dmg`** (or `Laplace-macos.zip`) from the [Latest Release](https://github.com/Matrix-I/laplace-terminal/releases/latest).
+2. Open `Laplace.dmg` and drag `Laplace.app` into your `/Applications` folder.
+3. **macOS Gatekeeper Notice**: Because Laplace is not yet notarized with an Apple Developer Certificate, macOS will mark downloaded apps with a quarantine attribute. Run the following command in Terminal to allow it to open:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Laplace.app
+```
+
+Now you can launch Laplace from Spotlight, Launchpad, or the Applications folder!
+
+### Linux (Pre-built Binary)
+
+1. Download **`laplace-linux`** (or `laplace-linux-x86_64.tar.gz`) from the [Latest Release](https://github.com/Matrix-I/laplace-terminal/releases/latest).
+2. Make it executable and place it in your `$PATH`:
+
+```bash
+chmod +x laplace-linux
+sudo mv laplace-linux /usr/local/bin/laplace
+```
+
+---
+
 ## 🚀 Building & Packaging
 
 ### Prerequisites
@@ -151,7 +177,7 @@ shell-integration-features = "cursor,title"
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/laplace-terminal.git
+git clone https://github.com/Matrix-I/laplace-terminal.git
 cd laplace-terminal
 
 # Run tests
@@ -174,6 +200,7 @@ This will:
 2. Generate `Laplace.app` signed with ad-hoc certificates.
 3. Install `Laplace.app` to `~/Applications/Laplace.app`.
 4. Create an installable drag-and-drop disk image: `dist/Laplace.dmg`.
+
 
 ---
 
