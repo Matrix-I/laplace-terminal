@@ -61,6 +61,23 @@ struct Cursor {
     line_drawing: bool,
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub start: (usize, usize), // (row, col)
+    pub end: (usize, usize),   // (row, col)
+}
+
+impl Selection {
+    #[inline]
+    pub fn ordered(self) -> ((usize, usize), (usize, usize)) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
+
 pub struct Grid {
     pub cols: usize,
     pub rows: usize,
@@ -94,6 +111,9 @@ pub struct Grid {
 
     /// Window/tab title set via OSC 0 / OSC 2 (e.g. `user@host:~/dir` or running command).
     pub title: String,
+
+    /// Active mouse text selection in visible screen coordinates.
+    pub selection: Option<Selection>,
 
     /// Per visible row dirty flags, plus a "everything changed" shortcut.
     pub dirty: Vec<bool>,
@@ -130,6 +150,7 @@ impl Grid {
             sync_output: false,
             autowrap: true,
             title: String::new(),
+            selection: None,
             dirty: vec![true; rows],
             all_dirty: true,
             response: Vec::with_capacity(256),
@@ -196,6 +217,7 @@ impl Grid {
         let new = (self.display_offset as isize + delta).clamp(0, self.history as isize) as usize;
         if new != self.display_offset {
             self.display_offset = new;
+            self.selection = None;
             self.all_dirty = true;
         }
     }
@@ -205,6 +227,190 @@ impl Grid {
             self.display_offset = 0;
             self.all_dirty = true;
         }
+        if self.selection.is_some() {
+            self.selection = None;
+            self.all_dirty = true;
+        }
+    }
+
+    pub fn set_selection(&mut self, sel: Option<Selection>) {
+        if self.selection != sel {
+            self.selection = sel;
+            self.all_dirty = true;
+        }
+    }
+
+    #[inline]
+    pub fn is_selected(&self, row: usize, col: usize) -> bool {
+        let Some(sel) = self.selection else {
+            return false;
+        };
+        let (start, end) = sel.ordered();
+        (row, col) >= start && (row, col) <= end
+    }
+
+    #[inline]
+    fn is_blank(codepoint: u32) -> bool {
+        codepoint == 0 || codepoint == b' ' as u32
+    }
+
+    #[inline]
+    fn trim_col_range(row: &[Cell], start: usize, end_exclusive: usize) -> Option<(usize, usize)> {
+        let end_exclusive = end_exclusive.min(row.len());
+        if start >= end_exclusive {
+            return None;
+        }
+        let slice = &row[start..end_exclusive];
+        let first = slice.iter().position(|c| !Self::is_blank(c.codepoint))?;
+        let last = slice.iter().rposition(|c| !Self::is_blank(c.codepoint))?;
+        Some((start + first, start + last))
+    }
+
+    /// Smart double-click selection on `row`:
+    /// - On a Powerline prompt line (` ~/path   main ± `), selects `~/path`
+    ///   (or the command after the last `` if present and clicked).
+    /// - On a command line starting with a shell prompt (`$ cd ...`, `% ...`, `# ...`, `❯ ...`),
+    ///   selects the full command line excluding the leading `$ ` prompt (`cd ...`).
+    /// - On any other line, selects the trimmed line content.
+    pub fn select_smart_line(&mut self, row: usize, col: usize) -> String {
+        if row >= self.rows || self.cols == 0 {
+            return String::new();
+        }
+        let r = self.display_row(row);
+
+        // Check for Powerline segment separator U+E0B0 ('')
+        let first_pl = r.iter().position(|c| c.codepoint == 0xE0B0);
+        let last_pl = r.iter().rposition(|c| c.codepoint == 0xE0B0);
+        if let (Some(f_pl), Some(l_pl)) = (first_pl, last_pl) {
+            let after_pl = Self::trim_col_range(r, l_pl + 1, self.cols);
+            let before_pl = Self::trim_col_range(r, 0, f_pl);
+            let chosen = match (before_pl, after_pl) {
+                (Some(b), Some(a)) => {
+                    if col >= f_pl {
+                        Some(a)
+                    } else {
+                        Some(b)
+                    }
+                }
+                (Some(b), None) => Some(b),
+                (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+            if let Some(( mut sc, ec)) = chosen {
+                if matches!(
+                    char::from_u32(r[sc].codepoint),
+                    Some('$' | '%' | '#' | '❯' | '>' | '➜')
+                ) && sc + 1 <= ec
+                    && Self::is_blank(r[sc + 1].codepoint)
+                {
+                    sc += 1;
+                    while sc <= ec && Self::is_blank(r[sc].codepoint) {
+                        sc += 1;
+                    }
+                }
+                if sc <= ec {
+                    self.set_selection(Some(Selection {
+                        start: (row, sc),
+                        end: (row, ec),
+                    }));
+                    return self.selected_text().unwrap_or_default();
+                }
+            }
+        }
+
+        let Some((mut start_col, end_col)) = Self::trim_col_range(r, 0, self.cols) else {
+            self.set_selection(None);
+            return String::new();
+        };
+
+        // Strip leading shell prompt symbol (`$ `, `% `, `# `, `❯ `, `> `, `➜ `)
+        if matches!(
+            char::from_u32(r[start_col].codepoint),
+            Some('$' | '%' | '#' | '❯' | '>' | '➜')
+        ) && start_col + 1 <= end_col
+            && Self::is_blank(r[start_col + 1].codepoint)
+        {
+            start_col += 1;
+            while start_col <= end_col && Self::is_blank(r[start_col].codepoint) {
+                start_col += 1;
+            }
+        }
+
+        if start_col > end_col {
+            self.set_selection(None);
+            return String::new();
+        }
+
+        self.set_selection(Some(Selection {
+            start: (row, start_col),
+            end: (row, end_col),
+        }));
+        self.selected_text().unwrap_or_default()
+    }
+
+    /// Select the entire visible line `row` (up to the last non-blank character)
+    /// and return its text.
+    pub fn select_line(&mut self, row: usize) -> String {
+        if row >= self.rows {
+            return String::new();
+        }
+        let r = self.display_row(row);
+        let last_non_blank = r
+            .iter()
+            .rposition(|c| c.codepoint != 0 && c.codepoint != b' ' as u32);
+        let Some(end_col) = last_non_blank else {
+            self.set_selection(None);
+            return String::new();
+        };
+        self.set_selection(Some(Selection {
+            start: (row, 0),
+            end: (row, end_col),
+        }));
+        self.selected_text().unwrap_or_default()
+    }
+
+    /// Extract the currently selected text across one or more rows.
+    pub fn selected_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        let ((r0, c0), (r1, c1)) = sel.ordered();
+        if r0 >= self.rows {
+            return None;
+        }
+        let r1 = r1.min(self.rows.saturating_sub(1));
+        let mut out = String::new();
+        for r in r0..=r1 {
+            if r > r0 {
+                out.push('\n');
+            }
+            let row = self.display_row(r);
+            let sc = if r == r0 { c0.min(self.cols.saturating_sub(1)) } else { 0 };
+            let ec = if r == r1 { c1.min(self.cols.saturating_sub(1)) } else { self.cols.saturating_sub(1) };
+            if sc > ec {
+                continue;
+            }
+            let mut line = String::new();
+            let mut skip_next = false;
+            for cell in &row[sc..=ec] {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                let ch = char::from_u32(cell.codepoint)
+                    .filter(|&c| c != '\0')
+                    .unwrap_or(' ');
+                if char_width(ch) == 2 {
+                    skip_next = true;
+                }
+                line.push(ch);
+            }
+            if r < r1 || ec + 1 == self.cols {
+                out.push_str(line.trim_end_matches(' '));
+            } else {
+                out.push_str(&line);
+            }
+        }
+        let trimmed = out.trim_end_matches(' ').to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
     }
 
     // ------------------------------------------------------------------
@@ -951,5 +1157,38 @@ mod tests {
         let mut g = Grid::new(10, 5);
         feed(&mut g, "\x1b[3;4H\x1b[6n");
         assert_eq!(g.response, b"\x1b[3;4R");
+    }
+
+    #[test]
+    fn selection_and_line_copy() {
+        let mut g = Grid::new(80, 5);
+        feed(
+            &mut g,
+            " ~/Desktop/personal/laplace-terninal \u{e0b0} \u{e0a0} main \u{00b1} \u{e0b0}\r\n\
+             $ cd Desktop/personal/laplace-terninal\r\n\
+             $ ./target/release/laplace",
+        );
+        // Double-click on prompt line selects only ~/Desktop/personal/laplace-terninal
+        assert_eq!(
+            g.select_smart_line(0, 10),
+            "~/Desktop/personal/laplace-terninal"
+        );
+        assert_eq!(
+            g.select_smart_line(0, 0),
+            "~/Desktop/personal/laplace-terninal"
+        );
+        // Double-click on command line selects full line minus "$ "
+        assert_eq!(
+            g.select_smart_line(1, 15),
+            "cd Desktop/personal/laplace-terninal"
+        );
+        assert_eq!(
+            g.select_smart_line(1, 2),
+            "cd Desktop/personal/laplace-terninal"
+        );
+        // Double-click on ./target/release/laplace line selects ./target/release/laplace
+        assert_eq!(g.select_smart_line(2, 10), "./target/release/laplace");
+        // Triple-click selects raw full line
+        assert_eq!(g.select_line(1), "$ cd Desktop/personal/laplace-terninal");
     }
 }

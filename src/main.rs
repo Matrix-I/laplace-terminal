@@ -17,7 +17,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::grid::Grid;
+use crate::grid::{Grid, Selection};
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
 
@@ -45,6 +45,11 @@ struct State {
     mods: ModifiersState,
     font_pt: f32,
     mouse_pos: (f64, f64),
+    selecting: bool,
+    drag_moved: bool,
+    last_click_time: Option<std::time::Instant>,
+    last_click_cell: Option<(usize, usize)>,
+    click_count: u8,
 }
 
 struct App {
@@ -99,6 +104,11 @@ impl ApplicationHandler<AppEvent> for App {
             mods: ModifiersState::default(),
             font_pt,
             mouse_pos: (0.0, 0.0),
+            selecting: false,
+            drag_moved: false,
+            last_click_time: None,
+            last_click_cell: None,
+            click_count: 0,
         });
     }
 
@@ -145,20 +155,94 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 s.mouse_pos = (position.x, position.y);
-            }
-
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
-                    match action {
-                        TabBarAction::Select(idx) => select_tab(s, idx),
-                        TabBarAction::NewTab => duplicate_active_tab(s, &self.proxy, &self.wakeup_queued),
+                if s.selecting {
+                    if let Some(start) = s.last_click_cell {
+                        let show_tabs = s.tabs.len() > 1;
+                        let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+                        if let Some(end) = s.renderer.pixel_to_cell(position.x, position.y, show_tabs, cols, rows) {
+                            if end != start || s.drag_moved {
+                                s.drag_moved = true;
+                                s.tabs[s.active].grid.lock().set_selection(Some(Selection { start, end }));
+                                s.window.request_redraw();
+                            }
+                        }
                     }
                 }
             }
+
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button: MouseButton::Left,
+                ..
+            } => match btn_state {
+                ElementState::Pressed => {
+                    if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
+                        match action {
+                            TabBarAction::Select(idx) => select_tab(s, idx),
+                            TabBarAction::NewTab => duplicate_active_tab(s, &self.proxy, &self.wakeup_queued),
+                        }
+                        return;
+                    }
+                    let show_tabs = s.tabs.len() > 1;
+                    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+                    if let Some((row, col)) =
+                        s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
+                    {
+                        let now = std::time::Instant::now();
+                        let multi_click = s
+                            .last_click_time
+                            .is_some_and(|t| now.duration_since(t).as_millis() <= 450)
+                            && s.last_click_cell.is_some_and(|(lr, _)| lr == row);
+
+                        s.click_count = if multi_click {
+                            (s.click_count % 3) + 1
+                        } else {
+                            1
+                        };
+                        s.last_click_time = Some(now);
+                        s.last_click_cell = Some((row, col));
+
+                        match s.click_count {
+                            2 => {
+                                let line_text =
+                                    s.tabs[s.active].grid.lock().select_smart_line(row, col);
+                                if !line_text.is_empty() {
+                                    copy_to_clipboard(&line_text);
+                                }
+                                s.selecting = false;
+                                s.drag_moved = false;
+                                s.window.request_redraw();
+                            }
+                            3 => {
+                                let line_text = s.tabs[s.active].grid.lock().select_line(row);
+                                if !line_text.is_empty() {
+                                    copy_to_clipboard(&line_text);
+                                }
+                                s.selecting = false;
+                                s.drag_moved = false;
+                                s.window.request_redraw();
+                            }
+                            _ => {
+                                s.tabs[s.active].grid.lock().set_selection(None);
+                                s.selecting = true;
+                                s.drag_moved = false;
+                                s.window.request_redraw();
+                            }
+                        }
+                    }
+                }
+                ElementState::Released => {
+                    if s.selecting {
+                        s.selecting = false;
+                        if s.drag_moved {
+                            let text = s.tabs[s.active].grid.lock().selected_text();
+                            if let Some(t) = text {
+                                copy_to_clipboard(&t);
+                            }
+                        }
+                    }
+                }
+            },
 
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
@@ -405,6 +489,46 @@ fn handle_key(
         let is_new_tab = ctrl && !alt && !super_key && ch.eq_ignore_ascii_case("t");
         if is_new_tab {
             duplicate_active_tab(s, proxy, wakeup_queued);
+            return;
+        }
+
+        // Copy selection: Cmd+C on macOS, Ctrl+Shift+C on Linux.
+        #[cfg(target_os = "macos")]
+        let is_copy = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("c");
+        #[cfg(not(target_os = "macos"))]
+        let is_copy = ctrl && shift && !alt && ch.eq_ignore_ascii_case("c");
+        if is_copy {
+            if let Some(text) = s.tabs[s.active].grid.lock().selected_text() {
+                copy_to_clipboard(&text);
+            }
+            return;
+        }
+
+        // Paste clipboard: Cmd+V on macOS, Ctrl+Shift+V on Linux.
+        #[cfg(target_os = "macos")]
+        let is_paste = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("v");
+        #[cfg(not(target_os = "macos"))]
+        let is_paste = ctrl && shift && !alt && ch.eq_ignore_ascii_case("v");
+        if is_paste {
+            if let Some(text) = paste_from_clipboard() {
+                if !text.is_empty() {
+                    let bracketed = {
+                        let mut g = s.tabs[s.active].grid.lock();
+                        g.reset_display();
+                        g.bracketed_paste
+                    };
+                    if bracketed {
+                        let mut payload = Vec::with_capacity(text.len() + 12);
+                        payload.extend_from_slice(b"\x1b[200~");
+                        payload.extend_from_slice(text.as_bytes());
+                        payload.extend_from_slice(b"\x1b[201~");
+                        s.tabs[s.active].pty.write(&payload);
+                    } else {
+                        s.tabs[s.active].pty.write(text.as_bytes());
+                    }
+                    s.window.request_redraw();
+                }
+            }
             return;
         }
 
@@ -676,6 +800,65 @@ fn push_tilde(buf: &mut [u8; 32], num: u8, m: u8) -> usize {
         let _ = write!(cur, "\x1b[{num}~");
     }
     cur.position() as usize
+}
+
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbcopy", &[])];
+    #[cfg(not(target_os = "macos"))]
+    let cmds: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["-ib"]),
+    ];
+
+    for (bin, args) in cmds {
+        if let Ok(mut child) = Command::new(bin)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return;
+        }
+    }
+}
+
+fn paste_from_clipboard() -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbpaste", &[])];
+    #[cfg(not(target_os = "macos"))]
+    let cmds: &[(&str, &[&str])] = &[
+        ("wl-paste", &["-n"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["-ob"]),
+    ];
+
+    for (bin, args) in cmds {
+        if let Ok(out) = Command::new(bin)
+            .args(*args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn main() {

@@ -285,6 +285,34 @@ impl Renderer {
         Some(TabBarAction::Select(tab_i.min(n - 1)))
     }
 
+    /// Map a physical window cursor position `(x_px, y_px)` to a terminal grid
+    /// cell `(row, col)`. Returns `None` if the cursor is inside the tab bar.
+    pub fn pixel_to_cell(
+        &self,
+        x_px: f64,
+        y_px: f64,
+        show_tab_bar: bool,
+        cols: usize,
+        rows: usize,
+    ) -> Option<(usize, usize)> {
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        if show_tab_bar && y_px < (self.atlas.cell_h as f64) * 1.56 {
+            return None;
+        }
+        let top_y = if show_tab_bar {
+            (self.pad + self.atlas.cell_h * 2) as f64
+        } else {
+            self.pad as f64
+        };
+        let rel_x = (x_px - self.pad as f64).max(0.0);
+        let rel_y = (y_px - top_y).max(0.0);
+        let col = ((rel_x as u32) / self.atlas.cell_w.max(1)) as usize;
+        let row = ((rel_y as u32) / self.atlas.cell_h.max(1)) as usize;
+        Some((row.min(rows - 1), col.min(cols - 1)))
+    }
+
     pub fn render_with_tabs(&mut self, grid: &Mutex<Grid>, tab_bar: Option<(&[String], usize)>) {
         let top_rows = usize::from(tab_bar.is_some());
         // Fast check before acquiring a Metal swapchain drawable: if no cells
@@ -423,12 +451,22 @@ impl Renderer {
     }
 
     fn build_row(&mut self, g: &Grid, src_row: usize, dst_row: usize) {
+        const SEL_BG: u32 = 0x3D59_A180;
+        const SEL_FG: u32 = 0xFFFF_FFFF;
         let cols = g.cols;
         let row = g.display_row(src_row);
         let out = &mut self.instances[dst_row * cols..(dst_row + 1) * cols];
-        for (dst, cell) in out.iter_mut().zip(row) {
+        for (col, (dst, cell)) in out.iter_mut().zip(row).enumerate() {
             let slot = self.atlas.slot(&self.queue, cell.codepoint);
-            *dst = Instance { glyph: slot as u32, fg: cell.fg, bg: cell.bg };
+            if g.is_selected(src_row, col) {
+                *dst = Instance {
+                    glyph: slot as u32,
+                    fg: SEL_FG,
+                    bg: SEL_BG | (cell.bg & 1),
+                };
+            } else {
+                *dst = Instance { glyph: slot as u32, fg: cell.fg, bg: cell.bg };
+            }
         }
     }
 
