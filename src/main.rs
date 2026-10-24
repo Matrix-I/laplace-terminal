@@ -158,6 +158,14 @@ impl ApplicationHandler<AppEvent> for App {
             cursor_blink_epoch: std::time::Instant::now(),
             focused: true,
         });
+
+        #[cfg(target_os = "macos")]
+        unsafe {
+            extern "C" {
+                fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+            }
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {

@@ -1322,12 +1322,12 @@ fn macos_coretext_rasterize(
 /// fallbacks before the auto-discovered symbol fonts. Without configured
 /// families, `LAPLACE_FONT=/path/to/font.ttf` or the platform defaults apply.
 pub fn load_font(families: &[String]) -> Arc<FontSet> {
-    let mut configured: Vec<fontdue::Font> = Vec::new();
+    let mut configured: Vec<(String, fontdue::Font)> = Vec::new();
     for fam in families {
         match crate::fontdb::find_family(fam) {
             Some(face) => {
                 if let Some(f) = try_parse_font_index(&face.path, face.index) {
-                    configured.push(f);
+                    configured.push((face.path.clone(), f));
                 }
             }
             None => eprintln!("laplace: font-family `{fam}` not found; using fallback"),
@@ -1339,10 +1339,6 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         primary_candidates.push(p);
     }
 
-    let (discovered_mono_nerd, discovered_symbols) = discover_nerd_fonts();
-    // If the user has a full monospace Nerd Font installed, prefer it automatically.
-    primary_candidates.extend(discovered_mono_nerd.clone());
-
     #[cfg(target_os = "macos")]
     primary_candidates.extend(
         [
@@ -1353,6 +1349,10 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         ]
         .map(String::from),
     );
+
+    let (discovered_mono_nerd, discovered_symbols) = discover_nerd_fonts();
+    primary_candidates.extend(discovered_mono_nerd.clone());
+
     #[cfg(not(target_os = "macos"))]
     primary_candidates.extend(
         [
@@ -1369,10 +1369,15 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
     );
 
     let mut configured = configured.into_iter();
-    let mut primary = configured.next();
+    let (mut primary_path, mut primary) = (None, None);
+    if let Some((p, f)) = configured.next() {
+        primary_path = Some(p);
+        primary = Some(f);
+    }
     if primary.is_none() {
         for path in &primary_candidates {
             if let Some(f) = try_parse_font(path) {
+                primary_path = Some(path.clone());
                 primary = Some(f);
                 break;
             }
@@ -1380,17 +1385,14 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
     }
     let primary = primary.expect("laplace: no usable monospace font found; set font-family in the config");
 
-    let mut fallbacks: Vec<fontdue::Font> = configured.collect();
+    let mut fallbacks: Vec<fontdue::Font> = configured.map(|(_, f)| f).collect();
     for path in &discovered_symbols {
-        if let Some(f) = try_parse_font(path) {
-            fallbacks.push(f);
+        if primary_path.as_deref() == Some(path) {
+            continue;
         }
-    }
-    // Also include installed Nerd Fonts so symbols/icons render when the primary font (like SF Mono) lacks them
-    for path in &discovered_mono_nerd {
         if let Some(f) = try_parse_font(path) {
             fallbacks.push(f);
-            break; // A single full Nerd Font face provides all Nerd Font symbols
+            break;
         }
     }
 
@@ -1402,9 +1404,14 @@ fn try_parse_font(path: &str) -> Option<fontdue::Font> {
 }
 
 fn try_parse_font_index(path: &str, collection_index: u32) -> Option<fontdue::Font> {
-    let bytes = std::fs::read(path).ok()?;
-    let settings = fontdue::FontSettings { scale: 32.0, collection_index, ..Default::default() };
-    match fontdue::Font::from_bytes(bytes, settings) {
+    let file = std::fs::File::open(path).ok()?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let settings = fontdue::FontSettings {
+        scale: 32.0,
+        collection_index,
+        load_substitutions: false,
+    };
+    match fontdue::Font::from_bytes(mmap, settings) {
         Ok(f) => Some(f),
         Err(e) => {
             eprintln!("laplace: failed to parse font {path}: {e}");
@@ -1423,7 +1430,6 @@ fn discover_nerd_fonts() -> (Vec<String>, Vec<String>) {
         dirs.push(format!("{home}/Library/Fonts"));
         dirs.push(format!("{home}/.local/share/fonts"));
         dirs.push(format!("{home}/.fonts"));
-        dirs.push(format!("{home}/Applications/Ghostty.app/Contents/Resources/fonts"));
     }
     dirs.extend(
         [
@@ -1499,7 +1505,6 @@ mod tests {
     fn loads_sfmono_nerd_font_successfully() {
         let set = load_font(&["SFMono Nerd Font".to_string()]);
         assert!(set.primary.lookup_glyph_index('A') > 0);
-        assert!(!set.fallbacks.is_empty());
     }
 }
 

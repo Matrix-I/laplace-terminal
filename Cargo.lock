@@ -704,6 +704,7 @@ dependencies = [
  "bytemuck",
  "fontdue",
  "libc",
+ "memmap2",
  "parking_lot",
  "pollster",
  "vte",
