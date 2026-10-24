@@ -190,7 +190,9 @@ impl ApplicationHandler<AppEvent> for App {
 
                     if cmd_pressed {
                         if let Some(link) = &s.hovered_link {
-                            open_url(&link.url);
+                            let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
+                            let cwd_path = cwd.as_deref().map(std::path::Path::new);
+                            open_target(&link.url, link.is_path, cwd_path);
                             return;
                         }
                     }
@@ -404,16 +406,54 @@ fn render_active(s: &mut State) {
         .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref());
 }
 
-fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "linux")]
-    let res = std::process::Command::new("xdg-open").arg(url).spawn();
-    #[cfg(windows)]
-    let res = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
+    if is_path {
+        let path = if target.starts_with("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                std::path::PathBuf::from(home).join(&target[2..])
+            } else {
+                std::path::PathBuf::from(target)
+            }
+        } else if target == "~" {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("~"))
+        } else {
+            let p = std::path::Path::new(target);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else if let Some(base) = cwd {
+                base.join(p)
+            } else {
+                p.to_path_buf()
+            }
+        };
 
-    if let Err(e) = res {
-        eprintln!("laplace: failed to open URL {url}: {e}");
+        #[cfg(target_os = "macos")]
+        let res = std::process::Command::new("open").arg(&path).spawn();
+        #[cfg(target_os = "linux")]
+        let res = std::process::Command::new("xdg-open").arg(&path).spawn();
+        #[cfg(windows)]
+        let res = std::process::Command::new("cmd")
+            .args(["/c", "start", "", path.to_str().unwrap_or(target)])
+            .spawn();
+
+        if let Err(e) = res {
+            eprintln!("laplace: failed to open path {path:?}: {e}");
+        }
+    } else {
+        #[cfg(target_os = "macos")]
+        let res = std::process::Command::new("open").arg(target).spawn();
+        #[cfg(target_os = "linux")]
+        let res = std::process::Command::new("xdg-open").arg(target).spawn();
+        #[cfg(windows)]
+        let res = std::process::Command::new("cmd")
+            .args(["/c", "start", "", target])
+            .spawn();
+
+        if let Err(e) = res {
+            eprintln!("laplace: failed to open URL {target}: {e}");
+        }
     }
 }
 
@@ -423,12 +463,15 @@ fn update_hovered_link(s: &mut State) {
     #[cfg(not(target_os = "macos"))]
     let cmd_pressed = s.mods.control_key() || s.mods.super_key();
 
+    let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
+    let cwd_path = cwd.as_deref().map(std::path::Path::new);
+
     let new_link = if cmd_pressed && !s.selecting {
         let show_tabs = s.tabs.len() > 1;
         let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
         if let Some((row, col)) = s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows) {
             let g = s.tabs[s.active].grid.lock();
-            g.find_url_at(row, col)
+            g.find_hyperlink_at(row, col, cwd_path)
         } else {
             None
         }

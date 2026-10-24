@@ -73,6 +73,7 @@ pub struct Hyperlink {
     pub start_col: usize,
     pub end_col: usize,
     pub url: String,
+    pub is_path: bool,
 }
 
 impl Selection {
@@ -257,8 +258,24 @@ impl Grid {
         (row, col) >= start && (row, col) <= end
     }
 
-    /// Detect a URL (http:// or https://) containing `(row, col)` if present on the visible row.
-    pub fn find_url_at(&self, row: usize, col: usize) -> Option<Hyperlink> {
+    #[inline]
+    fn is_path_char(ch: char) -> bool {
+        if ('\u{E000}'..='\u{F8FF}').contains(&ch)
+            || ('\u{F0000}'..='\u{FFFFD}').contains(&ch)
+            || ('\u{100000}'..='\u{10FFFD}').contains(&ch)
+        {
+            return false;
+        }
+        ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '~' | '+' | '@' | '%' | '=')
+    }
+
+    /// Detect a URL (http:// or https://) or a file/directory path containing `(row, col)`.
+    pub fn find_hyperlink_at(
+        &self,
+        row: usize,
+        col: usize,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<Hyperlink> {
         if row >= self.rows || self.cols == 0 || col >= self.cols {
             return None;
         }
@@ -268,6 +285,7 @@ impl Grid {
             .map(|c| char::from_u32(c.codepoint).filter(|&ch| ch != '\0').unwrap_or(' '))
             .collect();
 
+        // 1. Try URL matching first
         let mut idx = 0;
         while idx < chars.len() {
             let rem: String = chars[idx..].iter().collect();
@@ -287,7 +305,6 @@ impl Grid {
                     }
                     end += 1;
                 }
-                // Strip trailing sentence punctuation
                 while end > start {
                     let last_ch = chars[end - 1];
                     if matches!(last_ch, '.' | ',' | ';' | ':' | '!' | '?' | '\'') {
@@ -307,6 +324,7 @@ impl Grid {
                         start_col: start,
                         end_col: end - 1,
                         url: url_str,
+                        is_path: false,
                     });
                 }
                 idx = end.max(idx + 1);
@@ -314,7 +332,73 @@ impl Grid {
                 idx += 1;
             }
         }
-        None
+
+        // 2. Try file/directory path matching at `col`
+        if !Self::is_path_char(chars[col]) {
+            return None;
+        }
+        let mut start = col;
+        while start > 0 && Self::is_path_char(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = col + 1;
+        while end < chars.len() && Self::is_path_char(chars[end]) {
+            end += 1;
+        }
+
+        // Strip trailing sentence punctuation
+        while end > start {
+            let last_ch = chars[end - 1];
+            if matches!(last_ch, '.' | ',' | ';' | ':' | '!' | '?' | '\'') {
+                end -= 1;
+            } else if last_ch == ')' && !chars[start..end].contains(&'(') {
+                end -= 1;
+            } else if last_ch == ']' && !chars[start..end].contains(&'[') {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if start >= end || end - start < 2 {
+            return None;
+        }
+
+        let token_str: String = chars[start..end].iter().collect();
+
+        // Must look like a path: contain '/' or start with '~'
+        if !token_str.contains('/') && token_str != "~" {
+            return None;
+        }
+
+        // Validate that it looks like a path or exists
+        let is_valid_path = if token_str.starts_with("~/") || token_str == "~" {
+            if let Ok(home) = std::env::var("HOME") {
+                let rest = token_str.strip_prefix("~/").unwrap_or("");
+                let full = std::path::Path::new(&home).join(rest);
+                full.exists() || !rest.is_empty()
+            } else {
+                true
+            }
+        } else if token_str.starts_with('/') {
+            std::path::Path::new(&token_str).exists() || token_str.len() > 1
+        } else if let Some(base) = cwd {
+            base.join(&token_str).exists() || std::path::Path::new(&token_str).exists()
+        } else {
+            std::path::Path::new(&token_str).exists()
+        };
+
+        if is_valid_path {
+            Some(Hyperlink {
+                row,
+                start_col: start,
+                end_col: end - 1,
+                url: token_str,
+                is_path: true,
+            })
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -1265,17 +1349,32 @@ mod tests {
         let mut g = Grid::new(80, 5);
         feed(
             &mut g,
-            "Docs at https://ghostty.org/docs and repo (http://github.com/ghostty-org).\r\nDone.",
+            "Docs at https://ghostty.org/docs and repo (http://github.com/ghostty-org).\r\n\
+             ~/Desktop/personal/laplace-terminal \u{e0b0} main\r\n\
+             $ cd ./target/release",
         );
-        let link1 = g.find_url_at(0, 15).expect("find https url");
+        let link1 = g.find_hyperlink_at(0, 15, None).expect("find https url");
         assert_eq!(link1.url, "https://ghostty.org/docs");
         assert_eq!(link1.start_col, 8);
         assert_eq!(link1.end_col, 31);
+        assert!(!link1.is_path);
 
-        let link2 = g.find_url_at(0, 50).expect("find http url");
+        let link2 = g.find_hyperlink_at(0, 50, None).expect("find http url");
         assert_eq!(link2.url, "http://github.com/ghostty-org");
+        assert!(!link2.is_path);
 
-        assert!(g.find_url_at(0, 2).is_none());
-        assert!(g.find_url_at(1, 0).is_none());
+        // Path detection on prompt
+        let path1 = g.find_hyperlink_at(1, 10, None).expect("find path");
+        assert_eq!(path1.url, "~/Desktop/personal/laplace-terminal");
+        assert_eq!(path1.start_col, 0);
+        assert_eq!(path1.end_col, 34);
+        assert!(path1.is_path);
+
+        // Relative path detection
+        let path2 = g.find_hyperlink_at(2, 10, None).expect("find relative path");
+        assert_eq!(path2.url, "./target/release");
+        assert!(path2.is_path);
+
+        assert!(g.find_hyperlink_at(0, 2, None).is_none());
     }
 }
