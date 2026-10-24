@@ -8,6 +8,7 @@
 //! printing or scrolling; allocation only happens on window resize.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicU32, Ordering};
 use vte::{Params, Perform};
 
 /// Number of scrollback lines kept above the visible screen.
@@ -15,8 +16,24 @@ pub const SCROLLBACK: usize = 5000;
 
 /// Default colors, stored as `0xRRGGBB00`. Cells store `0` to mean "default",
 /// which keeps a freshly zeroed buffer valid and lets the shader apply the theme.
-pub const DEFAULT_FG: u32 = 0xE6E6_E600;
-pub const DEFAULT_BG: u32 = 0x1213_1600;
+/// They are runtime-configurable (`background` / `foreground` config options).
+static DEFAULT_FG_RGB: AtomicU32 = AtomicU32::new(0xE6E6_E600);
+static DEFAULT_BG_RGB: AtomicU32 = AtomicU32::new(0x1213_1600);
+
+#[inline]
+pub fn default_fg() -> u32 {
+    DEFAULT_FG_RGB.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn default_bg() -> u32 {
+    DEFAULT_BG_RGB.load(Ordering::Relaxed)
+}
+
+pub fn set_default_colors(fg: u32, bg: u32) {
+    DEFAULT_FG_RGB.store(fg & !0xFF, Ordering::Relaxed);
+    DEFAULT_BG_RGB.store(bg & !0xFF, Ordering::Relaxed);
+}
 
 /// `fg` low byte: 0xFF = explicit color, 0x00 = default foreground.
 pub const FG_SET: u32 = 0xFF;
@@ -113,6 +130,9 @@ pub struct Grid {
     scroll_bot: usize,
 
     pub cursor_visible: bool,
+    /// Last DECSCUSR (`CSI Ps SP q`) value: 0 = config default,
+    /// 1/2 = blinking/steady block, 3/4 = underline, 5/6 = bar.
+    pub cursor_shape: u8,
     pub app_cursor: bool,
     pub bracketed_paste: bool,
     pub sync_output: bool,
@@ -154,6 +174,7 @@ impl Grid {
             scroll_top: 0,
             scroll_bot: rows - 1,
             cursor_visible: true,
+            cursor_shape: 0,
             app_cursor: false,
             bracketed_paste: false,
             sync_output: false,
@@ -667,17 +688,17 @@ impl Grid {
         let p = self.cur.pen;
         let (mut fg, mut bg) = (p.fg, p.bg);
         if p.attrs & ATTR_INVERSE != 0 {
-            let f = if fg == 0 { DEFAULT_FG } else { fg & !0xFF };
-            let b = if bg == 0 { DEFAULT_BG } else { bg & !0xFF };
+            let f = if fg == 0 { default_fg() } else { fg & !0xFF };
+            let b = if bg == 0 { default_bg() } else { bg & !0xFF };
             fg = b | FG_SET;
             bg = f | BG_SET;
         }
         if p.attrs & ATTR_DIM != 0 {
-            let rgb = if fg == 0 { DEFAULT_FG } else { fg & !0xFF };
+            let rgb = if fg == 0 { default_fg() } else { fg & !0xFF };
             fg = ((rgb >> 1) & 0x7F7F_7F00) | FG_SET;
         }
         if p.attrs & ATTR_HIDDEN != 0 {
-            fg = if bg == 0 { DEFAULT_BG | FG_SET } else { (bg & !0xFF) | FG_SET };
+            fg = if bg == 0 { default_bg() | FG_SET } else { (bg & !0xFF) | FG_SET };
         }
         if p.attrs & ATTR_UNDERLINE != 0 {
             bg |= BG_UNDERLINE;
@@ -723,6 +744,7 @@ impl Grid {
         self.scroll_bot = self.rows - 1;
         self.wrap_pending = false;
         self.cursor_visible = true;
+        self.cursor_shape = 0;
         self.app_cursor = false;
         self.bracketed_paste = false;
         self.autowrap = true;
@@ -1152,6 +1174,14 @@ impl Perform for Grid {
                 };
                 let _ = write!(self.response, "\x1b[?{mode};{state}$y");
             }
+            'q' if intermediates == b" " => {
+                // DECSCUSR: set cursor style.
+                let shape = raw(0).min(6) as u8;
+                if self.cursor_shape != shape {
+                    self.cursor_shape = shape;
+                    self.mark(self.cur.row);
+                }
+            }
             'c' if intermediates.is_empty() => self.response.extend_from_slice(b"\x1b[?6c"),
             'c' if intermediates == b">" => self.response.extend_from_slice(b"\x1b[>0;0;0c"),
             'c' if intermediates == b"=" => self.response.extend_from_slice(b"\x1bP!|00000000\x1b\\"),
@@ -1179,15 +1209,15 @@ impl Perform for Grid {
         let st = if bell_terminated { "\x07" } else { "\x1b\\" };
         match params[0] {
             b"10" => {
-                let r = (DEFAULT_FG >> 24) & 0xFF;
-                let g = (DEFAULT_FG >> 16) & 0xFF;
-                let b = (DEFAULT_FG >> 8) & 0xFF;
+                let r = (default_fg() >> 24) & 0xFF;
+                let g = (default_fg() >> 16) & 0xFF;
+                let b = (default_fg() >> 8) & 0xFF;
                 let _ = write!(self.response, "\x1b]10;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{st}");
             }
             b"11" => {
-                let r = (DEFAULT_BG >> 24) & 0xFF;
-                let g = (DEFAULT_BG >> 16) & 0xFF;
-                let b = (DEFAULT_BG >> 8) & 0xFF;
+                let r = (default_bg() >> 24) & 0xFF;
+                let g = (default_bg() >> 16) & 0xFF;
+                let b = (default_bg() >> 8) & 0xFF;
                 let _ = write!(self.response, "\x1b]11;rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{st}");
             }
             _ => {}

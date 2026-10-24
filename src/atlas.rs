@@ -99,6 +99,11 @@ impl Atlas {
         *self = Atlas::new(device, queue, self.fonts.clone(), px);
     }
 
+    /// Rebuild the atlas with a different font set (config reload).
+    pub fn set_fonts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, fonts: Arc<FontSet>, px: f32) {
+        *self = Atlas::new(device, queue, fonts, px);
+    }
+
     fn make_texture(device: &wgpu::Device, size: u32) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyph atlas"),
@@ -1310,9 +1315,25 @@ fn macos_coretext_rasterize(
 // Font Discovery (Primary + Nerd Font / Symbol Fallbacks)
 // ============================================================================
 
-/// Load the primary monospace font and any available symbol/Nerd Font fallbacks
-/// (override primary with `LAPLACE_FONT=/path/to/font.ttf`).
-pub fn load_font() -> Arc<FontSet> {
+/// Load the primary monospace font and any available symbol/Nerd Font fallbacks.
+///
+/// `families` comes from the `font-family` config option: the first family
+/// that resolves becomes the primary font, the remaining ones are tried as
+/// fallbacks before the auto-discovered symbol fonts. Without configured
+/// families, `LAPLACE_FONT=/path/to/font.ttf` or the platform defaults apply.
+pub fn load_font(families: &[String]) -> Arc<FontSet> {
+    let mut configured: Vec<fontdue::Font> = Vec::new();
+    for fam in families {
+        match crate::fontdb::find_family(fam) {
+            Some(face) => {
+                if let Some(f) = try_parse_font_index(&face.path, face.index) {
+                    configured.push(f);
+                }
+            }
+            None => eprintln!("laplace: font-family `{fam}` not found; using fallback"),
+        }
+    }
+
     let mut primary_candidates: Vec<String> = Vec::new();
     if let Ok(p) = std::env::var("LAPLACE_FONT") {
         primary_candidates.push(p);
@@ -1346,16 +1367,19 @@ pub fn load_font() -> Arc<FontSet> {
         .map(String::from),
     );
 
-    let mut primary = None;
-    for path in &primary_candidates {
-        if let Some(f) = try_parse_font(path) {
-            primary = Some(f);
-            break;
+    let mut configured = configured.into_iter();
+    let mut primary = configured.next();
+    if primary.is_none() {
+        for path in &primary_candidates {
+            if let Some(f) = try_parse_font(path) {
+                primary = Some(f);
+                break;
+            }
         }
     }
-    let primary = primary.expect("laplace: no usable monospace font found; set LAPLACE_FONT=/path/to/font.ttf");
+    let primary = primary.expect("laplace: no usable monospace font found; set font-family in the config");
 
-    let mut fallbacks = Vec::new();
+    let mut fallbacks: Vec<fontdue::Font> = configured.collect();
     for path in &discovered_symbols {
         if let Some(f) = try_parse_font(path) {
             fallbacks.push(f);
@@ -1366,8 +1390,12 @@ pub fn load_font() -> Arc<FontSet> {
 }
 
 fn try_parse_font(path: &str) -> Option<fontdue::Font> {
+    try_parse_font_index(path, 0)
+}
+
+fn try_parse_font_index(path: &str, collection_index: u32) -> Option<fontdue::Font> {
     let bytes = std::fs::read(path).ok()?;
-    let settings = fontdue::FontSettings { scale: 32.0, ..Default::default() };
+    let settings = fontdue::FontSettings { scale: 32.0, collection_index, ..Default::default() };
     match fontdue::Font::from_bytes(bytes, settings) {
         Ok(f) => Some(f),
         Err(e) => {

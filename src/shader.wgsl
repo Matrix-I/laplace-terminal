@@ -11,9 +11,13 @@ struct Uniforms {
     slots_per_row: u32,
     cursor: vec2<u32>,
     cursor_visible: u32,
+    cursor_style: u32,      // 0 = block, 1 = bar, 2 = underline, 3 = block_hollow
     default_fg: u32,
     default_bg: u32,
     tab_info: u32,          // low 16 bits = tab_count (0 if single tab), high 16 bits = active_tab
+    bg_opacity: f32,
+    pad0: u32,
+    pad1: u32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -84,13 +88,15 @@ fn vs_main(
 
     var f = select(unpack(fg), unpack(u.default_fg), (fg & 0xFFu) == 0u);
     var b = select(unpack(bg), unpack(u.default_bg), (bg & 0x80u) == 0u);
-    if (!is_tab_row && !is_preview && u.cursor_visible != 0u && col == u.cursor.x && row == u.cursor.y) {
+    let is_cursor = !is_tab_row && !is_preview && u.cursor_visible != 0u && col == u.cursor.x && row == u.cursor.y;
+    if (is_cursor && u.cursor_style == 0u) {
         f = unpack(u.default_bg);
         b = vec3<f32>(0.44, 0.47, 0.59); // Ghostty slate-lavender block cursor
     }
     out.fg = f;
     out.bg = b;
-    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 12u) | ((slot / u.slots_per_row) << 16u);
+    let cursor_flag = select(0u, (u.cursor_style + 1u) << 8u, is_cursor);
+    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 12u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
     out.col = col;
     return out;
 }
@@ -196,6 +202,30 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     }
     var cell_color = mix(v.bg, v.fg, a);
 
+    // Non-block cursor styling (1=block handled in vs_main, 2=bar, 3=underline, 4=block_hollow)
+    let c_style = (v.flags >> 8u) & 7u;
+    if (c_style != 0u) {
+        let cursor_color = vec3<f32>(0.44, 0.47, 0.59);
+        if (c_style == 2u) {
+            // Bar cursor: vertical beam on left edge of cell
+            if (v.local.x * u.cell.x <= 2.0) {
+                cell_color = cursor_color;
+            }
+        } else if (c_style == 3u) {
+            // Underline cursor: horizontal line at bottom of cell
+            if (v.local.y * u.cell.y >= u.cell.y - 2.0) {
+                cell_color = cursor_color;
+            }
+        } else if (c_style == 4u) {
+            // Block hollow: outline border
+            let lx = v.local.x * u.cell.x;
+            let ly = v.local.y * u.cell.y;
+            if (lx <= 1.5 || lx >= u.cell.x - 1.5 || ly <= 1.5 || ly >= u.cell.y - 1.5) {
+                cell_color = cursor_color;
+            }
+        }
+    }
+
     if ((v.flags & 4u) != 0u) {
         // Ghostty bottom-left floating preview badge styling:
         // Top border 1px
@@ -208,5 +238,11 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(cell_color, 1.0);
+    var out_alpha = 1.0;
+    let def_bg = unpack(u.default_bg);
+    if ((v.flags & 2u) == 0u && (v.flags & 4u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
+        out_alpha = mix(u.bg_opacity, 1.0, a);
+    }
+
+    return vec4<f32>(cell_color, out_alpha);
 }

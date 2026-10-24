@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet};
-use crate::grid::{Grid, Hyperlink, DEFAULT_BG, DEFAULT_FG};
+use crate::grid::{default_bg, default_fg, Grid, Hyperlink};
 
 /// Per-cell GPU instance: 12 bytes, mirrors `Cell` with codepoint → atlas slot.
 #[repr(C)]
@@ -31,12 +31,15 @@ struct Uniforms {
     slots_per_row: u32,
     cursor: [u32; 2],
     cursor_visible: u32,
+    cursor_style: u32,
     default_fg: u32,
     default_bg: u32,
-    _pad: u32,
+    tab_info: u32,
+    bg_opacity: f32,
+    _pad: [u32; 2],
 }
 
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 64);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 80);
 const _: () = assert!(std::mem::size_of::<Instance>() == 12);
 
 pub struct Renderer {
@@ -44,6 +47,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    caps_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
@@ -53,13 +57,22 @@ pub struct Renderer {
     instances: Vec<Instance>,
     atlas: Atlas,
     pad: u32,
+    bg_opacity: f32,
+    cursor_style: u32,
     force_full: bool,
     last_cursor: Option<(usize, usize)>,
+    last_cursor_visible: bool,
     last_hovered_link: Option<Hyperlink>,
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, font: Arc<FontSet>, font_px: f32) -> Self {
+    pub fn new(
+        window: Arc<Window>,
+        font: Arc<FontSet>,
+        font_px: f32,
+        bg_opacity: f32,
+        cursor_style: u32,
+    ) -> Self {
         let size = window.inner_size();
 
         #[cfg(target_os = "macos")]
@@ -93,6 +106,16 @@ impl Renderer {
         // Prefer a non-sRGB format so packed colors pass straight through.
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+        let caps_alpha_modes = caps.alpha_modes.clone();
+        let alpha_mode = if bg_opacity < 1.0 {
+            caps_alpha_modes
+                .iter()
+                .copied()
+                .find(|&m| m == wgpu::CompositeAlphaMode::PreMultiplied || m == wgpu::CompositeAlphaMode::PostMultiplied)
+                .unwrap_or(caps_alpha_modes[0])
+        } else {
+            caps_alpha_modes[0]
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -100,7 +123,7 @@ impl Renderer {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
         };
         surface.configure(&device, &config);
@@ -169,7 +192,7 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -197,6 +220,7 @@ impl Renderer {
             device,
             queue,
             config,
+            caps_alpha_modes,
             pipeline,
             bgl,
             bind_group,
@@ -206,8 +230,11 @@ impl Renderer {
             instances: Vec::new(),
             atlas,
             pad,
+            bg_opacity: bg_opacity.clamp(0.0, 1.0),
+            cursor_style,
             force_full: true,
             last_cursor: None,
+            last_cursor_visible: true,
             last_hovered_link: None,
         }
     }
@@ -254,6 +281,42 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.force_full = true;
+    }
+
+    pub fn pad(&self) -> u32 {
+        self.pad
+    }
+
+    pub fn set_bg_opacity(&mut self, opacity: f32) {
+        let op = opacity.clamp(0.0, 1.0);
+        if (self.bg_opacity - op).abs() > 0.001 {
+            self.bg_opacity = op;
+            let alpha_mode = if self.bg_opacity < 1.0 {
+                self.caps_alpha_modes
+                    .iter()
+                    .copied()
+                    .find(|&m| m == wgpu::CompositeAlphaMode::PreMultiplied || m == wgpu::CompositeAlphaMode::PostMultiplied)
+                    .unwrap_or(self.caps_alpha_modes[0])
+            } else {
+                self.caps_alpha_modes[0]
+            };
+            self.config.alpha_mode = alpha_mode;
+            self.surface.configure(&self.device, &self.config);
+            self.force_full = true;
+        }
+    }
+
+    pub fn set_cursor_style(&mut self, style: u32) {
+        if self.cursor_style != style {
+            self.cursor_style = style;
+            self.force_full = true;
+        }
+    }
+
+    pub fn set_fonts(&mut self, fonts: Arc<FontSet>, px: f32) {
+        self.atlas.set_fonts(&self.device, &self.queue, fonts, px);
+        self.bind_group = make_bind_group(&self.device, &self.bgl, &self.uniform_buf, &self.atlas, &self.sampler);
         self.force_full = true;
     }
 
@@ -320,6 +383,7 @@ impl Renderer {
         grid: &Mutex<Grid>,
         tab_bar: Option<(&[String], usize)>,
         hovered_link: Option<&Hyperlink>,
+        cursor_blink_on: bool,
     ) {
         let top_rows = usize::from(tab_bar.is_some());
         if self.last_hovered_link.as_ref() != hovered_link {
@@ -332,9 +396,11 @@ impl Renderer {
         // so non-visual escape sequences never exhaust swapchain drawables.
         if !self.force_full {
             let g = grid.lock();
+            let effective_visible = g.cursor_pos().is_some() && cursor_blink_on;
             if !g.all_dirty
                 && self.instances.len() == g.cols * (g.rows + top_rows)
                 && g.cursor_pos() == self.last_cursor
+                && effective_visible == self.last_cursor_visible
                 && !g.dirty.iter().any(|&d| d)
             {
                 return;
@@ -456,6 +522,18 @@ impl Renderer {
             Some((titles, active_idx)) => ((active_idx as u32) << 16) | (titles.len() as u32 & 0xFFFF),
             None => 0,
         };
+        let active_cursor_style = {
+            let g = grid.lock();
+            match g.cursor_shape {
+                1 | 2 => 0, // Block
+                3 | 4 => 2, // Underline
+                5 | 6 => 1, // Bar
+                _ => self.cursor_style,
+            }
+        };
+
+        let effective_cursor_visible = cursor.is_some() && cursor_blink_on;
+        self.last_cursor_visible = effective_cursor_visible;
 
         let u = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
@@ -465,24 +543,29 @@ impl Renderer {
             cols: cols as u32,
             slots_per_row: self.atlas.slots_per_row,
             cursor: [cx as u32, cy as u32],
-            cursor_visible: cursor.is_some() as u32,
-            default_fg: DEFAULT_FG,
-            default_bg: DEFAULT_BG,
-            _pad: tab_info,
+            cursor_visible: effective_cursor_visible as u32,
+            cursor_style: active_cursor_style,
+            default_fg: default_fg(),
+            default_bg: default_bg(),
+            tab_info,
+            bg_opacity: self.bg_opacity,
+            _pad: [0; 2],
         };
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
-            let c = |s: u32| ((DEFAULT_BG >> s) & 0xFF) as f64 / 255.0;
+            let bg = default_bg();
+            let c = |s: u32| ((bg >> s) & 0xFF) as f64 / 255.0;
+            let clear_a = if self.bg_opacity < 1.0 { self.bg_opacity as f64 } else { 1.0 };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cells"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: c(24), g: c(16), b: c(8), a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: c(24), g: c(16), b: c(8), a: clear_a }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

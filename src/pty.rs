@@ -29,7 +29,14 @@ fn cstr(s: impl Into<Vec<u8>>) -> CString {
 }
 
 impl Pty {
-    pub fn spawn_in(cols: u16, rows: u16, cell_w: u32, cell_h: u32, cwd: Option<&str>) -> io::Result<Pty> {
+    pub fn spawn_in(
+        cols: u16,
+        rows: u16,
+        cell_w: u32,
+        cell_h: u32,
+        cwd: Option<&str>,
+        shell_features: Option<crate::config::ShellFeatures>,
+    ) -> io::Result<Pty> {
         let shell = std::env::var("SHELL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -62,6 +69,17 @@ impl Pty {
         env.push(cstr("TERM=xterm-256color"));
         env.push(cstr("COLORTERM=truecolor"));
         env.push(cstr("TERM_PROGRAM=laplace"));
+        env.push(cstr("TERM_PROGRAM_VERSION=0.1.0"));
+        if let Some(feats) = shell_features {
+            env.push(cstr("LAPLACE_SHELL_INTEGRATION=1"));
+            let mut list = Vec::new();
+            if feats.cursor { list.push("cursor"); }
+            if feats.sudo { list.push("sudo"); }
+            if feats.title { list.push("title"); }
+            if !list.is_empty() {
+                env.push(cstr(format!("LAPLACE_SHELL_INTEGRATION_FEATURES={}", list.join(","))));
+            }
+        }
         env.push(cstr(format!("PWD={target_dir}")));
         if std::env::var_os("LANG").is_none() && std::env::var_os("LC_ALL").is_none() {
             env.push(cstr("LANG=en_US.UTF-8"));

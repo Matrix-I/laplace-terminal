@@ -2,7 +2,10 @@
 //! coalesced PTY redraw wakeups, and keyboard-to-ANSI translation.
 
 mod atlas;
+mod config;
+mod fontdb;
 mod grid;
+mod macos;
 mod pty;
 mod renderer;
 
@@ -12,7 +15,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -20,8 +23,6 @@ use winit::window::{CursorIcon, Window, WindowId};
 use crate::grid::{Grid, Hyperlink, Selection};
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
-
-const DEFAULT_PT: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy)]
 enum AppEvent {
@@ -51,6 +52,11 @@ struct State {
     last_click_cell: Option<(usize, usize)>,
     click_count: u8,
     hovered_link: Option<Hyperlink>,
+    config: config::Config,
+    config_mtime: Option<std::time::SystemTime>,
+    mouse_hidden: bool,
+    cursor_blink_epoch: std::time::Instant,
+    focused: bool,
 }
 
 struct App {
@@ -60,24 +66,53 @@ struct App {
 }
 
 impl ApplicationHandler<AppEvent> for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if let StartCause::ResumeTimeReached { .. } = cause {
+            if let Some(s) = &self.state {
+                s.window.request_redraw();
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
+        let cfg = config::Config::load();
+        grid::set_default_colors(cfg.foreground, cfg.background);
+
         let attrs = Window::default_attributes()
             .with_title("Laplace")
+            .with_transparent(cfg.background_opacity < 1.0)
             .with_inner_size(LogicalSize::new(960.0, 600.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        let font = atlas::load_font();
-        let font_pt = std::env::var("LAPLACE_FONT_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<f32>().ok())
-            .unwrap_or(DEFAULT_PT)
-            .clamp(6.0, 72.0);
+        #[cfg(target_os = "macos")]
+        macos::apply_macos_window_config(&window, &cfg);
+
+        let font = atlas::load_font(&cfg.font_family);
+        let font_pt = cfg.font_size.clamp(6.0, 72.0);
         let font_px = (font_pt * window.scale_factor() as f32).round();
 
-        let renderer = Renderer::new(window.clone(), font, font_px);
+        let mut renderer = Renderer::new(
+            window.clone(),
+            font,
+            font_px,
+            cfg.background_opacity,
+            cfg.cursor_style.shader_id(),
+        );
+
+        if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
+            let (cw, ch) = renderer.cell_size();
+            let pad = renderer.pad();
+            let sf = window.scale_factor();
+            let inner_w = (w_cols * cw + 2 * pad) as f64 / sf;
+            let inner_h = (w_rows * ch + 2 * pad) as f64 / sf;
+            let _ = window.request_inner_size(LogicalSize::new(inner_w, inner_h));
+            let sz = window.inner_size();
+            renderer.resize(sz.width, sz.height);
+        }
+
         let (cols, rows) = renderer.grid_size_for_tabs(false);
         let (cw, ch) = renderer.cell_size();
 
@@ -89,12 +124,14 @@ impl ApplicationHandler<AppEvent> for App {
             cw,
             ch,
             None,
+            Some(cfg.shell_integration_features),
             &self.proxy,
             &self.wakeup_queued,
         )
         .expect("spawn initial PTY");
         let title = tab_title(&tab);
 
+        let config_mtime = config::config_mtime();
         self.state = Some(State {
             window,
             renderer,
@@ -111,6 +148,11 @@ impl ApplicationHandler<AppEvent> for App {
             last_click_cell: None,
             click_count: 0,
             hovered_link: None,
+            config: cfg,
+            config_mtime,
+            mouse_hidden: false,
+            cursor_blink_epoch: std::time::Instant::now(),
+            focused: true,
         });
     }
 
@@ -160,6 +202,10 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 s.mouse_pos = (position.x, position.y);
+                if s.mouse_hidden {
+                    s.window.set_cursor_visible(true);
+                    s.mouse_hidden = false;
+                }
                 if s.selecting {
                     if let Some(start) = s.last_click_cell {
                         let show_tabs = s.tabs.len() > 1;
@@ -284,9 +330,13 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        (y as f64 * s.config.mouse_scroll_discrete).round() as isize
+                    }
                     MouseScrollDelta::PixelDelta(p) => {
-                        (p.y as f32 / s.renderer.cell_size().1 as f32).round() as isize
+                        let cell_h = s.renderer.cell_size().1 as f64;
+                        let px_lines = p.y / cell_h.max(1.0);
+                        (px_lines * s.config.mouse_scroll_precision).round() as isize
                     }
                 };
                 if lines != 0 {
@@ -297,6 +347,18 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::KeyboardInput { event, .. } => {
                 handle_key(s, &event, event_loop, &self.proxy, &self.wakeup_queued);
+            }
+
+            WindowEvent::Focused(focused) => {
+                s.focused = focused;
+                if focused {
+                    s.cursor_blink_epoch = std::time::Instant::now();
+                    let mtime = config::config_mtime();
+                    if mtime != s.config_mtime {
+                        reload_config(s);
+                    }
+                }
+                s.window.request_redraw();
             }
 
             WindowEvent::RedrawRequested => {
@@ -312,9 +374,21 @@ impl ApplicationHandler<AppEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.wakeup_queued.load(Ordering::Acquire) {
             event_loop.set_control_flow(ControlFlow::Poll);
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
         }
+        if let Some(s) = &self.state {
+            if s.focused && cursor_blinks(s) {
+                let now = std::time::Instant::now();
+                let elapsed = s.cursor_blink_epoch.elapsed();
+                let elapsed_ms = elapsed.as_millis();
+                let next_boundary_ms = ((elapsed_ms / 500) + 1) * 500;
+                let dur_to_next = std::time::Duration::from_millis((next_boundary_ms - elapsed_ms) as u64);
+                let next_instant = now + dur_to_next;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next_instant));
+                return;
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 
@@ -325,11 +399,12 @@ fn spawn_tab(
     cw: u32,
     ch: u32,
     cwd: Option<&str>,
+    shell_features: Option<crate::config::ShellFeatures>,
     proxy: &EventLoopProxy<AppEvent>,
     wakeup_queued: &Arc<AtomicBool>,
 ) -> std::io::Result<Tab> {
     let grid = Arc::new(Mutex::new(Grid::new(cols, rows)));
-    let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd)?;
+    let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd, shell_features)?;
     let p1 = proxy.clone();
     let p2 = proxy.clone();
     let queued = wakeup_queued.clone();
@@ -396,14 +471,80 @@ fn refresh_tab_titles(s: &mut State) {
     }
 }
 
+fn cursor_blinks(s: &State) -> bool {
+    match s.config.cursor_style_blink {
+        Some(b) => b,
+        None => {
+            if let Some(tab) = s.tabs.get(s.active) {
+                let g = tab.grid.lock();
+                match g.cursor_shape {
+                    0 | 1 | 3 | 5 => true,
+                    _ => false,
+                }
+            } else {
+                true
+            }
+        }
+    }
+}
+
+fn cursor_is_visible_now(s: &State) -> bool {
+    if !s.focused {
+        return true;
+    }
+    if !cursor_blinks(s) {
+        return true;
+    }
+    let elapsed = s.cursor_blink_epoch.elapsed().as_millis();
+    (elapsed % 1000) < 500
+}
+
+fn reload_config(s: &mut State) {
+    let old = s.config.clone();
+    let new = config::Config::load();
+    s.config_mtime = config::config_mtime();
+    if new == old {
+        return;
+    }
+
+    grid::set_default_colors(new.foreground, new.background);
+
+    #[cfg(target_os = "macos")]
+    macos::apply_macos_window_config(&s.window, &new);
+
+    s.renderer.set_bg_opacity(new.background_opacity);
+    s.renderer.set_cursor_style(new.cursor_style.shader_id());
+
+    let font_changed = new.font_family != old.font_family;
+    let size_changed = (new.font_size - old.font_size).abs() > 0.001;
+    if font_changed || size_changed {
+        s.font_pt = new.font_size;
+        let font = atlas::load_font(&new.font_family);
+        let sf = s.window.scale_factor();
+        let font_px = (s.font_pt * sf as f32).round();
+        s.renderer.set_fonts(font, font_px);
+        sync_size(s);
+    }
+
+    if !new.mouse_hide_while_typing && s.mouse_hidden {
+        s.window.set_cursor_visible(true);
+        s.mouse_hidden = false;
+    }
+
+    s.config = new;
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
 fn render_active(s: &mut State) {
     if s.tabs.is_empty() {
         return;
     }
     refresh_tab_titles(s);
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
+    let blink_on = cursor_is_visible_now(s);
     s.renderer
-        .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref());
+        .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref(), blink_on);
 }
 
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
@@ -501,7 +642,17 @@ fn duplicate_active_tab(
     let (cw, ch) = s.renderer.cell_size();
     let id = s.next_tab_id;
     s.next_tab_id += 1;
-    match spawn_tab(id, cols, rows, cw, ch, cwd.as_deref(), proxy, wakeup_queued) {
+    match spawn_tab(
+        id,
+        cols,
+        rows,
+        cw,
+        ch,
+        cwd.as_deref(),
+        Some(s.config.shell_integration_features),
+        proxy,
+        wakeup_queued,
+    ) {
         Ok(tab) => {
             let insert_at = (s.active + 1).min(s.tabs.len());
             s.tabs.insert(insert_at, tab);
@@ -564,7 +715,11 @@ fn sync_size(s: &mut State) {
 }
 
 fn zoom(s: &mut State, delta_pt: f32) {
-    s.font_pt = if delta_pt == 0.0 { DEFAULT_PT } else { (s.font_pt + delta_pt).clamp(6.0, 72.0) };
+    s.font_pt = if delta_pt == 0.0 {
+        s.config.font_size
+    } else {
+        (s.font_pt + delta_pt).clamp(6.0, 72.0)
+    };
     let sf = s.window.scale_factor();
     s.renderer.set_font_px((s.font_pt * sf as f32).round(), sf);
     sync_size(s);
@@ -586,10 +741,40 @@ fn handle_key(
     let shift = s.mods.shift_key();
     let super_key = s.mods.super_key();
 
+    if !matches!(
+        &ev.logical_key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::Super
+                | NamedKey::Meta
+        )
+    ) {
+        if s.config.mouse_hide_while_typing && !s.mouse_hidden {
+            s.window.set_cursor_visible(false);
+            s.mouse_hidden = true;
+        }
+    }
+    s.cursor_blink_epoch = std::time::Instant::now();
+
     // Duplicate tab in same working directory:
     // - macOS: Cmd+T
     // - Linux: Ctrl+T (or Ctrl+Shift+T)
     if let Key::Character(ch) = &ev.logical_key {
+        #[cfg(target_os = "macos")]
+        let is_config = super_key && !ctrl && !alt && (ch == "," || (shift && ch == "<"));
+        #[cfg(not(target_os = "macos"))]
+        let is_config = ctrl && !alt && !super_key && (ch == "," || (shift && ch == "<"));
+        if is_config {
+            if shift {
+                reload_config(s);
+            } else {
+                config::open_config_in_editor();
+            }
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         let is_new_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("t");
         #[cfg(not(target_os = "macos"))]
