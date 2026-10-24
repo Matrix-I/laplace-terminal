@@ -38,6 +38,13 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **Open URL / Path Click** | `Cmd + Click` | `Ctrl + Click` *(or `Super + Click`)* | Opens target with `open` (macOS), `xdg-open` (Linux). |
 | **Hover URL Underline** | `Cmd + Mouse Move` | `Ctrl + Mouse Move` *(or `Super + Mouse Move`)* | Shows pointer cursor and URL preview pill. |
 | **CLI History Search** | `Ctrl + R` *(or `Cmd + R`)* | `Ctrl + R` *(or `Super + R` / `Ctrl + Shift + R`)* | Zero-latency fuzzy history search; preserves vim redo in alternate screen. |
+| **Split Pane Right (Vertical)** | `Cmd + D` | `Ctrl + Shift + D` *(or `Super + D`)* | Splits active pane vertically with hairline divider. |
+| **Split Pane Down (Horizontal)** | `Cmd + Shift + D` | `Ctrl + Shift + E` / `Super + Shift + D` / `Ctrl + Alt + D` | Splits active pane horizontally. |
+| **Toggle Split Zoom** | `Cmd + Shift + Enter` | `Ctrl + Shift + Enter` *(or `Super + Shift + Enter`)* | Zooms active split to full tab size and back. |
+| **Equalize Splits** | `Cmd + Option + =` / `Cmd + Ctrl + =` | `Ctrl + Alt + =` *(or `Super + Alt + =`)* | Balances split ratios evenly across pane tree. |
+| **Navigate Splits / Tabs** | `Cmd + Arrows` *(or `Cmd + Option + Arrows`)* | `Ctrl + Alt + Arrows` *(or `Super + Arrows`)* | Directional spatial navigation between splits (cycles tabs at edges). |
+| **Cycle Splits (Prev / Next)** | `Cmd + [` / `Cmd + ]` | `Ctrl + Alt + [` / `Ctrl + Alt + ]` *(or `Super + [` / `]`)* | Cycles focus across split panes in active tab. |
+| **Resize Active Split** | `Cmd + Ctrl + Arrows` | `Super + Ctrl + Arrows` / `Ctrl + Alt + Shift + Arrows` | Dynamically nudges layout tree split ratios. |
 
 ---
 

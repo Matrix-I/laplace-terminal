@@ -112,7 +112,8 @@ fn vs_main(
     out.fg = f;
     out.bg = b;
     let cursor_flag = select(0u, (u.cursor_style + 1u) << 8u, is_cursor);
-    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 12u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
+    let divider_flags = (glyph >> 16u) & 7u;
+    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 12u) | (divider_flags << 4u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
     out.col = col;
     return out;
 }
@@ -270,9 +271,31 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
+    var on_divider = false;
+    let is_div_r = (v.flags & 16u) != 0u;
+    let is_div_b = (v.flags & 32u) != 0u;
+    let is_div_act = (v.flags & 64u) != 0u;
+    if (is_div_r || is_div_b) {
+        let div_color = select(
+            vec3<f32>(0.208, 0.212, 0.251), // #353640 subtle inactive divider
+            vec3<f32>(0.420, 0.451, 0.549), // #6b738c active pane divider
+            is_div_act,
+        );
+        let rx = v.local.x * u.cell.x;
+        let ry = v.local.y * u.cell.y;
+        if (is_div_r && rx >= u.cell.x - 1.0) {
+            cell_color = div_color;
+            on_divider = true;
+        }
+        if (is_div_b && ry >= u.cell.y - 1.0) {
+            cell_color = div_color;
+            on_divider = true;
+        }
+    }
+
     var out_alpha = 1.0;
     let def_bg = unpack(u.default_bg);
-    if ((v.flags & 2u) == 0u && (v.flags & 4u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
+    if (!on_divider && (v.flags & 2u) == 0u && (v.flags & 4u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
         out_alpha = mix(u.bg_opacity, 1.0, a);
     }
 

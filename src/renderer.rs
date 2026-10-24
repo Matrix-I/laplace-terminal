@@ -11,6 +11,15 @@ use winit::window::Window;
 use crate::atlas::{Atlas, FontSet};
 use crate::grid::{default_bg, default_fg, Grid, Hyperlink};
 use crate::history::HistorySearch;
+use crate::split::PaneRect;
+
+pub struct RenderPane<'a> {
+    #[allow(dead_code)]
+    pub id: u64,
+    pub grid: &'a Mutex<Grid>,
+    pub rect: PaneRect,
+    pub is_active: bool,
+}
 
 /// Per-cell GPU instance: 12 bytes, mirrors `Cell` with codepoint → atlas slot.
 #[repr(C)]
@@ -379,14 +388,17 @@ impl Renderer {
         Some((row.min(rows - 1), col.min(cols - 1)))
     }
 
-    pub fn render_with_tabs(
+    pub fn render_panes(
         &mut self,
-        grid: &Mutex<Grid>,
+        panes: &[RenderPane],
         tab_bar: Option<(&[String], usize)>,
         hovered_link: Option<&Hyperlink>,
         cursor_blink_on: bool,
         history_search: Option<&HistorySearch>,
     ) {
+        if panes.is_empty() {
+            return;
+        }
         let top_rows = usize::from(tab_bar.is_some());
         if self.last_hovered_link.as_ref() != hovered_link {
             self.force_full = true;
@@ -394,25 +406,32 @@ impl Renderer {
         }
 
         let is_search_open = history_search.map_or(false, |h| h.is_open);
+        let (cols, term_rows) = self.grid_size_for_tabs(tab_bar.is_some());
+        let total_rows = term_rows + top_rows;
+        let n = cols * total_rows;
 
-        // Fast check before acquiring a Metal swapchain drawable: if no cells
-        // or cursor state changed since the last frame, skip presenting entirely
-        // so non-visual escape sequences never exhaust swapchain drawables.
+        let active_pane = panes.iter().find(|p| p.is_active).unwrap_or(&panes[0]);
+        let active_cur = {
+            let g = active_pane.grid.lock();
+            g.cursor_pos().map(|(cx, cy)| (active_pane.rect.col + cx, active_pane.rect.row + cy + top_rows))
+        };
+        let effective_visible = active_cur.is_some() && cursor_blink_on;
+
+        // Fast check before acquiring a Metal/Vulkan swapchain drawable
         if !self.force_full && !is_search_open {
-            let g = grid.lock();
-            let effective_visible = g.cursor_pos().is_some() && cursor_blink_on;
-            if !g.all_dirty
-                && self.instances.len() == g.cols * (g.rows + top_rows)
-                && g.cursor_pos() == self.last_cursor
+            let any_dirty = panes.iter().any(|p| {
+                let g = p.grid.lock();
+                g.all_dirty || g.dirty.iter().any(|&d| d)
+            });
+            if !any_dirty
+                && self.instances.len() == n
+                && active_cur == self.last_cursor
                 && effective_visible == self.last_cursor_visible
-                && !g.dirty.iter().any(|&d| d)
             {
                 return;
             }
         }
 
-        // Acquire first: with Fifo this may block until V-Sync, and we must not
-        // hold the grid lock (which would stall the PTY parser) while waiting.
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
@@ -426,55 +445,92 @@ impl Renderer {
             }
         };
 
-        let (cols, total_rows, mut lo, mut hi, cursor) = {
-            let mut g = grid.lock();
-            let (cols, rows) = (g.cols, g.rows);
-            let total_rows = rows + top_rows;
-            let n = cols * total_rows;
-            if self.instances.len() != n {
-                self.instances = vec![Instance::default(); n];
-                if self.instance_buf.size() < (n * 12) as u64 {
-                    self.instance_buf = make_instance_buf(&self.device, n);
-                }
-                self.force_full = true;
+        if self.instances.len() != n {
+            self.instances = vec![Instance::default(); n];
+            if self.instance_buf.size() < (n * 12) as u64 {
+                self.instance_buf = make_instance_buf(&self.device, n);
             }
-            self.atlas.begin_frame();
-            let full = self.force_full || g.all_dirty;
-            let (mut lo, mut hi) = (usize::MAX, 0);
-            if let Some((titles, active_idx)) = tab_bar {
-                if full {
-                    self.build_tab_bar_row(cols, titles, active_idx);
-                    lo = 0;
-                    hi = 0;
-                }
-            }
-            for r in 0..rows {
-                if full || g.dirty[r] {
-                    let dst_row = r + top_rows;
-                    self.build_row(&g, r, dst_row, hovered_link);
-                    lo = lo.min(dst_row);
-                    hi = hi.max(dst_row);
-                }
-            }
-            if self.atlas.take_evicted() {
-                // A recycled slot may be referenced by a row we skipped.
-                if let Some((titles, active_idx)) = tab_bar {
-                    self.build_tab_bar_row(cols, titles, active_idx);
-                }
-                for r in 0..rows {
-                    self.build_row(&g, r, r + top_rows, hovered_link);
-                }
-                self.atlas.take_evicted();
+            self.force_full = true;
+        }
+
+        self.atlas.begin_frame();
+        let full = self.force_full;
+        let (mut lo, mut hi) = (usize::MAX, 0);
+
+        if let Some((titles, active_idx)) = tab_bar {
+            if full {
+                self.build_tab_bar_row(cols, titles, active_idx);
                 lo = 0;
-                hi = total_rows - 1;
+                hi = 0;
+            }
+        }
+
+        let active_rect = panes.iter().find(|p| p.is_active).map(|p| p.rect);
+
+        for pane in panes {
+            let mut g = pane.grid.lock();
+            let pane_full = full || g.all_dirty;
+            let p_cols = pane.rect.cols.min(g.cols);
+            let p_rows = pane.rect.rows.min(g.rows);
+
+            for r in 0..p_rows {
+                if pane_full || g.dirty[r] {
+                    let dst_row = top_rows + pane.rect.row + r;
+                    if dst_row < total_rows {
+                        self.build_pane_row(
+                            &g,
+                            r,
+                            dst_row,
+                            pane.rect.col,
+                            p_cols,
+                            cols,
+                            &pane.rect,
+                            pane.is_active,
+                            active_rect.as_ref(),
+                            hovered_link,
+                        );
+                        lo = lo.min(dst_row);
+                        hi = hi.max(dst_row);
+                    }
+                }
             }
             g.dirty.fill(false);
             g.all_dirty = false;
-            self.force_full = false;
-            let cur = g.cursor_pos();
-            self.last_cursor = cur;
-            (cols, total_rows, lo, hi, cur.map(|(cx, cy)| (cx, cy + top_rows)))
-        };
+        }
+
+        if self.atlas.take_evicted() {
+            if let Some((titles, active_idx)) = tab_bar {
+                self.build_tab_bar_row(cols, titles, active_idx);
+            }
+            for pane in panes {
+                let g = pane.grid.lock();
+                let p_cols = pane.rect.cols.min(g.cols);
+                let p_rows = pane.rect.rows.min(g.rows);
+                for r in 0..p_rows {
+                    let dst_row = top_rows + pane.rect.row + r;
+                    if dst_row < total_rows {
+                        self.build_pane_row(
+                            &g,
+                            r,
+                            dst_row,
+                            pane.rect.col,
+                            p_cols,
+                            cols,
+                            &pane.rect,
+                            pane.is_active,
+                            active_rect.as_ref(),
+                            hovered_link,
+                        );
+                    }
+                }
+            }
+            self.atlas.take_evicted();
+            lo = 0;
+            hi = total_rows - 1;
+        }
+
+        self.force_full = false;
+        self.last_cursor = active_cur;
 
         if let Some(link) = hovered_link {
             let max_chars = cols.saturating_sub(2).min(120);
@@ -485,7 +541,6 @@ impl Renderer {
             };
             let preview_row = total_rows - 1;
             let row_start = preview_row * cols;
-            // Ghostty bottom-left URL preview pill: dark slate background #16171e (rgb<<8 | 0x80), white text #f2f2f7, flag 4 = top border
             const PREVIEW_BG: u32 = 0x1617_1E80 | 4;
             const PREVIEW_FG: u32 = 0xF2F2_F7FF;
             for (col, ch) in display_url.chars().enumerate() {
@@ -527,13 +582,13 @@ impl Renderer {
                 bytemuck::cast_slice(&self.instances[a..b]),
             );
         }
-        let (cx, cy) = cursor.unwrap_or((0, 0));
+        let (cx, cy) = active_cur.unwrap_or((0, 0));
         let tab_info = match tab_bar {
             Some((titles, active_idx)) => ((active_idx as u32) << 16) | (titles.len() as u32 & 0xFFFF),
             None => 0,
         };
         let active_cursor_style = {
-            let g = grid.lock();
+            let g = active_pane.grid.lock();
             match g.cursor_shape {
                 1 | 2 => 0, // Block
                 3 | 4 => 2, // Underline
@@ -545,7 +600,7 @@ impl Renderer {
         let effective_cursor_visible = if is_search_open {
             false
         } else {
-            cursor.is_some() && cursor_blink_on
+            effective_visible
         };
         self.last_cursor_visible = effective_cursor_visible;
 
@@ -596,19 +651,70 @@ impl Renderer {
         frame.present();
     }
 
-    fn build_row(
+    #[allow(dead_code)]
+    pub fn render_with_tabs(
+        &mut self,
+        grid: &Mutex<Grid>,
+        tab_bar: Option<(&[String], usize)>,
+        hovered_link: Option<&Hyperlink>,
+        cursor_blink_on: bool,
+        history_search: Option<&HistorySearch>,
+    ) {
+        let (cols, rows) = self.grid_size_for_tabs(tab_bar.is_some());
+        let rect = PaneRect {
+            id: 1,
+            col: 0,
+            row: 0,
+            cols,
+            rows,
+            has_border_right: false,
+            has_border_bottom: false,
+        };
+        let p = RenderPane {
+            id: 1,
+            grid,
+            rect,
+            is_active: true,
+        };
+        self.render_panes(&[p], tab_bar, hovered_link, cursor_blink_on, history_search);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_pane_row(
         &mut self,
         g: &Grid,
         src_row: usize,
         dst_row: usize,
+        dst_col: usize,
+        p_cols: usize,
+        window_cols: usize,
+        rect: &PaneRect,
+        is_active: bool,
+        active_rect: Option<&PaneRect>,
         hovered_link: Option<&Hyperlink>,
     ) {
         const SEL_BG: u32 = 0x3D59_A180;
         const SEL_FG: u32 = 0xFFFF_FFFF;
-        let cols = g.cols;
         let row = g.display_row(src_row);
-        let out = &mut self.instances[dst_row * cols..(dst_row + 1) * cols];
+        let start = dst_row * window_cols + dst_col;
+        let out = &mut self.instances[start..start + p_cols];
         let is_link_row = hovered_link.map_or(false, |l| l.row == src_row);
+        let is_last_row = src_row + 1 == rect.rows;
+
+        let is_border_right_active = is_active
+            || active_rect.is_some_and(|ar| {
+                ar.col == rect.col + rect.cols
+                    && ar.row < rect.row + rect.rows
+                    && ar.row + ar.rows > rect.row
+            });
+
+        let is_border_bottom_active = is_active
+            || active_rect.is_some_and(|ar| {
+                ar.row == rect.row + rect.rows
+                    && ar.col < rect.col + rect.cols
+                    && ar.col + ar.cols > rect.col
+            });
+
         for (col, (dst, cell)) in out.iter_mut().zip(row).enumerate() {
             let slot = self.atlas.slot(&self.queue, cell.codepoint);
             let underline_flag = if is_link_row {
@@ -618,15 +724,32 @@ impl Renderer {
             } else {
                 0u32
             };
+
+            // Divider flags (bit 0: right, bit 1: bottom, bit 2: active) packed into high 16 bits of glyph
+            let mut div_flags = 0u32;
+            if rect.has_border_right && col + 1 == rect.cols {
+                div_flags |= 1;
+                if is_border_right_active {
+                    div_flags |= 4;
+                }
+            }
+            if rect.has_border_bottom && is_last_row {
+                div_flags |= 2;
+                if is_border_bottom_active {
+                    div_flags |= 4;
+                }
+            }
+            let glyph_with_div = (slot as u32) | (div_flags << 16);
+
             if g.is_selected(src_row, col) {
                 *dst = Instance {
-                    glyph: slot as u32,
+                    glyph: glyph_with_div,
                     fg: SEL_FG,
                     bg: (SEL_BG | (cell.bg & 1)) | underline_flag,
                 };
             } else {
                 *dst = Instance {
-                    glyph: slot as u32,
+                    glyph: glyph_with_div,
                     fg: cell.fg,
                     bg: cell.bg | underline_flag,
                 };
@@ -1077,4 +1200,19 @@ fn make_instance_buf(device: &wgpu::Device, cells: usize) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_shader_wgsl_syntax() {
+        let shader_src = include_str!("shader.wgsl");
+        let module = wgpu::naga::front::wgsl::parse_str(shader_src).expect("Failed to parse WGSL");
+        let mut validator = wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        );
+        let info = validator.validate(&module);
+        assert!(info.is_ok(), "Failed to validate WGSL module: {:?}", info.err());
+    }
 }

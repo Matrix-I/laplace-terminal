@@ -9,6 +9,7 @@ mod history;
 mod macos;
 mod pty;
 mod renderer;
+mod split;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use crate::grid::{Grid, Hyperlink, Selection};
 use crate::history::HistorySearch;
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
+use crate::split::{Direction, PaneRect, Rect, SplitDirection, SplitNode};
 
 #[derive(Debug, Clone, Copy)]
 pub enum AppEvent {
@@ -33,10 +35,84 @@ pub enum AppEvent {
     Reopen,
 }
 
-struct Tab {
+struct Pane {
     id: u64,
     grid: Arc<Mutex<Grid>>,
     pty: Pty,
+}
+
+struct Tab {
+    #[allow(dead_code)]
+    id: u64,
+    panes: Vec<Pane>,
+    layout: SplitNode,
+    active_pane_id: u64,
+    zoomed_pane_id: Option<u64>,
+}
+
+impl Tab {
+    fn new(id: u64, pane: Pane) -> Self {
+        let pane_id = pane.id;
+        Tab {
+            id,
+            panes: vec![pane],
+            layout: SplitNode::new_leaf(pane_id),
+            active_pane_id: pane_id,
+            zoomed_pane_id: None,
+        }
+    }
+
+    fn active_pane(&self) -> &Pane {
+        self.panes
+            .iter()
+            .find(|p| p.id == self.active_pane_id)
+            .unwrap_or(&self.panes[0])
+    }
+
+    #[allow(dead_code)]
+    fn active_pane_mut(&mut self) -> &mut Pane {
+        let id = self.active_pane_id;
+        if let Some(pos) = self.panes.iter().position(|p| p.id == id) {
+            &mut self.panes[pos]
+        } else {
+            &mut self.panes[0]
+        }
+    }
+
+    fn pane(&self, id: u64) -> Option<&Pane> {
+        self.panes.iter().find(|p| p.id == id)
+    }
+
+    fn compute_pane_rects(&self, total_cols: usize, total_rows: usize) -> Vec<PaneRect> {
+        if let Some(z_id) = self.zoomed_pane_id {
+            if self.panes.iter().any(|p| p.id == z_id) {
+                return vec![PaneRect {
+                    id: z_id,
+                    col: 0,
+                    row: 0,
+                    cols: total_cols,
+                    rows: total_rows,
+                    has_border_right: false,
+                    has_border_bottom: false,
+                }];
+            }
+        }
+        let area = Rect {
+            col: 0,
+            row: 0,
+            cols: total_cols,
+            rows: total_rows,
+        };
+        let mut rects = Vec::with_capacity(self.panes.len());
+        self.layout.compute_rects(area, &mut rects);
+        rects
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HoveredPaneLink {
+    pane_id: u64,
+    link: Hyperlink,
 }
 
 struct State {
@@ -46,6 +122,7 @@ struct State {
     tab_titles: Vec<String>,
     active: usize,
     next_tab_id: u64,
+    next_pane_id: u64,
     mods: ModifiersState,
     font_pt: f32,
     mouse_pos: (f64, f64),
@@ -53,8 +130,9 @@ struct State {
     drag_moved: bool,
     last_click_time: Option<std::time::Instant>,
     last_click_cell: Option<(usize, usize)>,
+    active_click_pane_id: Option<u64>,
     click_count: u8,
-    hovered_link: Option<Hyperlink>,
+    hovered_link: Option<HoveredPaneLink>,
     config: config::Config,
     config_mtime: Option<std::time::SystemTime>,
     mouse_hidden: bool,
@@ -127,8 +205,9 @@ impl ApplicationHandler<AppEvent> for App {
         let (cw, ch) = renderer.cell_size();
 
         let tab_id = 1;
-        let tab = spawn_tab(
-            tab_id,
+        let pane_id = 1;
+        let pane = spawn_pane(
+            pane_id,
             cols,
             rows,
             cw,
@@ -139,6 +218,7 @@ impl ApplicationHandler<AppEvent> for App {
             &self.wakeup_queued,
         )
         .expect("spawn initial PTY");
+        let tab = Tab::new(tab_id, pane);
         let title = tab_title(&tab);
 
         let config_mtime = config::config_mtime();
@@ -149,6 +229,7 @@ impl ApplicationHandler<AppEvent> for App {
             tab_titles: vec![title],
             active: 0,
             next_tab_id: 2,
+            next_pane_id: 2,
             mods: ModifiersState::default(),
             font_pt,
             mouse_pos: (0.0, 0.0),
@@ -156,6 +237,7 @@ impl ApplicationHandler<AppEvent> for App {
             drag_moved: false,
             last_click_time: None,
             last_click_cell: None,
+            active_click_pane_id: None,
             click_count: 0,
             hovered_link: None,
             config: cfg,
@@ -194,8 +276,31 @@ impl ApplicationHandler<AppEvent> for App {
                     event_loop.exit();
                     return;
                 };
-                if let Some(pos) = s.tabs.iter().position(|t| t.id == exited_id) {
-                    s.tabs.remove(pos);
+                if let Some(tab_pos) = s.tabs.iter().position(|t| t.panes.iter().any(|p| p.id == exited_id)) {
+                    let tab = &mut s.tabs[tab_pos];
+                    if tab.panes.len() > 1 {
+                        tab.panes.retain(|p| p.id != exited_id);
+                        tab.layout.remove_pane(exited_id);
+                        if tab.zoomed_pane_id == Some(exited_id) {
+                            tab.zoomed_pane_id = None;
+                        }
+                        if tab.active_pane_id == exited_id {
+                            let mut ids = Vec::new();
+                            tab.layout.all_pane_ids(&mut ids);
+                            if let Some(&id) = ids.first() {
+                                tab.active_pane_id = id;
+                            } else if let Some(p) = tab.panes.first() {
+                                tab.active_pane_id = p.id;
+                            }
+                        }
+                        sync_size(s);
+                        refresh_tab_titles(s);
+                        s.renderer.invalidate();
+                        s.window.request_redraw();
+                        return;
+                    }
+
+                    s.tabs.remove(tab_pos);
                     if s.tabs.is_empty() {
                         #[cfg(target_os = "macos")]
                         {
@@ -220,7 +325,7 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if s.active >= s.tabs.len() {
                         s.active = s.tabs.len() - 1;
-                    } else if pos < s.active {
+                    } else if tab_pos < s.active {
                         s.active -= 1;
                     }
                     sync_size(s);
@@ -284,14 +389,23 @@ impl ApplicationHandler<AppEvent> for App {
                     s.mouse_hidden = false;
                 }
                 if s.selecting {
-                    if let Some(start) = s.last_click_cell {
+                    if let (Some(start), Some(pane_id)) = (s.last_click_cell, s.active_click_pane_id) {
                         let show_tabs = s.tabs.len() > 1;
                         let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
-                        if let Some(end) = s.renderer.pixel_to_cell(position.x, position.y, show_tabs, cols, rows) {
-                            if end != start || s.drag_moved {
-                                s.drag_moved = true;
-                                s.tabs[s.active].grid.lock().set_selection(Some(Selection { start, end }));
-                                s.window.request_redraw();
+                        if let Some((cell_row, cell_col)) = s.renderer.pixel_to_cell(position.x, position.y, show_tabs, cols, rows) {
+                            let tab = &s.tabs[s.active];
+                            let rects = tab.compute_pane_rects(cols, rows);
+                            if let Some(target) = rects.iter().find(|r| r.id == pane_id) {
+                                let pane_row = cell_row.saturating_sub(target.row).min(target.rows.saturating_sub(1));
+                                let pane_col = cell_col.saturating_sub(target.col).min(target.cols.saturating_sub(1));
+                                let end = (pane_row, pane_col);
+                                if end != start || s.drag_moved {
+                                    s.drag_moved = true;
+                                    if let Some(pane) = tab.pane(pane_id) {
+                                        pane.grid.lock().set_selection(Some(Selection { start, end }));
+                                        s.window.request_redraw();
+                                    }
+                                }
                             }
                         }
                     }
@@ -341,7 +455,7 @@ impl ApplicationHandler<AppEvent> for App {
                                                 payload.extend_from_slice(b"\x05\x15");
                                                 payload.extend_from_slice(cmd.as_bytes());
                                                 payload.push(b'\r');
-                                                s.tabs[s.active].pty.write(&payload);
+                                                s.tabs[s.active].active_pane().pty.write(&payload);
                                             }
                                             s.window.request_redraw();
                                             return;
@@ -373,9 +487,11 @@ impl ApplicationHandler<AppEvent> for App {
 
                         if cmd_pressed {
                             if let Some(link) = &s.hovered_link {
-                                let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
+                                let cwd = s.tabs.get(s.active)
+                                    .and_then(|t| t.pane(link.pane_id))
+                                    .and_then(|p| p.pty.cwd());
                                 let cwd_path = cwd.as_deref().map(std::path::Path::new);
-                                open_target(&link.url, link.is_path, cwd_path);
+                                open_target(&link.link.url, link.link.is_path, cwd_path);
                                 return;
                             }
                         }
@@ -389,59 +505,89 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                         let show_tabs = s.tabs.len() > 1;
                         let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
-                        if let Some((row, col)) =
+                        let mut switched_active_pane = false;
+                        if let Some((cell_row, cell_col)) =
                             s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
                         {
-                            let now = std::time::Instant::now();
-                            let multi_click = s
-                                .last_click_time
-                                .is_some_and(|t| now.duration_since(t).as_millis() <= 450)
-                                && s.last_click_cell.is_some_and(|(lr, _)| lr == row);
+                            let tab = &mut s.tabs[s.active];
+                            let rects = tab.compute_pane_rects(cols, rows);
+                            if let Some(target) = rects.iter().find(|r| {
+                                cell_col >= r.col
+                                    && cell_col < r.col + r.cols
+                                    && cell_row >= r.row
+                                    && cell_row < r.row + r.rows
+                            }) {
+                                let clicked_id = target.id;
+                                let pane_row = cell_row - target.row;
+                                let pane_col = cell_col - target.col;
 
-                            s.click_count = if multi_click {
-                                (s.click_count % 3) + 1
-                            } else {
-                                1
-                            };
-                            s.last_click_time = Some(now);
-                            s.last_click_cell = Some((row, col));
+                                if tab.active_pane_id != clicked_id {
+                                    tab.active_pane_id = clicked_id;
+                                    switched_active_pane = true;
+                                }
+                                s.active_click_pane_id = Some(clicked_id);
 
-                            match s.click_count {
-                                2 => {
-                                    let line_text =
-                                        s.tabs[s.active].grid.lock().select_smart_line(row, col);
-                                    if !line_text.is_empty() {
-                                        copy_to_clipboard(&line_text);
+                                let now = std::time::Instant::now();
+                                let multi_click = s
+                                    .last_click_time
+                                    .is_some_and(|t| now.duration_since(t).as_millis() <= 450)
+                                    && s.last_click_cell.is_some_and(|(lr, _)| lr == pane_row);
+
+                                s.click_count = if multi_click {
+                                    (s.click_count % 3) + 1
+                                } else {
+                                    1
+                                };
+                                s.last_click_time = Some(now);
+                                s.last_click_cell = Some((pane_row, pane_col));
+
+                                if let Some(pane) = tab.pane(clicked_id) {
+                                    match s.click_count {
+                                        2 => {
+                                            let line_text =
+                                                pane.grid.lock().select_smart_line(pane_row, pane_col);
+                                            if !line_text.is_empty() {
+                                                copy_to_clipboard(&line_text);
+                                            }
+                                            s.selecting = false;
+                                            s.drag_moved = false;
+                                            s.window.request_redraw();
+                                        }
+                                        3 => {
+                                            let line_text = pane.grid.lock().select_line(pane_row);
+                                            if !line_text.is_empty() {
+                                                copy_to_clipboard(&line_text);
+                                            }
+                                            s.selecting = false;
+                                            s.drag_moved = false;
+                                            s.window.request_redraw();
+                                        }
+                                        _ => {
+                                            pane.grid.lock().set_selection(None);
+                                            s.selecting = true;
+                                            s.drag_moved = false;
+                                            s.window.request_redraw();
+                                        }
                                     }
-                                    s.selecting = false;
-                                    s.drag_moved = false;
-                                    s.window.request_redraw();
-                                }
-                                3 => {
-                                    let line_text = s.tabs[s.active].grid.lock().select_line(row);
-                                    if !line_text.is_empty() {
-                                        copy_to_clipboard(&line_text);
-                                    }
-                                    s.selecting = false;
-                                    s.drag_moved = false;
-                                    s.window.request_redraw();
-                                }
-                                _ => {
-                                    s.tabs[s.active].grid.lock().set_selection(None);
-                                    s.selecting = true;
-                                    s.drag_moved = false;
-                                    s.window.request_redraw();
                                 }
                             }
+                        }
+                        if switched_active_pane {
+                            refresh_tab_titles(s);
+                            s.renderer.invalidate();
                         }
                     }
                     ElementState::Released => {
                         if s.selecting {
                             s.selecting = false;
                             if s.drag_moved {
-                                let text = s.tabs[s.active].grid.lock().selected_text();
-                                if let Some(t) = text {
-                                    copy_to_clipboard(&t);
+                                if let Some(pane_id) = s.active_click_pane_id {
+                                    if let Some(pane) = s.tabs[s.active].pane(pane_id) {
+                                        let text = pane.grid.lock().selected_text();
+                                        if let Some(t) = text {
+                                            copy_to_clipboard(&t);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -507,8 +653,30 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 };
                 if lines != 0 {
-                    s.tabs[s.active].grid.lock().scroll_display(lines);
-                    s.window.request_redraw();
+                    let show_tabs = s.tabs.len() > 1;
+                    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+                    let target_id = if let Some((cell_row, cell_col)) =
+                        s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
+                    {
+                        let tab = &s.tabs[s.active];
+                        let rects = tab.compute_pane_rects(cols, rows);
+                        rects
+                            .iter()
+                            .find(|r| {
+                                cell_col >= r.col
+                                    && cell_col < r.col + r.cols
+                                    && cell_row >= r.row
+                                    && cell_row < r.row + r.rows
+                            })
+                            .map(|r| r.id)
+                            .unwrap_or(tab.active_pane_id)
+                    } else {
+                        s.tabs[s.active].active_pane_id
+                    };
+                    if let Some(pane) = s.tabs[s.active].pane(target_id) {
+                        pane.grid.lock().scroll_display(lines);
+                        s.window.request_redraw();
+                    }
                 }
             }
 
@@ -561,8 +729,8 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
-fn spawn_tab(
-    tab_id: u64,
+fn spawn_pane(
+    pane_id: u64,
     cols: usize,
     rows: usize,
     cw: u32,
@@ -571,7 +739,7 @@ fn spawn_tab(
     shell_features: Option<crate::config::ShellFeatures>,
     proxy: &EventLoopProxy<AppEvent>,
     wakeup_queued: &Arc<AtomicBool>,
-) -> std::io::Result<Tab> {
+) -> std::io::Result<Pane> {
     let grid = Arc::new(Mutex::new(Grid::new(cols, rows)));
     let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd, shell_features)?;
     let p1 = proxy.clone();
@@ -585,39 +753,45 @@ fn spawn_tab(
             }
         },
         move || {
-            let _ = p2.send_event(AppEvent::ChildExit(tab_id));
+            let _ = p2.send_event(AppEvent::ChildExit(pane_id));
         },
     )?;
-    Ok(Tab { id: tab_id, grid, pty })
+    Ok(Pane { id: pane_id, grid, pty })
 }
 
 fn tab_title(tab: &Tab) -> String {
-    {
-        let g = tab.grid.lock();
+    let active = tab.active_pane();
+    let mut title = {
+        let g = active.grid.lock();
         if !g.title.is_empty() {
-            return g.title.clone();
-        }
-    }
-    let Some(cwd) = tab.pty.cwd() else {
-        return "shell".into();
-    };
-    let short_dir = if let Ok(home) = std::env::var("HOME") {
-        if cwd == home {
-            "~".to_string()
-        } else if let Some(rest) = cwd.strip_prefix(&home) {
-            format!("~{rest}")
+            g.title.clone()
+        } else if let Some(cwd) = active.pty.cwd() {
+            let short_dir = if let Ok(home) = std::env::var("HOME") {
+                if cwd == home {
+                    "~".to_string()
+                } else if let Some(rest) = cwd.strip_prefix(&home) {
+                    format!("~{rest}")
+                } else {
+                    cwd
+                }
+            } else {
+                cwd
+            };
+            let user = std::env::var("USER").unwrap_or_default();
+            if user.is_empty() {
+                short_dir
+            } else {
+                format!("{user}:{short_dir}")
+            }
         } else {
-            cwd
+            "shell".into()
         }
-    } else {
-        cwd
     };
-    let user = std::env::var("USER").unwrap_or_default();
-    if user.is_empty() {
-        short_dir
-    } else {
-        format!("{user}:{short_dir}")
+
+    if tab.zoomed_pane_id.is_some() {
+        title.push_str(" [Z]");
     }
+    title
 }
 
 fn refresh_tab_titles(s: &mut State) {
@@ -638,7 +812,7 @@ fn refresh_tab_titles(s: &mut State) {
             s.window.set_title(active_title);
             #[cfg(target_os = "macos")]
             if let Some(tab) = s.tabs.get(s.active) {
-                if let Some(cwd) = tab.pty.cwd() {
+                if let Some(cwd) = tab.active_pane().pty.cwd() {
                     macos::set_window_represented_filename(&s.window, &cwd);
                 }
             }
@@ -651,7 +825,7 @@ fn cursor_blinks(s: &State) -> bool {
         Some(b) => b,
         None => {
             if let Some(tab) = s.tabs.get(s.active) {
-                let g = tab.grid.lock();
+                let g = tab.active_pane().grid.lock();
                 match g.cursor_shape {
                     0 | 1 | 3 | 5 => true,
                     _ => false,
@@ -719,8 +893,34 @@ fn render_active(s: &mut State) {
     refresh_tab_titles(s);
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
     let blink_on = cursor_is_visible_now(s);
-    s.renderer
-        .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref(), blink_on, Some(&s.history_search));
+
+    let show_tabs = s.tabs.len() > 1;
+    let (total_cols, total_rows) = s.renderer.grid_size_for_tabs(show_tabs);
+
+    let tab = &s.tabs[s.active];
+    let rects = tab.compute_pane_rects(total_cols, total_rows);
+
+    let render_panes: Vec<renderer::RenderPane> = rects
+        .into_iter()
+        .filter_map(|rect| {
+            tab.pane(rect.id).map(|pane| renderer::RenderPane {
+                id: pane.id,
+                grid: &pane.grid,
+                rect,
+                is_active: pane.id == tab.active_pane_id,
+            })
+        })
+        .collect();
+
+    let hovered_link = s.hovered_link.as_ref().map(|l| &l.link);
+
+    s.renderer.render_panes(
+        &render_panes,
+        tab_bar,
+        hovered_link,
+        blink_on,
+        Some(&s.history_search),
+    );
 }
 
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
@@ -788,15 +988,35 @@ fn update_hovered_link(s: &mut State) {
     #[cfg(not(target_os = "macos"))]
     let cmd_pressed = s.mods.control_key() || s.mods.super_key();
 
-    let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
-    let cwd_path = cwd.as_deref().map(std::path::Path::new);
+    let tab = &s.tabs[s.active];
+    let show_tabs = s.tabs.len() > 1;
+    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
 
     let new_link = if cmd_pressed && !s.selecting {
-        let show_tabs = s.tabs.len() > 1;
-        let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
-        if let Some((row, col)) = s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows) {
-            let g = s.tabs[s.active].grid.lock();
-            g.find_hyperlink_at(row, col, cwd_path)
+        if let Some((cell_row, cell_col)) = s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows) {
+            let rects = tab.compute_pane_rects(cols, rows);
+            if let Some(target) = rects.iter().find(|r| {
+                cell_col >= r.col
+                    && cell_col < r.col + r.cols
+                    && cell_row >= r.row
+                    && cell_row < r.row + r.rows
+            }) {
+                if let Some(pane) = tab.pane(target.id) {
+                    let cwd = pane.pty.cwd();
+                    let cwd_path = cwd.as_deref().map(std::path::Path::new);
+                    let pane_row = cell_row - target.row;
+                    let pane_col = cell_col - target.col;
+                    let g = pane.grid.lock();
+                    g.find_hyperlink_at(pane_row, pane_col, cwd_path).map(|link| HoveredPaneLink {
+                        pane_id: target.id,
+                        link,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -825,8 +1045,10 @@ fn open_fresh_tab(
     let (cw, ch) = s.renderer.cell_size();
     let tab_id = s.next_tab_id;
     s.next_tab_id += 1;
-    match spawn_tab(
-        tab_id,
+    let pane_id = s.next_pane_id;
+    s.next_pane_id += 1;
+    match spawn_pane(
+        pane_id,
         cols,
         rows,
         cw,
@@ -836,7 +1058,8 @@ fn open_fresh_tab(
         proxy,
         wakeup_queued,
     ) {
-        Ok(tab) => {
+        Ok(pane) => {
+            let tab = Tab::new(tab_id, pane);
             let title = tab_title(&tab);
             s.tabs = vec![tab];
             s.tab_titles = vec![title];
@@ -846,6 +1069,7 @@ fn open_fresh_tab(
             s.drag_moved = false;
             s.last_click_time = None;
             s.last_click_cell = None;
+            s.active_click_pane_id = None;
             s.cursor_blink_epoch = std::time::Instant::now();
             s.window.set_visible(true);
             s.window.focus_window();
@@ -868,13 +1092,15 @@ fn duplicate_active_tab(
         open_fresh_tab(s, proxy, wakeup_queued);
         return;
     }
-    let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
+    let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
     let (cols, rows) = s.renderer.grid_size_for_tabs(true);
     let (cw, ch) = s.renderer.cell_size();
     let id = s.next_tab_id;
     s.next_tab_id += 1;
-    match spawn_tab(
-        id,
+    let pane_id = s.next_pane_id;
+    s.next_pane_id += 1;
+    match spawn_pane(
+        pane_id,
         cols,
         rows,
         cw,
@@ -884,7 +1110,8 @@ fn duplicate_active_tab(
         proxy,
         wakeup_queued,
     ) {
-        Ok(tab) => {
+        Ok(pane) => {
+            let tab = Tab::new(id, pane);
             let insert_at = (s.active + 1).min(s.tabs.len());
             s.tabs.insert(insert_at, tab);
             s.active = insert_at;
@@ -952,22 +1179,226 @@ fn close_active_tab(s: &mut State, _event_loop: &ActiveEventLoop) {
     s.window.request_redraw();
 }
 
+fn split_active_pane(
+    s: &mut State,
+    direction: SplitDirection,
+    proxy: &EventLoopProxy<AppEvent>,
+    wakeup_queued: &Arc<AtomicBool>,
+) {
+    if s.tabs.is_empty() {
+        return;
+    }
+    let (total_cols, total_rows) = s.renderer.grid_size_for_tabs(s.tabs.len() > 1);
+    let (cw, ch) = s.renderer.cell_size();
+
+    let tab = &mut s.tabs[s.active];
+    tab.zoomed_pane_id = None;
+
+    let target_id = tab.active_pane_id;
+    let new_id = s.next_pane_id;
+    s.next_pane_id += 1;
+
+    let cwd = tab.pane(target_id).and_then(|p| p.pty.cwd());
+
+    tab.layout.split_pane(target_id, new_id, direction);
+
+    let rects = tab.compute_pane_rects(total_cols, total_rows);
+    let new_rect = rects.iter().find(|r| r.id == new_id).copied().unwrap_or(PaneRect {
+        id: new_id,
+        col: 0,
+        row: 0,
+        cols: total_cols.max(1),
+        rows: total_rows.max(1),
+        has_border_right: false,
+        has_border_bottom: false,
+    });
+
+    match spawn_pane(
+        new_id,
+        new_rect.cols,
+        new_rect.rows,
+        cw,
+        ch,
+        cwd.as_deref(),
+        Some(s.config.shell_integration_features),
+        proxy,
+        wakeup_queued,
+    ) {
+        Ok(new_pane) => {
+            tab.panes.push(new_pane);
+            tab.active_pane_id = new_id;
+            sync_size(s);
+            refresh_tab_titles(s);
+            s.renderer.invalidate();
+            s.window.request_redraw();
+        }
+        Err(e) => eprintln!("laplace: failed to spawn split pane: {e}"),
+    }
+}
+
+fn close_active_pane_or_tab(s: &mut State, event_loop: &ActiveEventLoop) {
+    if s.tabs.is_empty() {
+        #[cfg(target_os = "macos")]
+        {
+            s.window.set_visible(false);
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            event_loop.exit();
+            return;
+        }
+    }
+    let (total_cols, total_rows) = s.renderer.grid_size_for_tabs(s.tabs.len() > 1);
+    let tab = &mut s.tabs[s.active];
+    if tab.panes.len() > 1 {
+        let closing_id = tab.active_pane_id;
+        let rects = tab.compute_pane_rects(total_cols, total_rows);
+        let neighbor = split::find_directional_neighbor(&rects, closing_id, Direction::Left)
+            .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Up))
+            .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Right))
+            .or_else(|| split::find_directional_neighbor(&rects, closing_id, Direction::Down));
+
+        tab.panes.retain(|p| p.id != closing_id);
+        tab.layout.remove_pane(closing_id);
+        if tab.zoomed_pane_id == Some(closing_id) {
+            tab.zoomed_pane_id = None;
+        }
+        if let Some(nid) = neighbor.filter(|id| tab.panes.iter().any(|p| p.id == *id)) {
+            tab.active_pane_id = nid;
+        } else if let Some(first_pane) = tab.panes.first() {
+            tab.active_pane_id = first_pane.id;
+        }
+        sync_size(s);
+        refresh_tab_titles(s);
+        s.renderer.invalidate();
+        s.window.request_redraw();
+    } else {
+        close_active_tab(s, event_loop);
+    }
+}
+
+fn navigate_split_directional(s: &mut State, dir: Direction) -> bool {
+    if s.tabs.is_empty() {
+        return false;
+    }
+    let (total_cols, total_rows) = s.renderer.grid_size_for_tabs(s.tabs.len() > 1);
+    let tab = &mut s.tabs[s.active];
+    if tab.panes.len() <= 1 {
+        return false;
+    }
+    if tab.zoomed_pane_id.is_some() {
+        tab.zoomed_pane_id = None;
+    }
+    let rects = tab.compute_pane_rects(total_cols, total_rows);
+    if let Some(next_id) = split::find_directional_neighbor(&rects, tab.active_pane_id, dir) {
+        tab.active_pane_id = next_id;
+        refresh_tab_titles(s);
+        s.renderer.invalidate();
+        s.window.request_redraw();
+        true
+    } else {
+        false
+    }
+}
+
+fn cycle_split(s: &mut State, forward: bool) {
+    if s.tabs.is_empty() {
+        return;
+    }
+    let tab = &mut s.tabs[s.active];
+    if tab.panes.len() <= 1 {
+        return;
+    }
+    if tab.zoomed_pane_id.is_some() {
+        tab.zoomed_pane_id = None;
+    }
+    let mut ids = Vec::new();
+    tab.layout.all_pane_ids(&mut ids);
+    if ids.is_empty() {
+        return;
+    }
+    let cur_pos = ids.iter().position(|&id| id == tab.active_pane_id).unwrap_or(0);
+    let next_pos = if forward {
+        (cur_pos + 1) % ids.len()
+    } else {
+        (cur_pos + ids.len() - 1) % ids.len()
+    };
+    tab.active_pane_id = ids[next_pos];
+    refresh_tab_titles(s);
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
+fn toggle_split_zoom(s: &mut State) {
+    if s.tabs.is_empty() {
+        return;
+    }
+    let tab = &mut s.tabs[s.active];
+    if tab.panes.len() <= 1 {
+        return;
+    }
+    if tab.zoomed_pane_id.is_some() {
+        tab.zoomed_pane_id = None;
+    } else {
+        tab.zoomed_pane_id = Some(tab.active_pane_id);
+    }
+    sync_size(s);
+    refresh_tab_titles(s);
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
+fn equalize_splits(s: &mut State) {
+    if s.tabs.is_empty() {
+        return;
+    }
+    let tab = &mut s.tabs[s.active];
+    if tab.panes.len() <= 1 {
+        return;
+    }
+    tab.layout.equalize();
+    sync_size(s);
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
+fn resize_active_split(s: &mut State, delta: f32) {
+    if s.tabs.is_empty() {
+        return;
+    }
+    let tab = &mut s.tabs[s.active];
+    if tab.panes.len() <= 1 {
+        return;
+    }
+    if tab.layout.adjust_ratio(tab.active_pane_id, delta) {
+        sync_size(s);
+        s.renderer.invalidate();
+        s.window.request_redraw();
+    }
+}
+
 fn sync_size(s: &mut State) {
     let show_tabs = s.tabs.len() > 1;
-    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+    let (total_cols, total_rows) = s.renderer.grid_size_for_tabs(show_tabs);
     let (cw, ch) = s.renderer.cell_size();
-    for tab in &s.tabs {
-        let changed = {
-            let mut g = tab.grid.lock();
-            if (g.cols, g.rows) == (cols, rows) {
-                false
-            } else {
-                g.resize(cols, rows);
-                true
+    for tab in &mut s.tabs {
+        let rects = tab.compute_pane_rects(total_cols, total_rows);
+        for rect in rects {
+            if let Some(p) = tab.panes.iter().find(|p| p.id == rect.id) {
+                let changed = {
+                    let mut g = p.grid.lock();
+                    if (g.cols, g.rows) == (rect.cols, rect.rows) {
+                        false
+                    } else {
+                        g.resize(rect.cols, rect.rows);
+                        true
+                    }
+                };
+                if changed {
+                    p.pty.resize(rect.cols as u16, rect.rows as u16, cw, ch);
+                }
             }
-        };
-        if changed {
-            tab.pty.resize(cols as u16, rows as u16, cw, ch);
         }
     }
 }
@@ -1034,7 +1465,7 @@ fn handle_key(
                     payload.extend_from_slice(b"\x05\x15");
                     payload.extend_from_slice(cmd.as_bytes());
                     payload.push(b'\r');
-                    s.tabs[s.active].pty.write(&payload);
+                    s.tabs[s.active].active_pane().pty.write(&payload);
                 }
                 s.window.request_redraw();
                 return;
@@ -1047,7 +1478,7 @@ fn handle_key(
                     let mut payload = Vec::with_capacity(cmd.len() + 2);
                     payload.extend_from_slice(b"\x05\x15");
                     payload.extend_from_slice(cmd.as_bytes());
-                    s.tabs[s.active].pty.write(&payload);
+                    s.tabs[s.active].active_pane().pty.write(&payload);
                 }
                 s.window.request_redraw();
                 return;
@@ -1168,7 +1599,7 @@ fn handle_key(
         // - Ctrl+R (at shell prompt when !alt_active)
         // - macOS: Cmd+R
         // - Linux: Super+R or Ctrl+Shift+R
-        let alt_active = s.tabs.get(s.active).map_or(false, |t| t.grid.lock().alt_active);
+        let alt_active = s.tabs.get(s.active).map_or(false, |t| t.active_pane().grid.lock().alt_active);
         #[cfg(target_os = "macos")]
         let is_history = (ctrl && !shift && !alt && !super_key && !alt_active)
             || (super_key && !ctrl && !alt && !shift);
@@ -1178,7 +1609,7 @@ fn handle_key(
             || (ctrl && shift && !alt && !super_key);
         if is_history && ch.eq_ignore_ascii_case("r") {
             let initial = {
-                let g = s.tabs[s.active].grid.lock();
+                let g = s.tabs[s.active].active_pane().grid.lock();
                 g.current_prompt_input()
             };
             let initial_ref = if initial.is_empty() { None } else { Some(initial.as_str()) };
@@ -1245,6 +1676,41 @@ fn handle_key(
             return;
         }
 
+        // Split Right (vertical divider): Cmd+D on macOS, Ctrl+Shift+D / Super+D on Linux
+        #[cfg(target_os = "macos")]
+        let is_split_right = super_key && !ctrl && !alt && !shift && ch.eq_ignore_ascii_case("d");
+        #[cfg(not(target_os = "macos"))]
+        let is_split_right = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
+            && ch.eq_ignore_ascii_case("d");
+        if is_split_right {
+            split_active_pane(s, SplitDirection::Vertical, proxy, wakeup_queued);
+            return;
+        }
+
+        // Split Down (horizontal divider): Cmd+Shift+D on macOS, Ctrl+Shift+E / Super+Shift+D / Ctrl+Alt+D on Linux
+        #[cfg(target_os = "macos")]
+        let is_split_down = super_key && !ctrl && !alt && shift && ch.eq_ignore_ascii_case("d");
+        #[cfg(not(target_os = "macos"))]
+        let is_split_down = (super_key && shift && !ctrl && !alt && ch.eq_ignore_ascii_case("d"))
+            || (ctrl && shift && !alt && !super_key && ch.eq_ignore_ascii_case("e"))
+            || (ctrl && alt && !shift && !super_key && ch.eq_ignore_ascii_case("d"));
+        if is_split_down {
+            split_active_pane(s, SplitDirection::Horizontal, proxy, wakeup_queued);
+            return;
+        }
+
+        // Equalize splits: Cmd+Option+= or Cmd+Ctrl+= on macOS, Ctrl+Alt+= or Super+Alt+= on Linux
+        #[cfg(target_os = "macos")]
+        let is_equalize = (super_key && alt && !ctrl && (ch == "=" || ch == "+"))
+            || (super_key && ctrl && !alt && (ch == "=" || ch == "+"));
+        #[cfg(not(target_os = "macos"))]
+        let is_equalize = ((ctrl && alt && !super_key) || (super_key && alt && !ctrl))
+            && (ch == "=" || ch == "+");
+        if is_equalize {
+            equalize_splits(s);
+            return;
+        }
+
         // Copy selection: Cmd+C on macOS, Ctrl+Shift+C on Linux.
         #[cfg(target_os = "macos")]
         let is_copy = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("c");
@@ -1252,7 +1718,7 @@ fn handle_key(
         let is_copy = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
             && ch.eq_ignore_ascii_case("c");
         if is_copy {
-            if let Some(text) = s.tabs[s.active].grid.lock().selected_text() {
+            if let Some(text) = s.tabs[s.active].active_pane().grid.lock().selected_text() {
                 copy_to_clipboard(&text);
             }
             return;
@@ -1268,7 +1734,7 @@ fn handle_key(
             if let Some(text) = paste_from_clipboard() {
                 if !text.is_empty() {
                     let bracketed = {
-                        let mut g = s.tabs[s.active].grid.lock();
+                        let mut g = s.tabs[s.active].active_pane().grid.lock();
                         g.reset_display();
                         g.bracketed_paste
                     };
@@ -1277,9 +1743,9 @@ fn handle_key(
                         payload.extend_from_slice(b"\x1b[200~");
                         payload.extend_from_slice(text.as_bytes());
                         payload.extend_from_slice(b"\x1b[201~");
-                        s.tabs[s.active].pty.write(&payload);
+                        s.tabs[s.active].active_pane().pty.write(&payload);
                     } else {
-                        s.tabs[s.active].pty.write(text.as_bytes());
+                        s.tabs[s.active].active_pane().pty.write(text.as_bytes());
                     }
                     s.window.request_redraw();
                 }
@@ -1287,32 +1753,40 @@ fn handle_key(
             return;
         }
 
-        // Close active tab: Cmd+W on macOS, Ctrl+Shift+W on Linux.
+        // Close active split pane (or tab if last pane): Cmd+W on macOS, Ctrl+Shift+W on Linux.
         #[cfg(target_os = "macos")]
         let is_close_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("w");
         #[cfg(not(target_os = "macos"))]
         let is_close_tab = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
             && ch.eq_ignore_ascii_case("w");
         if is_close_tab {
-            close_active_tab(s, event_loop);
+            close_active_pane_or_tab(s, event_loop);
             return;
         }
 
         // Switch tabs on macOS via Cmd+Shift+[ / ] (or Cmd+{ / }), and Cmd+1..9.
         #[cfg(target_os = "macos")]
-        if super_key && !ctrl && !alt && s.tabs.len() > 1 {
+        if super_key && !ctrl && !alt {
             match ch.as_str() {
-                "{" | "[" if shift => {
+                "{" | "[" if shift && s.tabs.len() > 1 => {
                     let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
                     select_tab(s, prev);
                     return;
                 }
-                "}" | "]" if shift => {
+                "}" | "]" if shift && s.tabs.len() > 1 => {
                     let next = (s.active + 1) % s.tabs.len();
                     select_tab(s, next);
                     return;
                 }
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !shift => {
+                "[" if !shift && s.tabs[s.active].panes.len() > 1 => {
+                    cycle_split(s, false);
+                    return;
+                }
+                "]" if !shift && s.tabs[s.active].panes.len() > 1 => {
+                    cycle_split(s, true);
+                    return;
+                }
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !shift && s.tabs.len() > 1 => {
                     let n = (ch.as_bytes()[0] - b'1') as usize;
                     let target = if n == 8 && s.tabs.len() > 1 {
                         s.tabs.len() - 1
@@ -1326,11 +1800,10 @@ fn handle_key(
             }
         }
 
-        // Switch tabs on Linux via Ctrl+1..9 (matches ^1..^9 badges), Alt+1..9, Super+1..9,
-        // and Ctrl+Shift+[ / ] (or Ctrl+{ / }).
+        // Switch tabs / cycle splits on Linux
         #[cfg(not(target_os = "macos"))]
-        if s.tabs.len() > 1 {
-            if (ctrl || super_key) && shift && !alt {
+        {
+            if (ctrl || super_key) && shift && !alt && s.tabs.len() > 1 {
                 match ch.as_str() {
                     "{" | "[" => {
                         let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
@@ -1345,11 +1818,24 @@ fn handle_key(
                     _ => {}
                 }
             }
+            if s.tabs[s.active].panes.len() > 1 && (((ctrl && alt) || super_key) && !shift) {
+                match ch.as_str() {
+                    "[" => {
+                        cycle_split(s, false);
+                        return;
+                    }
+                    "]" => {
+                        cycle_split(s, true);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             let is_tab_num = !shift
                 && ((ctrl && !alt && !super_key)
                     || (alt && !ctrl && !super_key)
                     || (super_key && !ctrl && !alt));
-            if is_tab_num {
+            if is_tab_num && s.tabs.len() > 1 {
                 if let b'1'..=b'9' = ch.as_bytes()[0] {
                     let n = (ch.as_bytes()[0] - b'1') as usize;
                     let target = if n == 8 && s.tabs.len() > 1 {
@@ -1364,8 +1850,81 @@ fn handle_key(
         }
     }
 
-    // Tab navigation with Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PageUp / Ctrl+PageDown,
-    // and Cmd+Option+Left / Right on macOS (Ctrl+Alt+Left / Right on Linux).
+    // Split resize shortcuts: Cmd+Ctrl+Arrows on macOS, Super+Ctrl+Arrows or Ctrl+Alt+Shift+Arrows on Linux
+    #[cfg(target_os = "macos")]
+    let is_resize_split = super_key && ctrl && !alt && !shift;
+    #[cfg(not(target_os = "macos"))]
+    let is_resize_split = (super_key && ctrl && !alt && !shift) || (ctrl && alt && shift && !super_key);
+    if is_resize_split {
+        match &ev.logical_key {
+            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
+                resize_active_split(s, -0.05);
+                return;
+            }
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
+                resize_active_split(s, 0.05);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Directional navigation between splits (with fallback to tab cycling on Left/Right):
+    // macOS: Cmd+Arrows (Up/Down/Left/Right) and Cmd+Option+Arrows
+    // Linux: Ctrl+Alt+Arrows and Super+Arrows
+    #[cfg(target_os = "macos")]
+    if super_key && !ctrl && !shift {
+        let dir = match &ev.logical_key {
+            Key::Named(NamedKey::ArrowLeft) => Some((Direction::Left, true)),
+            Key::Named(NamedKey::ArrowRight) => Some((Direction::Right, false)),
+            Key::Named(NamedKey::ArrowUp) => Some((Direction::Up, false)),
+            Key::Named(NamedKey::ArrowDown) => Some((Direction::Down, false)),
+            _ => None,
+        };
+        if let Some((d, is_left)) = dir {
+            if navigate_split_directional(s, d) {
+                return;
+            }
+            if is_left && s.tabs.len() > 1 {
+                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                select_tab(s, prev);
+                return;
+            } else if !is_left && s.tabs.len() > 1 && matches!(d, Direction::Right) {
+                let next = (s.active + 1) % s.tabs.len();
+                select_tab(s, next);
+                return;
+            }
+            return;
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if ((ctrl && alt) || (super_key && !ctrl)) && !shift {
+        let dir = match &ev.logical_key {
+            Key::Named(NamedKey::ArrowLeft) => Some((Direction::Left, true)),
+            Key::Named(NamedKey::ArrowRight) => Some((Direction::Right, false)),
+            Key::Named(NamedKey::ArrowUp) => Some((Direction::Up, false)),
+            Key::Named(NamedKey::ArrowDown) => Some((Direction::Down, false)),
+            _ => None,
+        };
+        if let Some((d, is_left)) = dir {
+            if navigate_split_directional(s, d) {
+                return;
+            }
+            if is_left && s.tabs.len() > 1 {
+                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                select_tab(s, prev);
+                return;
+            } else if !is_left && s.tabs.len() > 1 && matches!(d, Direction::Right) {
+                let next = (s.active + 1) % s.tabs.len();
+                select_tab(s, next);
+                return;
+            }
+            return;
+        }
+    }
+
+    // Tab navigation with Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PageUp / Ctrl+PageDown
     if s.tabs.len() > 1 {
         match &ev.logical_key {
             Key::Named(NamedKey::Tab) if ctrl && !alt && !super_key => {
@@ -1383,30 +1942,6 @@ fn handle_key(
                 return;
             }
             Key::Named(NamedKey::PageDown) if ctrl && !shift && !alt => {
-                let next = (s.active + 1) % s.tabs.len();
-                select_tab(s, next);
-                return;
-            }
-            #[cfg(target_os = "macos")]
-            Key::Named(NamedKey::ArrowLeft) if super_key && alt && !ctrl && !shift => {
-                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                select_tab(s, prev);
-                return;
-            }
-            #[cfg(target_os = "macos")]
-            Key::Named(NamedKey::ArrowRight) if super_key && alt && !ctrl && !shift => {
-                let next = (s.active + 1) % s.tabs.len();
-                select_tab(s, next);
-                return;
-            }
-            #[cfg(not(target_os = "macos"))]
-            Key::Named(NamedKey::ArrowLeft) if ((ctrl && alt) || (super_key && alt)) && !shift => {
-                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                select_tab(s, prev);
-                return;
-            }
-            #[cfg(not(target_os = "macos"))]
-            Key::Named(NamedKey::ArrowRight) if ((ctrl && alt) || (super_key && alt)) && !shift => {
                 let next = (s.active + 1) % s.tabs.len();
                 select_tab(s, next);
                 return;
@@ -1438,15 +1973,15 @@ fn handle_key(
 
     // Shift+PageUp / PageDown scrolls the scrollback buffer locally.
     if shift {
-        let rows = s.tabs[s.active].grid.lock().rows.saturating_sub(1).max(1) as isize;
+        let rows = s.tabs[s.active].active_pane().grid.lock().rows.saturating_sub(1).max(1) as isize;
         match ev.logical_key {
             Key::Named(NamedKey::PageUp) => {
-                s.tabs[s.active].grid.lock().scroll_display(rows);
+                s.tabs[s.active].active_pane().grid.lock().scroll_display(rows);
                 s.window.request_redraw();
                 return;
             }
             Key::Named(NamedKey::PageDown) => {
-                s.tabs[s.active].grid.lock().scroll_display(-rows);
+                s.tabs[s.active].active_pane().grid.lock().scroll_display(-rows);
                 s.window.request_redraw();
                 return;
             }
@@ -1455,7 +1990,7 @@ fn handle_key(
     }
 
     let app_cursor = {
-        let mut g = s.tabs[s.active].grid.lock();
+        let mut g = s.tabs[s.active].active_pane().grid.lock();
         g.reset_display();
         g.app_cursor
     };
@@ -1464,7 +1999,16 @@ fn handle_key(
     let mut scratch = [0u8; 32];
     let bytes: &[u8] = match &ev.logical_key {
         Key::Named(NamedKey::Enter) => {
-            let cmd = s.tabs[s.active].grid.lock().current_prompt_input();
+            #[cfg(target_os = "macos")]
+            let is_zoom = super_key && shift && !ctrl && !alt;
+            #[cfg(not(target_os = "macos"))]
+            let is_zoom = (ctrl && shift && !alt && !super_key) || (super_key && shift && !ctrl && !alt);
+            if is_zoom {
+                toggle_split_zoom(s);
+                return;
+            }
+
+            let cmd = s.tabs[s.active].active_pane().grid.lock().current_prompt_input();
             if !cmd.is_empty() {
                 s.history_search.add_session_command(&cmd);
             }
@@ -1577,7 +2121,7 @@ fn handle_key(
             }
         }
     };
-    s.tabs[s.active].pty.write(bytes);
+    s.tabs[s.active].active_pane().pty.write(bytes);
 }
 
 fn push_csi_mod(buf: &mut [u8; 32], p1: u8, m: u8, suffix: u8) -> usize {
