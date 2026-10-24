@@ -244,12 +244,107 @@ unsafe fn msg_send_ptr(receiver: *mut c_void, sel_name: &str) -> *mut c_void {
 }
 
 #[cfg(target_os = "macos")]
+static REOPEN_PROXY: parking_lot::Mutex<Option<winit::event_loop::EventLoopProxy<crate::AppEvent>>> =
+    parking_lot::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+pub fn register_reopen_handler(proxy: winit::event_loop::EventLoopProxy<crate::AppEvent>) {
+    *REOPEN_PROXY.lock() = Some(proxy);
+
+    unsafe {
+        let app_cls = objc_getClass(b"NSApplication\0".as_ptr());
+        if app_cls.is_null() {
+            return;
+        }
+        let app = msg_send_ptr(app_cls, "sharedApplication\0");
+        if app.is_null() {
+            return;
+        }
+        let delegate = msg_send_ptr(app, "delegate\0");
+        if delegate.is_null() {
+            return;
+        }
+        let delegate_cls: *mut c_void = msg_send_ptr(delegate, "class\0");
+        if delegate_cls.is_null() {
+            return;
+        }
+
+        extern "C" fn on_reopen(
+            _this: *mut c_void,
+            _cmd: *mut c_void,
+            _app: *mut c_void,
+            _has_visible_windows: bool,
+        ) -> bool {
+            if let Some(proxy) = REOPEN_PROXY.lock().as_ref() {
+                let _ = proxy.send_event(crate::AppEvent::Reopen);
+            }
+            true
+        }
+
+        extern "C" fn on_activate(_this: *mut c_void, _cmd: *mut c_void, _notif: *mut c_void) {
+            if let Some(proxy) = REOPEN_PROXY.lock().as_ref() {
+                let _ = proxy.send_event(crate::AppEvent::Reopen);
+            }
+        }
+
+        extern "C" {
+            fn class_getInstanceMethod(cls: *mut c_void, name: *mut c_void) -> *mut c_void;
+            fn method_setImplementation(m: *mut c_void, imp: *const ()) -> *const ();
+        }
+
+        let sel_reopen = sel_registerName(b"applicationShouldHandleReopen:hasVisibleWindows:\0".as_ptr());
+        if !class_addMethod(delegate_cls, sel_reopen, on_reopen as *const (), b"B@:@B\0".as_ptr()) {
+            let m = class_getInstanceMethod(delegate_cls, sel_reopen);
+            if !m.is_null() {
+                method_setImplementation(m, on_reopen as *const ());
+            }
+        }
+
+        let sel_act = sel_registerName(b"applicationDidBecomeActive:\0".as_ptr());
+        if !class_addMethod(delegate_cls, sel_act, on_activate as *const (), b"v@:@\0".as_ptr()) {
+            let m = class_getInstanceMethod(delegate_cls, sel_act);
+            if !m.is_null() {
+                method_setImplementation(m, on_activate as *const ());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn activate_app() {
+    unsafe {
+        let app_cls = objc_getClass(b"NSApplication\0".as_ptr());
+        if !app_cls.is_null() {
+            let app = msg_send_ptr(app_cls, "sharedApplication\0");
+            if !app.is_null() {
+                let sel = sel_registerName(b"activateIgnoringOtherApps:\0".as_ptr());
+                let f: extern "C" fn(*mut c_void, *mut c_void, bool) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                f(app, sel, true);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[link(name = "objc", kind = "dylib")]
 extern "C" {
     fn objc_getClass(name: *const u8) -> *mut c_void;
     fn sel_registerName(name: *const u8) -> *mut c_void;
     fn objc_msgSend();
+    fn class_addMethod(
+        cls: *mut c_void,
+        name: *mut c_void,
+        imp: *const (),
+        types: *const u8,
+    ) -> bool;
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn apply_macos_window_config(_window: &winit::window::Window, _cfg: &crate::config::Config) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn register_reopen_handler(_proxy: winit::event_loop::EventLoopProxy<crate::AppEvent>) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn activate_app() {}

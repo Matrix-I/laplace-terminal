@@ -25,9 +25,10 @@ use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
 
 #[derive(Debug, Clone, Copy)]
-enum AppEvent {
+pub enum AppEvent {
     WakeUp,
     ChildExit(u64),
+    Reopen,
 }
 
 struct Tab {
@@ -69,7 +70,9 @@ impl ApplicationHandler<AppEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
             if let Some(s) = &self.state {
-                s.window.request_redraw();
+                if !s.tabs.is_empty() {
+                    s.window.request_redraw();
+                }
             }
         }
     }
@@ -160,6 +163,9 @@ impl ApplicationHandler<AppEvent> for App {
         });
 
         #[cfg(target_os = "macos")]
+        macos::register_reopen_handler(self.proxy.clone());
+
+        #[cfg(target_os = "macos")]
         unsafe {
             extern "C" {
                 fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
@@ -173,8 +179,10 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::WakeUp => {
                 self.wakeup_queued.store(false, Ordering::Release);
                 if let Some(s) = &mut self.state {
-                    render_active(s);
-                    s.window.request_redraw();
+                    if !s.tabs.is_empty() {
+                        render_active(s);
+                        s.window.request_redraw();
+                    }
                 }
             }
             AppEvent::ChildExit(exited_id) => {
@@ -185,8 +193,26 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(pos) = s.tabs.iter().position(|t| t.id == exited_id) {
                     s.tabs.remove(pos);
                     if s.tabs.is_empty() {
-                        event_loop.exit();
-                        return;
+                        #[cfg(target_os = "macos")]
+                        {
+                            s.tab_titles.clear();
+                            s.hovered_link = None;
+                            s.selecting = false;
+                            s.active = 0;
+                            s.window.set_visible(false);
+                            unsafe {
+                                extern "C" {
+                                    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+                                }
+                                malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+                            }
+                            return;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            event_loop.exit();
+                            return;
+                        }
                     }
                     if s.active >= s.tabs.len() {
                         s.active = s.tabs.len() - 1;
@@ -199,13 +225,45 @@ impl ApplicationHandler<AppEvent> for App {
                     s.window.request_redraw();
                 }
             }
+            AppEvent::Reopen => {
+                if let Some(s) = &mut self.state {
+                    if s.tabs.is_empty() {
+                        open_fresh_tab(s, &self.proxy, &self.wakeup_queued);
+                    } else {
+                        s.window.set_visible(true);
+                        s.window.focus_window();
+                        #[cfg(target_os = "macos")]
+                        macos::activate_app();
+                        s.renderer.invalidate();
+                        s.window.request_redraw();
+                    }
+                }
+            }
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(s) = &mut self.state else { return };
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                #[cfg(target_os = "macos")]
+                {
+                    s.tabs.clear();
+                    s.tab_titles.clear();
+                    s.hovered_link = None;
+                    s.selecting = false;
+                    s.active = 0;
+                    s.window.set_visible(false);
+                    unsafe {
+                        extern "C" {
+                            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+                        }
+                        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                event_loop.exit();
+            }
 
             WindowEvent::ModifiersChanged(m) => {
                 s.mods = m.state();
@@ -214,6 +272,9 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 s.mouse_pos = (position.x, position.y);
+                if s.tabs.is_empty() {
+                    return;
+                }
                 if s.mouse_hidden {
                     s.window.set_cursor_visible(true);
                     s.mouse_hidden = false;
@@ -239,89 +300,94 @@ impl ApplicationHandler<AppEvent> for App {
                 state: btn_state,
                 button: MouseButton::Left,
                 ..
-            } => match btn_state {
-                ElementState::Pressed => {
-                    #[cfg(target_os = "macos")]
-                    let cmd_pressed = s.mods.super_key();
-                    #[cfg(not(target_os = "macos"))]
-                    let cmd_pressed = s.mods.control_key() || s.mods.super_key();
+            } => {
+                if s.tabs.is_empty() {
+                    return;
+                }
+                match btn_state {
+                    ElementState::Pressed => {
+                        #[cfg(target_os = "macos")]
+                        let cmd_pressed = s.mods.super_key();
+                        #[cfg(not(target_os = "macos"))]
+                        let cmd_pressed = s.mods.control_key() || s.mods.super_key();
 
-                    if cmd_pressed {
-                        if let Some(link) = &s.hovered_link {
-                            let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
-                            let cwd_path = cwd.as_deref().map(std::path::Path::new);
-                            open_target(&link.url, link.is_path, cwd_path);
+                        if cmd_pressed {
+                            if let Some(link) = &s.hovered_link {
+                                let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
+                                let cwd_path = cwd.as_deref().map(std::path::Path::new);
+                                open_target(&link.url, link.is_path, cwd_path);
+                                return;
+                            }
+                        }
+
+                        if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
+                            match action {
+                                TabBarAction::Select(idx) => select_tab(s, idx),
+                                TabBarAction::NewTab => duplicate_active_tab(s, &self.proxy, &self.wakeup_queued),
+                            }
                             return;
                         }
-                    }
+                        let show_tabs = s.tabs.len() > 1;
+                        let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+                        if let Some((row, col)) =
+                            s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
+                        {
+                            let now = std::time::Instant::now();
+                            let multi_click = s
+                                .last_click_time
+                                .is_some_and(|t| now.duration_since(t).as_millis() <= 450)
+                                && s.last_click_cell.is_some_and(|(lr, _)| lr == row);
 
-                    if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
-                        match action {
-                            TabBarAction::Select(idx) => select_tab(s, idx),
-                            TabBarAction::NewTab => duplicate_active_tab(s, &self.proxy, &self.wakeup_queued),
+                            s.click_count = if multi_click {
+                                (s.click_count % 3) + 1
+                            } else {
+                                1
+                            };
+                            s.last_click_time = Some(now);
+                            s.last_click_cell = Some((row, col));
+
+                            match s.click_count {
+                                2 => {
+                                    let line_text =
+                                        s.tabs[s.active].grid.lock().select_smart_line(row, col);
+                                    if !line_text.is_empty() {
+                                        copy_to_clipboard(&line_text);
+                                    }
+                                    s.selecting = false;
+                                    s.drag_moved = false;
+                                    s.window.request_redraw();
+                                }
+                                3 => {
+                                    let line_text = s.tabs[s.active].grid.lock().select_line(row);
+                                    if !line_text.is_empty() {
+                                        copy_to_clipboard(&line_text);
+                                    }
+                                    s.selecting = false;
+                                    s.drag_moved = false;
+                                    s.window.request_redraw();
+                                }
+                                _ => {
+                                    s.tabs[s.active].grid.lock().set_selection(None);
+                                    s.selecting = true;
+                                    s.drag_moved = false;
+                                    s.window.request_redraw();
+                                }
+                            }
                         }
-                        return;
                     }
-                    let show_tabs = s.tabs.len() > 1;
-                    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
-                    if let Some((row, col)) =
-                        s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
-                    {
-                        let now = std::time::Instant::now();
-                        let multi_click = s
-                            .last_click_time
-                            .is_some_and(|t| now.duration_since(t).as_millis() <= 450)
-                            && s.last_click_cell.is_some_and(|(lr, _)| lr == row);
-
-                        s.click_count = if multi_click {
-                            (s.click_count % 3) + 1
-                        } else {
-                            1
-                        };
-                        s.last_click_time = Some(now);
-                        s.last_click_cell = Some((row, col));
-
-                        match s.click_count {
-                            2 => {
-                                let line_text =
-                                    s.tabs[s.active].grid.lock().select_smart_line(row, col);
-                                if !line_text.is_empty() {
-                                    copy_to_clipboard(&line_text);
+                    ElementState::Released => {
+                        if s.selecting {
+                            s.selecting = false;
+                            if s.drag_moved {
+                                let text = s.tabs[s.active].grid.lock().selected_text();
+                                if let Some(t) = text {
+                                    copy_to_clipboard(&t);
                                 }
-                                s.selecting = false;
-                                s.drag_moved = false;
-                                s.window.request_redraw();
-                            }
-                            3 => {
-                                let line_text = s.tabs[s.active].grid.lock().select_line(row);
-                                if !line_text.is_empty() {
-                                    copy_to_clipboard(&line_text);
-                                }
-                                s.selecting = false;
-                                s.drag_moved = false;
-                                s.window.request_redraw();
-                            }
-                            _ => {
-                                s.tabs[s.active].grid.lock().set_selection(None);
-                                s.selecting = true;
-                                s.drag_moved = false;
-                                s.window.request_redraw();
                             }
                         }
                     }
                 }
-                ElementState::Released => {
-                    if s.selecting {
-                        s.selecting = false;
-                        if s.drag_moved {
-                            let text = s.tabs[s.active].grid.lock().selected_text();
-                            if let Some(t) = text {
-                                copy_to_clipboard(&t);
-                            }
-                        }
-                    }
-                }
-            },
+            }
 
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
@@ -343,6 +409,9 @@ impl ApplicationHandler<AppEvent> for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                if s.tabs.is_empty() {
+                    return;
+                }
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
                         (y as f64 * s.config.mouse_scroll_discrete).round() as isize
@@ -372,7 +441,9 @@ impl ApplicationHandler<AppEvent> for App {
                         reload_config(s);
                     }
                 }
-                s.window.request_redraw();
+                if !s.tabs.is_empty() {
+                    s.window.request_redraw();
+                }
             }
 
             WindowEvent::RedrawRequested => {
@@ -391,7 +462,7 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         }
         if let Some(s) = &self.state {
-            if s.focused && cursor_blinks(s) {
+            if !s.tabs.is_empty() && s.focused && cursor_blinks(s) {
                 let now = std::time::Instant::now();
                 let elapsed = s.cursor_blink_epoch.elapsed();
                 let elapsed_ms = elapsed.as_millis();
@@ -614,6 +685,14 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
 }
 
 fn update_hovered_link(s: &mut State) {
+    if s.tabs.is_empty() {
+        if s.hovered_link.is_some() {
+            s.hovered_link = None;
+            s.window.set_cursor(CursorIcon::Default);
+        }
+        return;
+    }
+
     #[cfg(target_os = "macos")]
     let cmd_pressed = s.mods.super_key();
     #[cfg(not(target_os = "macos"))]
@@ -647,11 +726,58 @@ fn update_hovered_link(s: &mut State) {
     }
 }
 
+fn open_fresh_tab(
+    s: &mut State,
+    proxy: &EventLoopProxy<AppEvent>,
+    wakeup_queued: &Arc<AtomicBool>,
+) {
+    let (cols, rows) = s.renderer.grid_size_for_tabs(false);
+    let (cw, ch) = s.renderer.cell_size();
+    let tab_id = s.next_tab_id;
+    s.next_tab_id += 1;
+    match spawn_tab(
+        tab_id,
+        cols,
+        rows,
+        cw,
+        ch,
+        None,
+        Some(s.config.shell_integration_features),
+        proxy,
+        wakeup_queued,
+    ) {
+        Ok(tab) => {
+            let title = tab_title(&tab);
+            s.tabs = vec![tab];
+            s.tab_titles = vec![title];
+            s.active = 0;
+            s.hovered_link = None;
+            s.selecting = false;
+            s.drag_moved = false;
+            s.last_click_time = None;
+            s.last_click_cell = None;
+            s.cursor_blink_epoch = std::time::Instant::now();
+            s.window.set_visible(true);
+            s.window.focus_window();
+            #[cfg(target_os = "macos")]
+            macos::activate_app();
+            sync_size(s);
+            s.renderer.invalidate();
+            s.window.request_redraw();
+        }
+        Err(e) => eprintln!("laplace: failed to spawn fresh tab: {e}"),
+    }
+}
+
 fn duplicate_active_tab(
     s: &mut State,
     proxy: &EventLoopProxy<AppEvent>,
     wakeup_queued: &Arc<AtomicBool>,
 ) {
+    if s.tabs.is_empty() {
+        open_fresh_tab(s, proxy, wakeup_queued);
+        return;
+    }
     let cwd = s.tabs.get(s.active).and_then(|t| t.pty.cwd());
     let (cols, rows) = s.renderer.grid_size_for_tabs(true);
     let (cw, ch) = s.renderer.cell_size();
@@ -672,6 +798,7 @@ fn duplicate_active_tab(
             let insert_at = (s.active + 1).min(s.tabs.len());
             s.tabs.insert(insert_at, tab);
             s.active = insert_at;
+            s.window.set_visible(true);
             sync_size(s);
             refresh_tab_titles(s);
             s.renderer.invalidate();
@@ -690,15 +817,41 @@ fn select_tab(s: &mut State, idx: usize) {
     }
 }
 
-fn close_active_tab(s: &mut State, event_loop: &ActiveEventLoop) {
+fn close_active_tab(s: &mut State, _event_loop: &ActiveEventLoop) {
     if s.tabs.is_empty() {
-        event_loop.exit();
-        return;
+        #[cfg(target_os = "macos")]
+        {
+            s.window.set_visible(false);
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            _event_loop.exit();
+            return;
+        }
     }
     s.tabs.remove(s.active);
     if s.tabs.is_empty() {
-        event_loop.exit();
-        return;
+        #[cfg(target_os = "macos")]
+        {
+            s.tab_titles.clear();
+            s.hovered_link = None;
+            s.selecting = false;
+            s.active = 0;
+            s.window.set_visible(false);
+            unsafe {
+                extern "C" {
+                    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+                }
+                malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+            }
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            _event_loop.exit();
+            return;
+        }
     }
     if s.active >= s.tabs.len() {
         s.active = s.tabs.len() - 1;
@@ -773,10 +926,17 @@ fn handle_key(
     }
     s.cursor_blink_epoch = std::time::Instant::now();
 
-    // Duplicate tab in same working directory:
-    // - macOS: Cmd+T
-    // - Linux: Ctrl+T (or Ctrl+Shift+T)
     if let Key::Character(ch) = &ev.logical_key {
+        // Quit app: Cmd+Q on macOS, Ctrl+Shift+Q on Linux.
+        #[cfg(target_os = "macos")]
+        let is_quit = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("q");
+        #[cfg(not(target_os = "macos"))]
+        let is_quit = ctrl && shift && !alt && ch.eq_ignore_ascii_case("q");
+        if is_quit {
+            event_loop.exit();
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         let is_config = super_key && !ctrl && !alt && (ch == "," || (shift && ch == "<"));
         #[cfg(not(target_os = "macos"))]
@@ -790,12 +950,23 @@ fn handle_key(
             return;
         }
 
+        // New tab / duplicate tab:
+        // - macOS: Cmd+T or Cmd+N
+        // - Linux: Ctrl+T or Ctrl+N (or Ctrl+Shift+T)
         #[cfg(target_os = "macos")]
-        let is_new_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("t");
+        let is_new_tab = super_key && !ctrl && !alt && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
         #[cfg(not(target_os = "macos"))]
-        let is_new_tab = ctrl && !alt && !super_key && ch.eq_ignore_ascii_case("t");
+        let is_new_tab = ctrl && !alt && !super_key && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
         if is_new_tab {
-            duplicate_active_tab(s, proxy, wakeup_queued);
+            if s.tabs.is_empty() {
+                open_fresh_tab(s, proxy, wakeup_queued);
+            } else {
+                duplicate_active_tab(s, proxy, wakeup_queued);
+            }
+            return;
+        }
+
+        if s.tabs.is_empty() {
             return;
         }
 
