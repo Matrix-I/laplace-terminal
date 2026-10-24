@@ -931,7 +931,8 @@ fn handle_key(
         #[cfg(target_os = "macos")]
         let is_quit = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("q");
         #[cfg(not(target_os = "macos"))]
-        let is_quit = ctrl && shift && !alt && ch.eq_ignore_ascii_case("q");
+        let is_quit = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
+            && ch.eq_ignore_ascii_case("q");
         if is_quit {
             event_loop.exit();
             return;
@@ -940,7 +941,8 @@ fn handle_key(
         #[cfg(target_os = "macos")]
         let is_config = super_key && !ctrl && !alt && (ch == "," || (shift && ch == "<"));
         #[cfg(not(target_os = "macos"))]
-        let is_config = ctrl && !alt && !super_key && (ch == "," || (shift && ch == "<"));
+        let is_config = ((ctrl && !alt && !super_key) || (super_key && !ctrl && !alt))
+            && (ch == "," || (shift && ch == "<"));
         if is_config {
             if shift {
                 reload_config(s);
@@ -952,11 +954,12 @@ fn handle_key(
 
         // New tab / duplicate tab:
         // - macOS: Cmd+T or Cmd+N
-        // - Linux: Ctrl+T or Ctrl+N (or Ctrl+Shift+T)
+        // - Linux: Ctrl+Shift+T or Ctrl+Shift+N (or Super+T / Super+N)
         #[cfg(target_os = "macos")]
         let is_new_tab = super_key && !ctrl && !alt && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
         #[cfg(not(target_os = "macos"))]
-        let is_new_tab = ctrl && !alt && !super_key && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
+        let is_new_tab = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
+            && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
         if is_new_tab {
             if s.tabs.is_empty() {
                 open_fresh_tab(s, proxy, wakeup_queued);
@@ -974,7 +977,8 @@ fn handle_key(
         #[cfg(target_os = "macos")]
         let is_copy = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("c");
         #[cfg(not(target_os = "macos"))]
-        let is_copy = ctrl && shift && !alt && ch.eq_ignore_ascii_case("c");
+        let is_copy = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
+            && ch.eq_ignore_ascii_case("c");
         if is_copy {
             if let Some(text) = s.tabs[s.active].grid.lock().selected_text() {
                 copy_to_clipboard(&text);
@@ -986,7 +990,8 @@ fn handle_key(
         #[cfg(target_os = "macos")]
         let is_paste = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("v");
         #[cfg(not(target_os = "macos"))]
-        let is_paste = ctrl && shift && !alt && ch.eq_ignore_ascii_case("v");
+        let is_paste = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
+            && ch.eq_ignore_ascii_case("v");
         if is_paste {
             if let Some(text) = paste_from_clipboard() {
                 if !text.is_empty() {
@@ -1014,13 +1019,14 @@ fn handle_key(
         #[cfg(target_os = "macos")]
         let is_close_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("w");
         #[cfg(not(target_os = "macos"))]
-        let is_close_tab = ctrl && shift && !alt && ch.eq_ignore_ascii_case("w");
+        let is_close_tab = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
+            && ch.eq_ignore_ascii_case("w");
         if is_close_tab {
             close_active_tab(s, event_loop);
             return;
         }
 
-        // Switch tabs on macOS via Cmd+Shift+[ / ] (or Cmd+{ / }).
+        // Switch tabs on macOS via Cmd+Shift+[ / ] (or Cmd+{ / }), and Cmd+1..9.
         #[cfg(target_os = "macos")]
         if super_key && !ctrl && !alt && s.tabs.len() > 1 {
             match ch.as_str() {
@@ -1048,24 +1054,46 @@ fn handle_key(
             }
         }
 
-        // Switch tabs on Linux via Alt+1..9.
+        // Switch tabs on Linux via Ctrl+1..9 (matches ^1..^9 badges), Alt+1..9, Super+1..9,
+        // and Ctrl+Shift+[ / ] (or Ctrl+{ / }).
         #[cfg(not(target_os = "macos"))]
-        if alt && !ctrl && !shift && !super_key && s.tabs.len() > 1 {
-            if let b'1'..=b'9' = ch.as_bytes()[0] {
-                let n = (ch.as_bytes()[0] - b'1') as usize;
-                let target = if n == 8 && s.tabs.len() > 1 {
-                    s.tabs.len() - 1
-                } else {
-                    n
-                };
-                select_tab(s, target);
-                return;
+        if s.tabs.len() > 1 {
+            if (ctrl || super_key) && shift && !alt {
+                match ch.as_str() {
+                    "{" | "[" => {
+                        let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                        select_tab(s, prev);
+                        return;
+                    }
+                    "}" | "]" => {
+                        let next = (s.active + 1) % s.tabs.len();
+                        select_tab(s, next);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            let is_tab_num = !shift
+                && ((ctrl && !alt && !super_key)
+                    || (alt && !ctrl && !super_key)
+                    || (super_key && !ctrl && !alt));
+            if is_tab_num {
+                if let b'1'..=b'9' = ch.as_bytes()[0] {
+                    let n = (ch.as_bytes()[0] - b'1') as usize;
+                    let target = if n == 8 && s.tabs.len() > 1 {
+                        s.tabs.len() - 1
+                    } else {
+                        n
+                    };
+                    select_tab(s, target);
+                    return;
+                }
             }
         }
     }
 
     // Tab navigation with Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PageUp / Ctrl+PageDown,
-    // and Cmd+Option+Left / Right on macOS.
+    // and Cmd+Option+Left / Right on macOS (Ctrl+Alt+Left / Right on Linux).
     if s.tabs.len() > 1 {
         match &ev.logical_key {
             Key::Named(NamedKey::Tab) if ctrl && !alt && !super_key => {
@@ -1099,21 +1127,35 @@ fn handle_key(
                 select_tab(s, next);
                 return;
             }
+            #[cfg(not(target_os = "macos"))]
+            Key::Named(NamedKey::ArrowLeft) if ((ctrl && alt) || (super_key && alt)) && !shift => {
+                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
+                select_tab(s, prev);
+                return;
+            }
+            #[cfg(not(target_os = "macos"))]
+            Key::Named(NamedKey::ArrowRight) if ((ctrl && alt) || (super_key && alt)) && !shift => {
+                let next = (s.active + 1) % s.tabs.len();
+                select_tab(s, next);
+                return;
+            }
             _ => {}
         }
     }
 
-    // Font size shortcuts (Cmd on macOS, Ctrl+Shift on Linux).
+    // Font size shortcuts:
+    // - macOS: Cmd+= / Cmd+- / Cmd+0
+    // - Linux: Ctrl+= / Ctrl+- / Ctrl+0 (also supports Shift: Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0, and Super)
     #[cfg(target_os = "macos")]
-    let zoom_mod = super_key;
+    let zoom_mod = super_key && !ctrl && !alt;
     #[cfg(not(target_os = "macos"))]
-    let zoom_mod = ctrl && shift;
+    let zoom_mod = (ctrl && !alt && !super_key) || (super_key && !ctrl && !alt);
     if zoom_mod {
         if let Key::Character(ch) = &ev.logical_key {
             match ch.as_str() {
                 "=" | "+" => return zoom(s, 1.0),
                 "-" | "_" => return zoom(s, -1.0),
-                "0" => return zoom(s, 0.0),
+                "0" | ")" => return zoom(s, 0.0),
                 _ => {}
             }
         }

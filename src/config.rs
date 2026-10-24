@@ -666,7 +666,7 @@ const TEMPLATE: &str = r#"# This is the configuration file for Laplace.
 # font-family = JetBrainsMono Nerd Font
 # font-family = Symbols Nerd Font Mono
 
-# Font size in points. Cmd+0 / Ctrl+Shift+0 resets zoom to this size.
+# Font size in points. Cmd+0 / Ctrl+0 resets zoom to this size.
 # font-size = 14
 
 # ---------------------------------------------------------------------------
