@@ -27,22 +27,79 @@ pub fn find_family(family: &str) -> Option<FaceRef> {
     for dir in font_dirs() {
         collect_font_files(&dir, 0, &mut files);
     }
-    // Fast path: files whose name resembles the family, then everything else.
-    let (likely, rest): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| {
-        let stem = p.file_stem().and_then(|s| s.to_str()).map(normalize).unwrap_or_default();
-        stem.starts_with(&want) || want.starts_with(&stem)
-    });
-    best_match(&likely, &want).or_else(|| best_match(&rest, &want))
+
+    // 1. Exact match attempt with full name
+    if let Some(face) = search_files(&files, &want) {
+        return Some(face);
+    }
+
+    // 2. If the user asked for "<Name> Nerd Font" / "<Name> NF", strip the suffix and retry
+    // (Ghostty style: base font for text + automatic Nerd Font symbol fallback)
+    if let Some(base) = strip_nerd_font_suffix(&want) {
+        if let Some(face) = search_files(&files, base) {
+            return Some(face);
+        }
+    }
+
+    // 3. Known aliases on macOS:
+    #[cfg(target_os = "macos")]
+    {
+        if want == "sfmono" || want.starts_with("sfmono") || want == "sfnsmono" {
+            for alias in ["sfmono", "sfnsmono"] {
+                if let Some(face) = search_files(&files, alias) {
+                    return Some(face);
+                }
+            }
+        }
+    }
+
+    None
 }
 
-fn best_match(files: &[PathBuf], want: &str) -> Option<FaceRef> {
+fn strip_nerd_font_suffix(want: &str) -> Option<&str> {
+    for suffix in [
+        "nerdfontmono",
+        "nerdfontpropo",
+        "nerdfont",
+        "nfmono",
+        "nfpropo",
+        "nfm",
+        "nfp",
+        "nf",
+    ] {
+        if let Some(base) = want.strip_suffix(suffix) {
+            if !base.is_empty() {
+                return Some(base);
+            }
+        }
+    }
+    None
+}
+
+fn search_files(files: &[PathBuf], want: &str) -> Option<FaceRef> {
+    let (likely, rest): (Vec<_>, Vec<_>) = files.iter().partition(|p| {
+        let stem = p.file_stem().and_then(|s| s.to_str()).map(normalize).unwrap_or_default();
+        stem.starts_with(want) || want.starts_with(&stem)
+    });
+    best_match(&likely, want).or_else(|| best_match(&rest, want))
+}
+
+fn best_match(files: &[&PathBuf], want: &str) -> Option<FaceRef> {
     let mut best: Option<(u8, FaceRef)> = None;
-    for path in files {
+    for &path in files {
         for face in read_faces(path).unwrap_or_default() {
-            if normalize(&face.family) != want {
+            let fam_norm = normalize(&face.family);
+            let ps_norm = normalize(&face.postscript);
+            let full_norm = normalize(&face.full_name);
+
+            let exact_match = fam_norm == want || ps_norm == want || full_norm == want;
+            let prefix_match = want.len() >= 4 && (fam_norm.starts_with(want) || ps_norm.starts_with(want));
+
+            if !exact_match && !prefix_match {
                 continue;
             }
-            let score = style_score(&face.subfamily);
+
+            let score = style_score(&face.subfamily) + if exact_match { 0 } else { 10 };
             if best.as_ref().map_or(true, |(s, _)| score < *s) {
                 best = Some((score, FaceRef { path: path.to_string_lossy().into_owned(), index: face.index }));
                 if score == 0 {
@@ -78,11 +135,32 @@ fn font_dirs() -> Vec<PathBuf> {
         dirs.push(home.join("Library/Fonts"));
         dirs.push(home.join(".local/share/fonts"));
         dirs.push(home.join(".fonts"));
+        #[cfg(target_os = "macos")]
+        dirs.push(home.join("Applications/Ghostty.app/Contents/Resources/fonts"));
     }
     #[cfg(target_os = "macos")]
-    dirs.extend(["/Library/Fonts", "/System/Library/Fonts"].map(PathBuf::from));
+    {
+        dirs.extend(
+            [
+                "/Library/Fonts",
+                "/System/Library/Fonts",
+                "/System/Library/Fonts/Supplemental",
+                "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts",
+                "/Applications/Ghostty.app/Contents/Resources/fonts",
+                "/opt/homebrew/share/fonts",
+            ]
+            .map(PathBuf::from),
+        );
+    }
     #[cfg(not(target_os = "macos"))]
-    dirs.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from));
+    dirs.extend(
+        [
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            "/opt/homebrew/share/fonts",
+        ]
+        .map(PathBuf::from),
+    );
     dirs
 }
 
@@ -108,6 +186,8 @@ struct FaceName {
     index: u32,
     family: String,
     subfamily: String,
+    full_name: String,
+    postscript: String,
 }
 
 fn read_at(f: &File, off: u64, len: usize) -> Option<Vec<u8>> {
@@ -124,6 +204,13 @@ fn be32(b: &[u8], i: usize) -> u32 {
     u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
 
+struct FaceNameInfo {
+    family: String,
+    subfamily: String,
+    full_name: String,
+    postscript: String,
+}
+
 fn read_faces(path: &Path) -> Option<Vec<FaceName>> {
     let f = File::open(path).ok()?;
     let head = read_at(&f, 0, 12)?;
@@ -136,14 +223,20 @@ fn read_faces(path: &Path) -> Option<Vec<FaceName>> {
     };
     let mut faces = Vec::new();
     for (index, off) in offsets.into_iter().enumerate() {
-        if let Some((family, subfamily)) = read_name_table(&f, off as u64) {
-            faces.push(FaceName { index: index as u32, family, subfamily });
+        if let Some(info) = read_name_table(&f, off as u64) {
+            faces.push(FaceName {
+                index: index as u32,
+                family: info.family,
+                subfamily: info.subfamily,
+                full_name: info.full_name,
+                postscript: info.postscript,
+            });
         }
     }
     Some(faces)
 }
 
-fn read_name_table(f: &File, font_off: u64) -> Option<(String, String)> {
+fn read_name_table(f: &File, font_off: u64) -> Option<FaceNameInfo> {
     let hdr = read_at(f, font_off, 12)?;
     let num_tables = be16(&hdr, 4) as usize;
     let dir = read_at(f, font_off + 12, num_tables * 16)?;
@@ -166,6 +259,8 @@ fn read_name_table(f: &File, font_off: u64) -> Option<(String, String)> {
     // (priority, value) per wanted name: lower priority wins.
     let mut family: Option<(u8, String)> = None;
     let mut sub: Option<(u8, String)> = None;
+    let mut full_name: Option<(u8, String)> = None;
+    let mut postscript: Option<(u8, String)> = None;
     for i in 0..count {
         let r = 6 + i * 12;
         if r + 12 > t.len() {
@@ -198,10 +293,17 @@ fn read_name_table(f: &File, font_off: u64) -> Option<(String, String)> {
             1 => keep(&mut family, base + 1, text),
             17 => keep(&mut sub, base, text),
             2 => keep(&mut sub, base + 1, text),
+            4 => keep(&mut full_name, base, text),
+            6 => keep(&mut postscript, base, text),
             _ => {}
         }
     }
-    Some((family?.1, sub.map(|s| s.1).unwrap_or_default()))
+    Some(FaceNameInfo {
+        family: family?.1,
+        subfamily: sub.map(|s| s.1).unwrap_or_default(),
+        full_name: full_name.map(|s| s.1).unwrap_or_default(),
+        postscript: postscript.map(|s| s.1).unwrap_or_default(),
+    })
 }
 
 fn keep(slot: &mut Option<(u8, String)>, prio: u8, text: String) {
@@ -224,6 +326,21 @@ mod tests {
         assert!(face.path.ends_with("Menlo.ttc"), "{face:?}");
         let faces = read_faces(Path::new(&face.path)).unwrap();
         assert_eq!(faces[face.index as usize].subfamily, "Regular");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolves_sfmono_and_nerd_font_alias() {
+        let face = find_family("SFMono Nerd Font").expect("SFMono Nerd Font should resolve on macOS");
+        assert!(
+            face.path.contains("SF-Mono") || face.path.contains("SFMono") || face.path.contains("SFNSMono"),
+            "{face:?}"
+        );
+        let sf = find_family("SF Mono").expect("SF Mono should resolve on macOS");
+        assert!(
+            sf.path.contains("SF-Mono") || sf.path.contains("SFMono") || sf.path.contains("SFNSMono"),
+            "{sf:?}"
+        );
     }
 
     #[test]

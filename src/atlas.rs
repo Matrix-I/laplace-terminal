@@ -1341,13 +1341,14 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
 
     let (discovered_mono_nerd, discovered_symbols) = discover_nerd_fonts();
     // If the user has a full monospace Nerd Font installed, prefer it automatically.
-    primary_candidates.extend(discovered_mono_nerd);
+    primary_candidates.extend(discovered_mono_nerd.clone());
 
     #[cfg(target_os = "macos")]
     primary_candidates.extend(
         [
-            "/System/Library/Fonts/Menlo.ttc",
+            "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SF-Mono-Regular.otf",
             "/System/Library/Fonts/SFNSMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
             "/System/Library/Fonts/Monaco.ttf",
         ]
         .map(String::from),
@@ -1385,6 +1386,13 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
             fallbacks.push(f);
         }
     }
+    // Also include installed Nerd Fonts so symbols/icons render when the primary font (like SF Mono) lacks them
+    for path in &discovered_mono_nerd {
+        if let Some(f) = try_parse_font(path) {
+            fallbacks.push(f);
+            break; // A single full Nerd Font face provides all Nerd Font symbols
+        }
+    }
 
     Arc::new(FontSet { primary, fallbacks })
 }
@@ -1415,6 +1423,7 @@ fn discover_nerd_fonts() -> (Vec<String>, Vec<String>) {
         dirs.push(format!("{home}/Library/Fonts"));
         dirs.push(format!("{home}/.local/share/fonts"));
         dirs.push(format!("{home}/.fonts"));
+        dirs.push(format!("{home}/Applications/Ghostty.app/Contents/Resources/fonts"));
     }
     dirs.extend(
         [
@@ -1422,6 +1431,7 @@ fn discover_nerd_fonts() -> (Vec<String>, Vec<String>) {
             "/Applications/Ghostty.app/Contents/Resources/fonts",
             "/usr/share/fonts",
             "/usr/local/share/fonts",
+            "/opt/homebrew/share/fonts",
         ]
         .map(String::from),
     );
@@ -1482,6 +1492,14 @@ mod tests {
         // U+279C (➜) or CJK '中' is handled via CoreText fallback on macOS
         assert!(macos_coretext_rasterize(&mut buf, 16, 32, 24, 28.0, '中'));
         assert!(buf.iter().any(|&b| b > 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn loads_sfmono_nerd_font_successfully() {
+        let set = load_font(&["SFMono Nerd Font".to_string()]);
+        assert!(set.primary.lookup_glyph_index('A') > 0);
+        assert!(!set.fallbacks.is_empty());
     }
 }
 
