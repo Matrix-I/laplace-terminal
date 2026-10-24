@@ -5,6 +5,7 @@ mod atlas;
 mod config;
 mod fontdb;
 mod grid;
+mod history;
 mod macos;
 mod pty;
 mod renderer;
@@ -21,6 +22,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::grid::{Grid, Hyperlink, Selection};
+use crate::history::HistorySearch;
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
 
@@ -58,6 +60,7 @@ struct State {
     mouse_hidden: bool,
     cursor_blink_epoch: std::time::Instant,
     focused: bool,
+    history_search: HistorySearch,
 }
 
 struct App {
@@ -160,6 +163,7 @@ impl ApplicationHandler<AppEvent> for App {
             mouse_hidden: false,
             cursor_blink_epoch: std::time::Instant::now(),
             focused: true,
+            history_search: HistorySearch::new(),
         });
 
         #[cfg(target_os = "macos")]
@@ -304,6 +308,62 @@ impl ApplicationHandler<AppEvent> for App {
                 if s.tabs.is_empty() {
                     return;
                 }
+                if s.history_search.is_open {
+                    if btn_state == ElementState::Pressed {
+                        if let Some((x0, y0, popup_w, popup_h, visible_rows)) =
+                            s.renderer.history_popup_geometry(&s.history_search)
+                        {
+                            let show_tabs = s.tabs.len() > 1;
+                            let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+                            if let Some((cell_row, cell_col)) =
+                                s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
+                            {
+                                let r = if show_tabs { cell_row + 1 } else { cell_row };
+                                let c = cell_col;
+                                if c < x0 || c >= x0 + popup_w || r < y0 || r >= y0 + popup_h {
+                                    s.history_search.close();
+                                    s.renderer.invalidate();
+                                    s.window.request_redraw();
+                                    return;
+                                }
+                                if r >= y0 + 3 && r < y0 + 3 + visible_rows {
+                                    let item_idx = s.history_search.scroll_offset + (r - (y0 + 3));
+                                    if item_idx < s.history_search.filtered.len() {
+                                        let now = std::time::Instant::now();
+                                        let is_double = s.history_search.selected == item_idx
+                                            && s.last_click_time.is_some_and(|t| now.duration_since(t).as_millis() <= 400);
+                                        if is_double {
+                                            let cmd_opt = s.history_search.selected_command().map(|c| c.to_string());
+                                            s.history_search.close();
+                                            s.renderer.invalidate();
+                                            if let Some(cmd) = cmd_opt {
+                                                let mut payload = Vec::with_capacity(cmd.len() + 3);
+                                                payload.extend_from_slice(b"\x05\x15");
+                                                payload.extend_from_slice(cmd.as_bytes());
+                                                payload.push(b'\r');
+                                                s.tabs[s.active].pty.write(&payload);
+                                            }
+                                            s.window.request_redraw();
+                                            return;
+                                        } else {
+                                            s.history_search.selected = item_idx;
+                                            s.last_click_time = Some(now);
+                                            s.renderer.invalidate();
+                                            s.window.request_redraw();
+                                            return;
+                                        }
+                                    }
+                                }
+                            } else {
+                                s.history_search.close();
+                                s.renderer.invalidate();
+                                s.window.request_redraw();
+                                return;
+                            }
+                        }
+                    }
+                    return;
+                }
                 match btn_state {
                     ElementState::Pressed => {
                         #[cfg(target_os = "macos")]
@@ -410,6 +470,30 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 if s.tabs.is_empty() {
+                    return;
+                }
+                if s.history_search.is_open {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y.round() as isize,
+                        MouseScrollDelta::PixelDelta(p) => {
+                            let cell_h = s.renderer.cell_size().1 as f64;
+                            (p.y / cell_h.max(1.0)).round() as isize
+                        }
+                    };
+                    let visible_rows = s.renderer.history_popup_geometry(&s.history_search).map_or(10, |g| g.4);
+                    if lines > 0 {
+                        for _ in 0..lines.abs() {
+                            s.history_search.select_prev();
+                        }
+                        s.renderer.invalidate();
+                        s.window.request_redraw();
+                    } else if lines < 0 {
+                        for _ in 0..lines.abs() {
+                            s.history_search.select_next(visible_rows);
+                        }
+                        s.renderer.invalidate();
+                        s.window.request_redraw();
+                    }
                     return;
                 }
                 let lines = match delta {
@@ -636,7 +720,7 @@ fn render_active(s: &mut State) {
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
     let blink_on = cursor_is_visible_now(s);
     s.renderer
-        .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref(), blink_on);
+        .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref(), blink_on, Some(&s.history_search));
 }
 
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
@@ -932,7 +1016,178 @@ fn handle_key(
     }
     s.cursor_blink_epoch = std::time::Instant::now();
 
+    if s.history_search.is_open {
+        let visible_rows = s.renderer.history_popup_geometry(&s.history_search).map_or(10, |g| g.4);
+        match &ev.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                s.history_search.close();
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let cmd_opt = s.history_search.selected_command().map(|c| c.to_string());
+                s.history_search.close();
+                s.renderer.invalidate();
+                if let Some(cmd) = cmd_opt {
+                    let mut payload = Vec::with_capacity(cmd.len() + 3);
+                    payload.extend_from_slice(b"\x05\x15");
+                    payload.extend_from_slice(cmd.as_bytes());
+                    payload.push(b'\r');
+                    s.tabs[s.active].pty.write(&payload);
+                }
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::Tab) => {
+                let cmd_opt = s.history_search.selected_command().map(|c| c.to_string());
+                s.history_search.close();
+                s.renderer.invalidate();
+                if let Some(cmd) = cmd_opt {
+                    let mut payload = Vec::with_capacity(cmd.len() + 2);
+                    payload.extend_from_slice(b"\x05\x15");
+                    payload.extend_from_slice(cmd.as_bytes());
+                    s.tabs[s.active].pty.write(&payload);
+                }
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::Delete) => {
+                s.history_search.delete_selected();
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                s.history_search.select_next(visible_rows);
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                s.history_search.select_prev();
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::PageDown) => {
+                s.history_search.page_down(visible_rows);
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::PageUp) => {
+                s.history_search.page_up(visible_rows);
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::Home) => {
+                s.history_search.select_first();
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::End) => {
+                s.history_search.select_last(visible_rows);
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                s.history_search.backspace();
+                s.renderer.invalidate();
+                s.window.request_redraw();
+                return;
+            }
+            Key::Character(ch) => {
+                if ctrl {
+                    match ch.as_str() {
+                        "r" => {
+                            // In fzf, Ctrl+R toggles sorting: Relevance vs Recency
+                            s.history_search.toggle_sort();
+                            s.renderer.invalidate();
+                            s.window.request_redraw();
+                            return;
+                        }
+                        "d" => {
+                            // Ctrl+D deletes selected entry from history
+                            s.history_search.delete_selected();
+                            s.renderer.invalidate();
+                            s.window.request_redraw();
+                            return;
+                        }
+                        "n" | "j" => {
+                            s.history_search.select_next(visible_rows);
+                            s.renderer.invalidate();
+                            s.window.request_redraw();
+                            return;
+                        }
+                        "p" | "k" => {
+                            s.history_search.select_prev();
+                            s.renderer.invalidate();
+                            s.window.request_redraw();
+                            return;
+                        }
+                        "c" | "g" => {
+                            s.history_search.close();
+                            s.renderer.invalidate();
+                            s.window.request_redraw();
+                            return;
+                        }
+                        "u" | "w" => {
+                            s.history_search.clear_query();
+                            s.renderer.invalidate();
+                            s.window.request_redraw();
+                            return;
+                        }
+                        _ => return,
+                    }
+                }
+                if alt && ch.eq_ignore_ascii_case("s") {
+                    s.history_search.toggle_sort();
+                    s.renderer.invalidate();
+                    s.window.request_redraw();
+                    return;
+                }
+                if !super_key && !alt {
+                    for c in ch.chars() {
+                        s.history_search.append_char(c);
+                    }
+                    s.renderer.invalidate();
+                    s.window.request_redraw();
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+
     if let Key::Character(ch) = &ev.logical_key {
+        // Built-in History Search:
+        // - Ctrl+R (at shell prompt when !alt_active)
+        // - macOS: Cmd+R
+        // - Linux: Super+R or Ctrl+Shift+R
+        let alt_active = s.tabs.get(s.active).map_or(false, |t| t.grid.lock().alt_active);
+        #[cfg(target_os = "macos")]
+        let is_history = (ctrl && !shift && !alt && !super_key && !alt_active)
+            || (super_key && !ctrl && !alt && !shift);
+        #[cfg(not(target_os = "macos"))]
+        let is_history = (ctrl && !shift && !alt && !super_key && !alt_active)
+            || (super_key && !ctrl && !alt && !shift)
+            || (ctrl && shift && !alt && !super_key);
+        if is_history && ch.eq_ignore_ascii_case("r") {
+            let initial = {
+                let g = s.tabs[s.active].grid.lock();
+                g.current_prompt_input()
+            };
+            let initial_ref = if initial.is_empty() { None } else { Some(initial.as_str()) };
+            s.history_search.open(initial_ref);
+            s.renderer.invalidate();
+            s.window.request_redraw();
+            return;
+        }
+
         // Quit app: Cmd+Q on macOS, Ctrl+Shift+Q on Linux.
         #[cfg(target_os = "macos")]
         let is_quit = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("q");
@@ -1209,6 +1464,10 @@ fn handle_key(
     let mut scratch = [0u8; 32];
     let bytes: &[u8] = match &ev.logical_key {
         Key::Named(NamedKey::Enter) => {
+            let cmd = s.tabs[s.active].grid.lock().current_prompt_input();
+            if !cmd.is_empty() {
+                s.history_search.add_session_command(&cmd);
+            }
             if alt { b"\x1b\r" } else { b"\r" }
         }
         Key::Named(NamedKey::Backspace) => {

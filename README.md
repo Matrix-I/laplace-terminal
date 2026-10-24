@@ -20,6 +20,7 @@
 - **Native macOS Lifecycle:** Closing the last tab or window keeps Laplace running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Laplace` immediately restores a fresh tab. Press `Cmd+Q` (or `Ctrl+Shift+Q` on Linux) to quit.
 - **Tabs with CWD Inheritance:** Seamless multi-tab experience (`Cmd+T`/`Ctrl+Shift+T`, `Cmd+W`/`Ctrl+Shift+W`, tab cycling, 1..9 direct jumps). New tabs automatically open in the current working directory of the active tab.
 - **Smart Hyperlink & Path Detection:** `Cmd+Click` (macOS) / `Ctrl+Click` (Linux) on URLs or local filesystem paths (`~/...`, `./...`, or absolute paths) to open them directly in your default browser or editor.
+- **Built-in CLI History Search:** Press `Ctrl+R` (or `Cmd+R` on macOS, `Super+R` on Linux) to open a zero-latency fuzzy history search popup with character-level match highlighting. Press `Enter` to run, `Tab` to insert into the prompt for editing, and `Esc` to close. Preserves `Ctrl+R` redo inside vim/nano!
 - **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and built-in palettes.
 
 ---
@@ -90,6 +91,7 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 | **Reload config file** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Live reload without losing shell session |
 | **Open URL or path** | <kbd>Cmd</kbd> + <kbd>Click</kbd> | <kbd>Ctrl</kbd> + <kbd>Click</kbd> *(or <kbd>Super</kbd> + <kbd>Click</kbd>)* | Opens in default browser / editor via `open` or `xdg-open` |
 | **Hover URL preview** | <kbd>Cmd</kbd> + <kbd>Mouse Move</kbd> | <kbd>Ctrl</kbd> + <kbd>Mouse Move</kbd> *(or <kbd>Super</kbd>)* | Underlines URL and displays preview pill |
+| **CLI History Search** | <kbd>Ctrl</kbd> + <kbd>R</kbd> *(or <kbd>Cmd</kbd> + <kbd>R</kbd>)* | <kbd>Ctrl</kbd> + <kbd>R</kbd> *(or <kbd>Super</kbd> + <kbd>R</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>)* | Built-in fuzzy history search; `Enter`: execute, `Tab`: insert, `Esc`: close; preserves vim redo |
 | **Scroll history locally** | <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | Scrolls active tab's scrollback buffer |
 
 ---

@@ -69,7 +69,7 @@ impl Pty {
         env.push(cstr("TERM=xterm-256color"));
         env.push(cstr("COLORTERM=truecolor"));
         env.push(cstr("TERM_PROGRAM=laplace"));
-        env.push(cstr("TERM_PROGRAM_VERSION=0.1.0"));
+        env.push(cstr(concat!("TERM_PROGRAM_VERSION=", env!("CARGO_PKG_VERSION"))));
         if let Some(feats) = shell_features {
             env.push(cstr("LAPLACE_SHELL_INTEGRATION=1"));
             let mut list = Vec::new();

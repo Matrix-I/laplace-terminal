@@ -265,6 +265,35 @@ impl Grid {
         (r < self.rows).then(|| (self.cur.col.min(self.cols - 1), r))
     }
 
+    /// Extract text typed by user on the active prompt line (before the cursor).
+    pub fn current_prompt_input(&self) -> String {
+        if self.cur.row >= self.rows {
+            return String::new();
+        }
+        let row = self.display_row(self.cur.row);
+        let end_col = self.cur.col.min(row.len());
+        let raw: String = row[..end_col]
+            .iter()
+            .map(|c| char::from_u32(c.codepoint).unwrap_or(' '))
+            .collect();
+        let s = raw.trim_end();
+        const PROMPT_SIGNS: &[&str] = &["❯ ", "➜ ", "% ", "$ ", "# ", "> ", ": "];
+        let mut last_sign_end = None;
+        for sign in PROMPT_SIGNS {
+            if let Some(pos) = s.rfind(sign) {
+                let end = pos + sign.len();
+                if last_sign_end.map_or(true, |cur| end > cur) {
+                    last_sign_end = Some(end);
+                }
+            }
+        }
+        if let Some(pos) = last_sign_end {
+            s[pos..].trim().to_string()
+        } else {
+            String::new()
+        }
+    }
+
     /// Scroll the viewport through history (positive = towards older lines).
     pub fn scroll_display(&mut self, delta: isize) {
         if self.alt_active {
