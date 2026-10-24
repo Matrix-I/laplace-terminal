@@ -44,6 +44,41 @@ pub fn apply_macos_window_config(window: &Window, cfg: &Config) {
                 let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
                     std::mem::transmute(objc_msgSend as *const ());
                 f(ns_window, set_cs_sel, cs);
+
+                // Set CAMetalLayer colorspace so Metal accurately outputs in sRGB or Display P3
+                let cg_cs = msg_send_ptr(cs, "CGColorSpace\0");
+                if !cg_cs.is_null() {
+                    let layer = msg_send_ptr(ns_view, "layer\0");
+                    if !layer.is_null() {
+                        apply_layer_colorspace(layer, cg_cs);
+                    }
+                    let content_view = msg_send_ptr(ns_window, "contentView\0");
+                    if !content_view.is_null() && content_view != ns_view {
+                        let cv_layer = msg_send_ptr(content_view, "layer\0");
+                        if !cv_layer.is_null() {
+                            apply_layer_colorspace(cv_layer, cg_cs);
+                        }
+                    }
+                    let subviews = msg_send_ptr(ns_view, "subviews\0");
+                    if !subviews.is_null() {
+                        let count_sel = sel_registerName(b"count\0".as_ptr());
+                        let count_fn: extern "C" fn(*mut c_void, *mut c_void) -> usize =
+                            std::mem::transmute(objc_msgSend as *const ());
+                        let count = count_fn(subviews, count_sel);
+                        let obj_at_sel = sel_registerName(b"objectAtIndex:\0".as_ptr());
+                        let obj_fn: extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void =
+                            std::mem::transmute(objc_msgSend as *const ());
+                        for i in 0..count {
+                            let sv = obj_fn(subviews, obj_at_sel, i);
+                            if !sv.is_null() {
+                                let sub_layer = msg_send_ptr(sv, "layer\0");
+                                if !sub_layer.is_null() {
+                                    apply_layer_colorspace(sub_layer, cg_cs);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -61,6 +96,20 @@ pub fn apply_macos_window_config(window: &Window, cfg: &Config) {
                 let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
                     std::mem::transmute(objc_msgSend as *const ());
                 f(ns_window, set_bg_sel, clear_col);
+            }
+        } else {
+            let set_opaque_sel = sel_registerName(b"setOpaque:\0".as_ptr());
+            let f: extern "C" fn(*mut c_void, *mut c_void, bool) =
+                std::mem::transmute(objc_msgSend as *const ());
+            f(ns_window, set_opaque_sel, true);
+
+            let nscolor_cls = objc_getClass(b"NSColor\0".as_ptr());
+            let black_col = msg_send_ptr(nscolor_cls, "blackColor\0");
+            if !black_col.is_null() {
+                let set_bg_sel = sel_registerName(b"setBackgroundColor:\0".as_ptr());
+                let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                f(ns_window, set_bg_sel, black_col);
             }
         }
 
@@ -141,6 +190,44 @@ unsafe fn setup_visual_effect_view(ns_window: *mut c_void) {
     let add_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void, i64, *mut c_void) =
         std::mem::transmute(objc_msgSend as *const ());
     add_fn(content_view, add_subview, effect_view, -1, std::ptr::null_mut());
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn apply_layer_colorspace(layer: *mut c_void, cg_cs: *mut c_void) {
+    if layer.is_null() {
+        return;
+    }
+    let set_cs1 = sel_registerName(b"setColorspace:\0".as_ptr());
+    let set_cs2 = sel_registerName(b"setColorSpace:\0".as_ptr());
+    let responds_sel = sel_registerName(b"respondsToSelector:\0".as_ptr());
+    let responds_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> bool =
+        std::mem::transmute(objc_msgSend as *const ());
+    if responds_fn(layer, responds_sel, set_cs1) {
+        let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(layer, set_cs1, cg_cs);
+    }
+    if responds_fn(layer, responds_sel, set_cs2) {
+        let f: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(layer, set_cs2, cg_cs);
+    }
+    let sublayers = msg_send_ptr(layer, "sublayers\0");
+    if !sublayers.is_null() {
+        let count_sel = sel_registerName(b"count\0".as_ptr());
+        let count_fn: extern "C" fn(*mut c_void, *mut c_void) -> usize =
+            std::mem::transmute(objc_msgSend as *const ());
+        let count = count_fn(sublayers, count_sel);
+        let obj_at_sel = sel_registerName(b"objectAtIndex:\0".as_ptr());
+        let obj_fn: extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        for i in 0..count {
+            let sub = obj_fn(sublayers, obj_at_sel, i);
+            if !sub.is_null() {
+                apply_layer_colorspace(sub, cg_cs);
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

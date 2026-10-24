@@ -18,7 +18,7 @@ pub const SCROLLBACK: usize = 5000;
 /// which keeps a freshly zeroed buffer valid and lets the shader apply the theme.
 /// They are runtime-configurable (`background` / `foreground` config options).
 static DEFAULT_FG_RGB: AtomicU32 = AtomicU32::new(0xE6E6_E600);
-static DEFAULT_BG_RGB: AtomicU32 = AtomicU32::new(0x1213_1600);
+static DEFAULT_BG_RGB: AtomicU32 = AtomicU32::new(0x0000_0000);
 
 #[inline]
 pub fn default_fg() -> u32 {
@@ -33,6 +33,32 @@ pub fn default_bg() -> u32 {
 pub fn set_default_colors(fg: u32, bg: u32) {
     DEFAULT_FG_RGB.store(fg & !0xFF, Ordering::Relaxed);
     DEFAULT_BG_RGB.store(bg & !0xFF, Ordering::Relaxed);
+}
+
+/// ANSI 16-color base palette (`0xRRGGBB`).
+static PALETTE_BASE: [AtomicU32; 16] = [
+    AtomicU32::new(0x121316),
+    AtomicU32::new(0xF38BA8),
+    AtomicU32::new(0xA6E3A1),
+    AtomicU32::new(0xF5A97F),
+    AtomicU32::new(0x00BFE3),
+    AtomicU32::new(0xCBA6F7),
+    AtomicU32::new(0x89DCEB),
+    AtomicU32::new(0xD9E0EE),
+    AtomicU32::new(0x585B70),
+    AtomicU32::new(0xF38BA8),
+    AtomicU32::new(0xA6E3A1),
+    AtomicU32::new(0xF9E2AF),
+    AtomicU32::new(0x74C7EC),
+    AtomicU32::new(0xF5C2E7),
+    AtomicU32::new(0x94E2D5),
+    AtomicU32::new(0xFFFFFF),
+];
+
+pub fn set_palette(pal: &[u32; 16]) {
+    for (i, &col) in pal.iter().enumerate() {
+        PALETTE_BASE[i].store(col, Ordering::Relaxed);
+    }
 }
 
 /// `fg` low byte: 0xFF = explicit color, 0x00 = default foreground.
@@ -897,12 +923,8 @@ fn rgb(r: u16, g: u16, b: u16) -> u32 {
 
 /// xterm 256-color palette, returned as `0xRRGGBB00`.
 fn palette(i: u8) -> u32 {
-    const BASE: [u32; 16] = [
-        0x121316, 0xF38BA8, 0xA6E3A1, 0xF5A97F, 0x00BFE3, 0xCBA6F7, 0x89DCEB, 0xD9E0EE, //
-        0x585B70, 0xF38BA8, 0xA6E3A1, 0xF9E2AF, 0x74C7EC, 0xF5C2E7, 0x94E2D5, 0xFFFFFF,
-    ];
     match i {
-        0..=15 => BASE[i as usize] << 8,
+        0..=15 => PALETTE_BASE[i as usize].load(Ordering::Relaxed) << 8,
         16..=231 => {
             let i = i - 16;
             let lv = |v: u8| if v == 0 { 0u16 } else { 55 + 40 * v as u16 };

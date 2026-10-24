@@ -38,6 +38,22 @@ fn unpack(c: u32) -> vec3<f32> {
     return vec3<f32>(f32((c >> 24u) & 255u), f32((c >> 16u) & 255u), f32((c >> 8u) & 255u)) / 255.0;
 }
 
+// Exact sRGB <-> Linear color conversions for gamma-correct alpha blending
+// (matches Ghostty `alpha-blending = native/linear`, eliminates dark halos).
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let cutoff = c <= vec3<f32>(0.04045);
+    let higher = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    let lower = c / 12.92;
+    return select(higher, lower, cutoff);
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let cutoff = c <= vec3<f32>(0.0031308);
+    let higher = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
+    let lower = c * 12.92;
+    return select(higher, lower, cutoff);
+}
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) vi: u32,
@@ -187,7 +203,13 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 let slot_y = f32(v.flags >> 16u);
                 let uv = vec2<f32>(v.uv.x, (slot_y * u.cell.y + gy) / u.atlas_size.y);
                 let ga = textureSampleLevel(atlas, samp, uv, 0.0).r;
-                pill_col = mix(pill_col, v.fg, ga);
+                if (ga >= 1.0) {
+                    pill_col = v.fg;
+                } else if (ga > 0.0) {
+                    let pill_lin = srgb_to_linear(pill_col);
+                    let fg_lin = srgb_to_linear(v.fg);
+                    pill_col = linear_to_srgb(mix(pill_lin, fg_lin, ga));
+                }
             }
 
             col_rgb = mix(bar_bg, pill_col, fill_a);
@@ -200,7 +222,17 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     if ((v.flags & 1u) != 0u && v.local.y * u.cell.y >= u.cell.y - thickness) {
         a = 1.0;
     }
-    var cell_color = mix(v.bg, v.fg, a);
+    var cell_color: vec3<f32>;
+    if (a <= 0.0) {
+        cell_color = v.bg;
+    } else if (a >= 1.0) {
+        cell_color = v.fg;
+    } else {
+        let fg_lin = srgb_to_linear(v.fg);
+        let bg_lin = srgb_to_linear(v.bg);
+        let cell_lin = mix(bg_lin, fg_lin, a);
+        cell_color = linear_to_srgb(cell_lin);
+    }
 
     // Non-block cursor styling (1=block handled in vs_main, 2=bar, 3=underline, 4=block_hollow)
     let c_style = (v.flags >> 8u) & 7u;

@@ -80,6 +80,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
         let cfg = config::Config::load();
         grid::set_default_colors(cfg.foreground, cfg.background);
+        grid::set_palette(&cfg.palette);
 
         let attrs = Window::default_attributes()
             .with_title("Laplace")
@@ -101,6 +102,9 @@ impl ApplicationHandler<AppEvent> for App {
             cfg.background_opacity,
             cfg.cursor_style.shader_id(),
         );
+
+        #[cfg(target_os = "macos")]
+        macos::apply_macos_window_config(&window, &cfg);
 
         if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
             let (cw, ch) = renderer.cell_size();
@@ -325,6 +329,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let sz = s.window.inner_size();
                 s.renderer.resize(sz.width, sz.height);
                 sync_size(s);
+                #[cfg(target_os = "macos")]
+                macos::apply_macos_window_config(&s.window, &s.config);
                 s.window.request_redraw();
             }
 
@@ -508,6 +514,7 @@ fn reload_config(s: &mut State) {
     }
 
     grid::set_default_colors(new.foreground, new.background);
+    grid::set_palette(&new.palette);
 
     #[cfg(target_os = "macos")]
     macos::apply_macos_window_config(&s.window, &new);
