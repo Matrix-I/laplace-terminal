@@ -35,6 +35,7 @@ pub struct Atlas {
     n_slots: u32,
     next_free: u32,
 
+    ascii: [u16; 128],
     map: HashMap<u32, u16>,
     slot_cp: Vec<u32>,
     slot_used: Vec<u64>,
@@ -76,6 +77,7 @@ impl Atlas {
             slots_per_row,
             n_slots,
             next_free: 1,
+            ascii: [BLANK_SLOT; 128],
             map: HashMap::with_capacity(n_slots as usize),
             slot_cp: vec![0; n_slots as usize],
             slot_used: vec![0; n_slots as usize],
@@ -133,7 +135,13 @@ impl Atlas {
         if cp == 0 || cp == 32 {
             return BLANK_SLOT;
         }
-        if let Some(&s) = self.map.get(&cp) {
+        if cp < 128 {
+            let s = self.ascii[cp as usize];
+            if s != BLANK_SLOT {
+                self.slot_used[s as usize] = self.frame;
+                return s;
+            }
+        } else if let Some(&s) = self.map.get(&cp) {
             self.slot_used[s as usize] = self.frame;
             return s;
         }
@@ -152,13 +160,22 @@ impl Atlas {
                 }
             }
             let Some(i) = best else { return BLANK_SLOT };
-            self.map.remove(&self.slot_cp[i]);
+            let old_cp = self.slot_cp[i];
+            if old_cp < 128 {
+                self.ascii[old_cp as usize] = BLANK_SLOT;
+            } else {
+                self.map.remove(&old_cp);
+            }
             self.evicted = true;
             i as u16
         };
         self.rasterize(cp);
         self.upload(queue, s);
-        self.map.insert(cp, s);
+        if cp < 128 {
+            self.ascii[cp as usize] = s;
+        } else {
+            self.map.insert(cp, s);
+        }
         self.slot_cp[s as usize] = cp;
         self.slot_used[s as usize] = self.frame;
         s

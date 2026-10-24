@@ -246,7 +246,7 @@ impl Pty {
                         } else if sync_active {
                             6
                         } else {
-                            1
+                            0
                         };
                         let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
                         let pr = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
@@ -295,7 +295,7 @@ fn write_all(fd: RawFd, mut data: &[u8]) {
 }
 
 #[cfg(target_os = "macos")]
-fn pid_cwd(pid: libc::pid_t) -> Option<String> {
+pub(crate) fn pid_cwd(pid: libc::pid_t) -> Option<String> {
     if pid <= 0 {
         return None;
     }
@@ -319,7 +319,7 @@ fn pid_cwd(pid: libc::pid_t) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn pid_cwd(pid: libc::pid_t) -> Option<String> {
+pub(crate) fn pid_cwd(pid: libc::pid_t) -> Option<String> {
     if pid <= 0 {
         return None;
     }

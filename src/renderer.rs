@@ -411,15 +411,17 @@ impl Renderer {
         let n = cols * total_rows;
 
         let active_pane = panes.iter().find(|p| p.is_active).unwrap_or(&panes[0]);
-        let active_cur = {
+        let (active_cur, active_dirty) = {
             let g = active_pane.grid.lock();
-            g.cursor_pos().map(|(cx, cy)| (active_pane.rect.col + cx, active_pane.rect.row + cy + top_rows))
+            let cur = g.cursor_pos().map(|(cx, cy)| (active_pane.rect.col + cx, active_pane.rect.row + cy + top_rows));
+            let dirty = g.all_dirty || g.dirty.iter().any(|&d| d);
+            (cur, dirty)
         };
         let effective_visible = active_cur.is_some() && cursor_blink_on;
 
         // Fast check before acquiring a Metal/Vulkan swapchain drawable
         if !self.force_full && !is_search_open {
-            let any_dirty = panes.iter().any(|p| {
+            let any_dirty = active_dirty || panes.iter().filter(|p| p.id != active_pane.id).any(|p| {
                 let g = p.grid.lock();
                 g.all_dirty || g.dirty.iter().any(|&d| d)
             });
