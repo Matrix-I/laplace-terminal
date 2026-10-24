@@ -15,9 +15,9 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
-use crate::grid::{Grid, Selection};
+use crate::grid::{Grid, Hyperlink, Selection};
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
 
@@ -50,6 +50,7 @@ struct State {
     last_click_time: Option<std::time::Instant>,
     last_click_cell: Option<(usize, usize)>,
     click_count: u8,
+    hovered_link: Option<Hyperlink>,
 }
 
 struct App {
@@ -109,6 +110,7 @@ impl ApplicationHandler<AppEvent> for App {
             last_click_time: None,
             last_click_cell: None,
             click_count: 0,
+            hovered_link: None,
         });
     }
 
@@ -151,7 +153,10 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
-            WindowEvent::ModifiersChanged(m) => s.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                s.mods = m.state();
+                update_hovered_link(s);
+            }
 
             WindowEvent::CursorMoved { position, .. } => {
                 s.mouse_pos = (position.x, position.y);
@@ -167,6 +172,8 @@ impl ApplicationHandler<AppEvent> for App {
                             }
                         }
                     }
+                } else {
+                    update_hovered_link(s);
                 }
             }
 
@@ -176,6 +183,18 @@ impl ApplicationHandler<AppEvent> for App {
                 ..
             } => match btn_state {
                 ElementState::Pressed => {
+                    #[cfg(target_os = "macos")]
+                    let cmd_pressed = s.mods.super_key();
+                    #[cfg(not(target_os = "macos"))]
+                    let cmd_pressed = s.mods.control_key() || s.mods.super_key();
+
+                    if cmd_pressed {
+                        if let Some(link) = &s.hovered_link {
+                            open_url(&link.url);
+                            return;
+                        }
+                    }
+
                     if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
                         match action {
                             TabBarAction::Select(idx) => select_tab(s, idx),
@@ -381,7 +400,52 @@ fn render_active(s: &mut State) {
     }
     refresh_tab_titles(s);
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
-    s.renderer.render_with_tabs(&s.tabs[s.active].grid, tab_bar);
+    s.renderer
+        .render_with_tabs(&s.tabs[s.active].grid, tab_bar, s.hovered_link.as_ref());
+}
+
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let res = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let res = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(windows)]
+    let res = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
+
+    if let Err(e) = res {
+        eprintln!("laplace: failed to open URL {url}: {e}");
+    }
+}
+
+fn update_hovered_link(s: &mut State) {
+    #[cfg(target_os = "macos")]
+    let cmd_pressed = s.mods.super_key();
+    #[cfg(not(target_os = "macos"))]
+    let cmd_pressed = s.mods.control_key() || s.mods.super_key();
+
+    let new_link = if cmd_pressed && !s.selecting {
+        let show_tabs = s.tabs.len() > 1;
+        let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+        if let Some((row, col)) = s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows) {
+            let g = s.tabs[s.active].grid.lock();
+            g.find_url_at(row, col)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if s.hovered_link != new_link {
+        s.hovered_link = new_link;
+        if s.hovered_link.is_some() {
+            s.window.set_cursor(CursorIcon::Pointer);
+        } else {
+            s.window.set_cursor(CursorIcon::Default);
+        }
+        s.renderer.invalidate();
+        s.window.request_redraw();
+    }
 }
 
 fn duplicate_active_tab(

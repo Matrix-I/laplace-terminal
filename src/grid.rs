@@ -67,6 +67,14 @@ pub struct Selection {
     pub end: (usize, usize),   // (row, col)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hyperlink {
+    pub row: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+    pub url: String,
+}
+
 impl Selection {
     #[inline]
     pub fn ordered(self) -> ((usize, usize), (usize, usize)) {
@@ -247,6 +255,66 @@ impl Grid {
         };
         let (start, end) = sel.ordered();
         (row, col) >= start && (row, col) <= end
+    }
+
+    /// Detect a URL (http:// or https://) containing `(row, col)` if present on the visible row.
+    pub fn find_url_at(&self, row: usize, col: usize) -> Option<Hyperlink> {
+        if row >= self.rows || self.cols == 0 || col >= self.cols {
+            return None;
+        }
+        let r = self.display_row(row);
+        let chars: Vec<char> = r
+            .iter()
+            .map(|c| char::from_u32(c.codepoint).filter(|&ch| ch != '\0').unwrap_or(' '))
+            .collect();
+
+        let mut idx = 0;
+        while idx < chars.len() {
+            let rem: String = chars[idx..].iter().collect();
+            let is_https = rem.starts_with("https://");
+            let is_http = rem.starts_with("http://");
+            if is_https || is_http {
+                let start = idx;
+                let mut end = if is_https { idx + 8 } else { idx + 7 };
+                while end < chars.len() {
+                    let ch = chars[end];
+                    if ch.is_ascii_whitespace()
+                        || ch == '\0'
+                        || ('\u{E000}'..='\u{F8FF}').contains(&ch)
+                        || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                // Strip trailing sentence punctuation
+                while end > start {
+                    let last_ch = chars[end - 1];
+                    if matches!(last_ch, '.' | ',' | ';' | ':' | '!' | '?' | '\'') {
+                        end -= 1;
+                    } else if last_ch == ')' && !chars[start..end].contains(&'(') {
+                        end -= 1;
+                    } else if last_ch == ']' && !chars[start..end].contains(&'[') {
+                        end -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                if col >= start && col < end && end > start + 7 {
+                    let url_str: String = chars[start..end].iter().collect();
+                    return Some(Hyperlink {
+                        row,
+                        start_col: start,
+                        end_col: end - 1,
+                        url: url_str,
+                    });
+                }
+                idx = end.max(idx + 1);
+            } else {
+                idx += 1;
+            }
+        }
+        None
     }
 
     #[inline]
@@ -1190,5 +1258,24 @@ mod tests {
         assert_eq!(g.select_smart_line(2, 10), "./target/release/laplace");
         // Triple-click selects raw full line
         assert_eq!(g.select_line(1), "$ cd Desktop/personal/laplace-terninal");
+    }
+
+    #[test]
+    fn url_detection() {
+        let mut g = Grid::new(80, 5);
+        feed(
+            &mut g,
+            "Docs at https://ghostty.org/docs and repo (http://github.com/ghostty-org).\r\nDone.",
+        );
+        let link1 = g.find_url_at(0, 15).expect("find https url");
+        assert_eq!(link1.url, "https://ghostty.org/docs");
+        assert_eq!(link1.start_col, 8);
+        assert_eq!(link1.end_col, 31);
+
+        let link2 = g.find_url_at(0, 50).expect("find http url");
+        assert_eq!(link2.url, "http://github.com/ghostty-org");
+
+        assert!(g.find_url_at(0, 2).is_none());
+        assert!(g.find_url_at(1, 0).is_none());
     }
 }

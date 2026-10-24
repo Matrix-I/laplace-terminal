@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet};
-use crate::grid::{Grid, DEFAULT_BG, DEFAULT_FG};
+use crate::grid::{Grid, Hyperlink, DEFAULT_BG, DEFAULT_FG};
 
 /// Per-cell GPU instance: 12 bytes, mirrors `Cell` with codepoint → atlas slot.
 #[repr(C)]
@@ -33,10 +33,13 @@ struct Uniforms {
     cursor_visible: u32,
     default_fg: u32,
     default_bg: u32,
-    _pad: u32,
+    tab_info: u32,
+    url_len: u32,
+    _pad_url: [u32; 3],
+    url_slots: [[u32; 4]; 32],
 }
 
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 64);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 592);
 const _: () = assert!(std::mem::size_of::<Instance>() == 12);
 
 pub struct Renderer {
@@ -55,6 +58,7 @@ pub struct Renderer {
     pad: u32,
     force_full: bool,
     last_cursor: Option<(usize, usize)>,
+    last_hovered_link: Option<Hyperlink>,
 }
 
 impl Renderer {
@@ -207,6 +211,7 @@ impl Renderer {
             pad,
             force_full: true,
             last_cursor: None,
+            last_hovered_link: None,
         }
     }
 }
@@ -313,8 +318,18 @@ impl Renderer {
         Some((row.min(rows - 1), col.min(cols - 1)))
     }
 
-    pub fn render_with_tabs(&mut self, grid: &Mutex<Grid>, tab_bar: Option<(&[String], usize)>) {
+    pub fn render_with_tabs(
+        &mut self,
+        grid: &Mutex<Grid>,
+        tab_bar: Option<(&[String], usize)>,
+        hovered_link: Option<&Hyperlink>,
+    ) {
         let top_rows = usize::from(tab_bar.is_some());
+        if self.last_hovered_link.as_ref() != hovered_link {
+            self.force_full = true;
+            self.last_hovered_link = hovered_link.cloned();
+        }
+
         // Fast check before acquiring a Metal swapchain drawable: if no cells
         // or cursor state changed since the last frame, skip presenting entirely
         // so non-visual escape sequences never exhaust swapchain drawables.
@@ -369,7 +384,7 @@ impl Renderer {
             for r in 0..rows {
                 if full || g.dirty[r] {
                     let dst_row = r + top_rows;
-                    self.build_row(&g, r, dst_row);
+                    self.build_row(&g, r, dst_row, hovered_link);
                     lo = lo.min(dst_row);
                     hi = hi.max(dst_row);
                 }
@@ -380,7 +395,7 @@ impl Renderer {
                     self.build_tab_bar_row(cols, titles, active_idx);
                 }
                 for r in 0..rows {
-                    self.build_row(&g, r, r + top_rows);
+                    self.build_row(&g, r, r + top_rows, hovered_link);
                 }
                 self.atlas.take_evicted();
                 lo = 0;
@@ -408,6 +423,23 @@ impl Renderer {
             Some((titles, active_idx)) => ((active_idx as u32) << 16) | (titles.len() as u32 & 0xFFFF),
             None => 0,
         };
+
+        let mut url_slots = [[0u32; 4]; 32];
+        let mut url_len = 0u32;
+        if let Some(link) = hovered_link {
+            let max_chars = 120;
+            let display_url = if link.url.chars().count() > max_chars {
+                format!("{}...", link.url.chars().take(max_chars - 3).collect::<String>())
+            } else {
+                link.url.clone()
+            };
+            for (i, ch) in display_url.chars().take(128).enumerate() {
+                let slot = self.atlas.slot(&self.queue, ch as u32);
+                url_slots[i / 4][i % 4] = slot as u32;
+                url_len += 1;
+            }
+        }
+
         let u = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
             cell: [self.atlas.cell_w as f32, self.atlas.cell_h as f32],
@@ -419,7 +451,10 @@ impl Renderer {
             cursor_visible: cursor.is_some() as u32,
             default_fg: DEFAULT_FG,
             default_bg: DEFAULT_BG,
-            _pad: tab_info,
+            tab_info,
+            url_len,
+            _pad_url: [0; 3],
+            url_slots,
         };
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
@@ -450,22 +485,40 @@ impl Renderer {
         frame.present();
     }
 
-    fn build_row(&mut self, g: &Grid, src_row: usize, dst_row: usize) {
+    fn build_row(
+        &mut self,
+        g: &Grid,
+        src_row: usize,
+        dst_row: usize,
+        hovered_link: Option<&Hyperlink>,
+    ) {
         const SEL_BG: u32 = 0x3D59_A180;
         const SEL_FG: u32 = 0xFFFF_FFFF;
         let cols = g.cols;
         let row = g.display_row(src_row);
         let out = &mut self.instances[dst_row * cols..(dst_row + 1) * cols];
+        let is_link_row = hovered_link.map_or(false, |l| l.row == src_row);
         for (col, (dst, cell)) in out.iter_mut().zip(row).enumerate() {
             let slot = self.atlas.slot(&self.queue, cell.codepoint);
+            let underline_flag = if is_link_row {
+                if let Some(l) = hovered_link {
+                    if col >= l.start_col && col <= l.end_col { 1u32 } else { 0u32 }
+                } else { 0u32 }
+            } else {
+                0u32
+            };
             if g.is_selected(src_row, col) {
                 *dst = Instance {
                     glyph: slot as u32,
                     fg: SEL_FG,
-                    bg: SEL_BG | (cell.bg & 1),
+                    bg: (SEL_BG | (cell.bg & 1)) | underline_flag,
                 };
             } else {
-                *dst = Instance { glyph: slot as u32, fg: cell.fg, bg: cell.bg };
+                *dst = Instance {
+                    glyph: slot as u32,
+                    fg: cell.fg,
+                    bg: cell.bg | underline_flag,
+                };
             }
         }
     }

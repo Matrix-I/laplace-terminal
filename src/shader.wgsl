@@ -14,6 +14,11 @@ struct Uniforms {
     default_fg: u32,
     default_bg: u32,
     tab_info: u32,          // low 16 bits = tab_count (0 if single tab), high 16 bits = active_tab
+    url_len: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+    url_slots: array<vec4<u32>, 32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -187,5 +192,58 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     if ((v.flags & 1u) != 0u && v.local.y * u.cell.y >= u.cell.y - thickness) {
         a = 1.0;
     }
-    return vec4<f32>(mix(v.bg, v.fg, a), 1.0);
+    let cell_color = mix(v.bg, v.fg, a);
+
+    if (u.url_len > 0u) {
+        let pad_x = 10.0;
+        let pad_y = 5.0;
+        let pill_h = u.cell.y + pad_y * 2.0;
+        let pill_w = min(f32(u.url_len) * u.cell.x + pad_x * 2.0, u.screen.x - 24.0);
+        let pill_x0 = 12.0;
+        let pill_y1 = u.screen.y - 10.0;
+        let pill_x1 = pill_x0 + pill_w;
+        let pill_y0 = pill_y1 - pill_h;
+
+        let radius = 6.0;
+        let half_sz = vec2<f32>((pill_x1 - pill_x0) * 0.5, pill_h * 0.5);
+        let center = vec2<f32>((pill_x0 + pill_x1) * 0.5, (pill_y0 + pill_y1) * 0.5);
+        let q = abs(v.pos.xy - center) - half_sz + vec2<f32>(radius, radius);
+        let d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+
+        if (d < 1.0) {
+            let fill_a = clamp(0.5 - d, 0.0, 1.0);
+            let border_a = clamp(1.0 - abs(d + 0.6), 0.0, 1.0);
+            let pill_fill = vec3<f32>(0.086, 0.090, 0.110); // Ghostty deep dark pill #16171c
+            let pill_border = vec3<f32>(0.26, 0.28, 0.36); // Crisp subtle border #42475c
+            var col_rgb = mix(pill_fill, pill_border, border_a);
+
+            let text_x0 = pill_x0 + pad_x;
+            let text_y0 = pill_y0 + pad_y;
+            let gy = v.pos.y - text_y0;
+            if (v.pos.x >= text_x0 && v.pos.x < pill_x1 - pad_x && gy >= 0.0 && gy < u.cell.y) {
+                let char_i = u32((v.pos.x - text_x0) / u.cell.x);
+                if (char_i < u.url_len) {
+                    let vec_idx = char_i / 4u;
+                    let comp_idx = char_i % 4u;
+                    let v4 = u.url_slots[vec_idx];
+                    var slot: u32 = 0u;
+                    if (comp_idx == 0u) { slot = v4.x; }
+                    else if (comp_idx == 1u) { slot = v4.y; }
+                    else if (comp_idx == 2u) { slot = v4.z; }
+                    else { slot = v4.w; }
+
+                    let slot_x = f32(slot % u.slots_per_row);
+                    let slot_y = f32(slot / u.slots_per_row);
+                    let gx = (v.pos.x - text_x0) - f32(char_i) * u.cell.x;
+                    let uv = vec2<f32>((slot_x * u.cell.x + gx) / u.atlas_size.x, (slot_y * u.cell.y + gy) / u.atlas_size.y);
+                    let ga = textureSampleLevel(atlas, samp, uv, 0.0).r;
+                    let text_color = vec3<f32>(0.92, 0.94, 0.98); // Bright white-blue text #ebf0fa
+                    col_rgb = mix(col_rgb, text_color, ga);
+                }
+            }
+            return vec4<f32>(mix(cell_color, col_rgb, fill_a), 1.0);
+        }
+    }
+
+    return vec4<f32>(cell_color, 1.0);
 }
