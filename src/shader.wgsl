@@ -47,9 +47,16 @@ fn vs_main(
     let row = ii / u.cols;
     let tab_count = u.tab_info & 0xFFFFu;
     let is_tab_row = tab_count > 0u && row == 0u;
+    let is_preview = (bg & 4u) != 0u;
 
     var px: vec2<f32>;
-    if (is_tab_row) {
+    if (is_preview) {
+        // Always render preview pill at the very last visible row (absolute bottom edge)
+        px = vec2<f32>(
+            (f32(col) + corner.x) * u.cell.x + u.offset.x,
+            u.screen.y - (1.0 - corner.y) * u.cell.y,
+        );
+    } else if (is_tab_row) {
         var x = (f32(col) + corner.x) * u.cell.x + u.offset.x;
         if (col == 0u && corner.x == 0.0) {
             x = 0.0;
@@ -77,13 +84,13 @@ fn vs_main(
 
     var f = select(unpack(fg), unpack(u.default_fg), (fg & 0xFFu) == 0u);
     var b = select(unpack(bg), unpack(u.default_bg), (bg & 0x80u) == 0u);
-    if (!is_tab_row && u.cursor_visible != 0u && col == u.cursor.x && row == u.cursor.y) {
+    if (!is_tab_row && !is_preview && u.cursor_visible != 0u && col == u.cursor.x && row == u.cursor.y) {
         f = unpack(u.default_bg);
         b = vec3<f32>(0.44, 0.47, 0.59); // Ghostty slate-lavender block cursor
     }
     out.fg = f;
     out.bg = b;
-    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 4u) | ((slot / u.slots_per_row) << 16u);
+    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 12u) | ((slot / u.slots_per_row) << 16u);
     out.col = col;
     return out;
 }
@@ -194,6 +201,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         // Top border 1px
         if (v.local.y * u.cell.y <= 1.0) {
             cell_color = vec3<f32>(0.32, 0.35, 0.46); // Crisp top border #525975
+        }
+        // Right border 1px on trailing edge
+        if ((v.flags & 8u) != 0u && v.local.x * u.cell.x >= u.cell.x - 1.0) {
+            cell_color = vec3<f32>(0.32, 0.35, 0.46); // Crisp right border #525975
         }
     }
 

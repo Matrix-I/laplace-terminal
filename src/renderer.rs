@@ -433,8 +433,10 @@ impl Renderer {
                 self.instances[row_start + end_col] = Instance {
                     glyph: 0,
                     fg: PREVIEW_FG,
-                    bg: PREVIEW_BG,
+                    bg: PREVIEW_BG | 8,
                 };
+            } else if cols > 0 {
+                self.instances[row_start + cols - 1].bg |= 8;
             }
             lo = lo.min(preview_row);
             hi = hi.max(preview_row);
