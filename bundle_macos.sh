@@ -11,11 +11,12 @@ CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 
-if [ ! -f "target/release/laplace" ]; then
-    echo "==> Building optimized macOS release binary..."
+echo "==> Building optimized macOS release binary..."
+if [ -f "$HOME/.cargo/env" ]; then
     . "$HOME/.cargo/env"
-    cargo build --release
 fi
+cargo build --release
+
 
 echo "==> Packaging $APP_NAME..."
 rm -rf "$APP_DIR"
@@ -60,6 +61,14 @@ hdiutil create -volname "Laplace" \
 
 rm -rf "$DMG_STAGING"
 
+echo "==> Creating standalone binary and zip archive..."
+cp "target/release/laplace" "$DIST_DIR/laplace-macos"
+chmod +x "$DIST_DIR/laplace-macos"
+(cd "$DIST_DIR" && rm -f Laplace-macos.zip && zip -q -r Laplace-macos.zip "$APP_NAME")
+
 echo "==> Done! Outputs ready:"
 ls -lh "$APP_DIR"
 ls -lh "$DMG_PATH"
+ls -lh "$DIST_DIR/laplace-macos"
+ls -lh "$DIST_DIR/Laplace-macos.zip"
+
