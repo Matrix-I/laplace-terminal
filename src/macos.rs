@@ -347,6 +347,59 @@ pub fn register_reopen_handler(proxy: winit::event_loop::EventLoopProxy<crate::A
 }
 
 #[cfg(target_os = "macos")]
+pub fn set_dock_icon() {
+    unsafe {
+        let app_cls = objc_getClass(b"NSApplication\0".as_ptr());
+        if app_cls.is_null() {
+            return;
+        }
+        let app = msg_send_ptr(app_cls, "sharedApplication\0");
+        if app.is_null() {
+            return;
+        }
+
+        const ICON_BYTES: &[u8] = include_bytes!("../resources/icon.png");
+        let data_cls = objc_getClass(b"NSData\0".as_ptr());
+        if data_cls.is_null() {
+            return;
+        }
+        let data_sel = sel_registerName(b"dataWithBytes:length:\0".as_ptr());
+        let data_fn: extern "C" fn(*mut c_void, *mut c_void, *const u8, usize) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let ns_data = data_fn(data_cls, data_sel, ICON_BYTES.as_ptr(), ICON_BYTES.len());
+        if ns_data.is_null() {
+            return;
+        }
+
+        let img_cls = objc_getClass(b"NSImage\0".as_ptr());
+        if img_cls.is_null() {
+            return;
+        }
+        let alloc = msg_send_ptr(img_cls, "alloc\0");
+        if alloc.is_null() {
+            return;
+        }
+        let init_sel = sel_registerName(b"initWithData:\0".as_ptr());
+        let init_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let ns_img = init_fn(alloc, init_sel, ns_data);
+        if ns_img.is_null() {
+            return;
+        }
+
+        let set_icon_sel = sel_registerName(b"setApplicationIconImage:\0".as_ptr());
+        let set_icon_fn: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        set_icon_fn(app, set_icon_sel, ns_img);
+
+        let release_sel = sel_registerName(b"release\0".as_ptr());
+        let release_fn: extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        release_fn(ns_img, release_sel);
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn activate_app() {
     unsafe {
         let app_cls = objc_getClass(b"NSApplication\0".as_ptr());
@@ -429,6 +482,10 @@ pub fn register_reopen_handler(_proxy: winit::event_loop::EventLoopProxy<crate::
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 pub fn activate_app() {}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+pub fn set_dock_icon() {}
 
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]

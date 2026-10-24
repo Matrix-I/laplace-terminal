@@ -173,7 +173,10 @@ impl ApplicationHandler<AppEvent> for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         #[cfg(target_os = "macos")]
-        macos::apply_macos_window_config(&window, &cfg);
+        {
+            macos::apply_macos_window_config(&window, &cfg);
+            macos::set_dock_icon();
+        }
 
         let font = atlas::load_font(&cfg.font_family);
         let font_pt = cfg.font_size.clamp(6.0, 72.0);
