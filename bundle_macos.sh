@@ -34,6 +34,13 @@ codesign --force --deep --sign - "$APP_DIR"
 
 echo "==> $APP_NAME created at $APP_DIR"
 
+if [ -d "$HOME/Applications" ]; then
+    echo "==> Installing to $HOME/Applications/$APP_NAME..."
+    rm -rf "$HOME/Applications/$APP_NAME"
+    cp -R "$APP_DIR" "$HOME/Applications/"
+    codesign --force --deep --sign - "$HOME/Applications/$APP_NAME"
+fi
+
 # Also package a convenient drag-and-drop DMG for distribution
 DMG_NAME="Laplace.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
