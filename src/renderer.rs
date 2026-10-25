@@ -72,7 +72,8 @@ pub struct Renderer {
     force_full: bool,
     last_cursor: Option<(usize, usize)>,
     last_cursor_visible: bool,
-    last_hovered_link: Option<Hyperlink>,
+    /// Hovered link and the id of the pane it belongs to.
+    last_hovered_link: Option<(u64, Hyperlink)>,
 }
 
 impl Renderer {
@@ -392,7 +393,7 @@ impl Renderer {
         &mut self,
         panes: &[RenderPane],
         tab_bar: Option<(&[String], usize)>,
-        hovered_link: Option<&Hyperlink>,
+        hovered_link: Option<(u64, &Hyperlink)>,
         cursor_blink_on: bool,
         history_search: Option<&HistorySearch>,
     ) {
@@ -400,9 +401,9 @@ impl Renderer {
             return;
         }
         let top_rows = usize::from(tab_bar.is_some());
-        if self.last_hovered_link.as_ref() != hovered_link {
+        if self.last_hovered_link.as_ref().map(|(id, l)| (*id, l)) != hovered_link {
             self.force_full = true;
-            self.last_hovered_link = hovered_link.cloned();
+            self.last_hovered_link = hovered_link.map(|(id, l)| (id, l.clone()));
         }
 
         let is_search_open = history_search.map_or(false, |h| h.is_open);
@@ -470,6 +471,7 @@ impl Renderer {
         let active_rect = panes.iter().find(|p| p.is_active).map(|p| p.rect);
 
         for pane in panes {
+            let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
             let mut g = pane.grid.lock();
             let pane_full = full || g.all_dirty;
             let p_cols = pane.rect.cols.min(g.cols);
@@ -489,7 +491,7 @@ impl Renderer {
                             &pane.rect,
                             pane.is_active,
                             active_rect.as_ref(),
-                            hovered_link,
+                            pane_link,
                         );
                         lo = lo.min(dst_row);
                         hi = hi.max(dst_row);
@@ -505,6 +507,7 @@ impl Renderer {
                 self.build_tab_bar_row(cols, titles, active_idx);
             }
             for pane in panes {
+                let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
                 let g = pane.grid.lock();
                 let p_cols = pane.rect.cols.min(g.cols);
                 let p_rows = pane.rect.rows.min(g.rows);
@@ -521,7 +524,7 @@ impl Renderer {
                             &pane.rect,
                             pane.is_active,
                             active_rect.as_ref(),
-                            hovered_link,
+                            pane_link,
                         );
                     }
                 }
@@ -534,7 +537,7 @@ impl Renderer {
         self.force_full = false;
         self.last_cursor = active_cur;
 
-        if let Some(link) = hovered_link {
+        if let Some((_, link)) = hovered_link {
             let max_chars = cols.saturating_sub(2).min(120);
             let display_url = if link.url.chars().count() > max_chars {
                 format!("{}...", link.url.chars().take(max_chars.saturating_sub(3)).collect::<String>())
@@ -651,34 +654,6 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-    }
-
-    #[allow(dead_code)]
-    pub fn render_with_tabs(
-        &mut self,
-        grid: &Mutex<Grid>,
-        tab_bar: Option<(&[String], usize)>,
-        hovered_link: Option<&Hyperlink>,
-        cursor_blink_on: bool,
-        history_search: Option<&HistorySearch>,
-    ) {
-        let (cols, rows) = self.grid_size_for_tabs(tab_bar.is_some());
-        let rect = PaneRect {
-            id: 1,
-            col: 0,
-            row: 0,
-            cols,
-            rows,
-            has_border_right: false,
-            has_border_bottom: false,
-        };
-        let p = RenderPane {
-            id: 1,
-            grid,
-            rect,
-            is_active: true,
-        };
-        self.render_panes(&[p], tab_bar, hovered_link, cursor_blink_on, history_search);
     }
 
     #[allow(clippy::too_many_arguments)]

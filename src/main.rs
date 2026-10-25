@@ -971,7 +971,7 @@ fn render_active(s: &mut State) {
         })
         .collect();
 
-    let hovered_link = s.hovered_link.as_ref().map(|l| &l.link);
+    let hovered_link = s.hovered_link.as_ref().map(|l| (l.pane_id, &l.link));
 
     s.renderer.render_panes(
         &render_panes,
