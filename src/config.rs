@@ -614,9 +614,9 @@ pub fn open_config_in_editor() {
     }
 
     #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("/usr/bin/open").arg("-t").arg(&path).spawn();
+    let res = crate::spawn_detached(std::process::Command::new("/usr/bin/open").arg("-t").arg(&path));
     #[cfg(not(target_os = "macos"))]
-    let res = std::process::Command::new("xdg-open").arg(&path).spawn();
+    let res = crate::spawn_detached(std::process::Command::new("xdg-open").arg(&path));
     if let Err(e) = res {
         eprintln!("laplace: failed to open {}: {e}", path.display());
     }

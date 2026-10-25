@@ -993,6 +993,19 @@ fn render_active(s: &mut State) {
     }
 }
 
+/// Spawn a helper process (`open`, `xdg-open`) and reap it on a background thread
+/// so it never lingers as a zombie.
+pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::Builder::new()
+        .name("reap-helper".into())
+        .stack_size(32 * 1024)
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok(())
+}
+
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
     if is_path {
         let path = if target.starts_with("~/") {
@@ -1017,9 +1030,9 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
         };
 
         #[cfg(target_os = "macos")]
-        let res = std::process::Command::new("open").arg(&path).spawn();
+        let res = spawn_detached(std::process::Command::new("open").arg(&path));
         #[cfg(target_os = "linux")]
-        let res = std::process::Command::new("xdg-open").arg(&path).spawn();
+        let res = spawn_detached(std::process::Command::new("xdg-open").arg(&path));
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", path.to_str().unwrap_or(target)])
@@ -1030,9 +1043,9 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
         }
     } else {
         #[cfg(target_os = "macos")]
-        let res = std::process::Command::new("open").arg(target).spawn();
+        let res = spawn_detached(std::process::Command::new("open").arg(target));
         #[cfg(target_os = "linux")]
-        let res = std::process::Command::new("xdg-open").arg(target).spawn();
+        let res = spawn_detached(std::process::Command::new("xdg-open").arg(target));
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", target])

@@ -3,16 +3,27 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::mpsc;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
 use crate::grid::Grid;
 
+/// Dropping a `Pty` closes the master side and wakes both I/O threads through the
+/// shutdown pipe; once their duplicated descriptors are closed the kernel hangs up
+/// the terminal (SIGHUP to the shell and its foreground job) and the reader thread
+/// reaps the child, so no zombie is left behind.
 pub struct Pty {
-    master: RawFd,
+    master: OwnedFd,
     pid: libc::pid_t,
+    /// Bytes for the shell, written by the writer thread so the UI never blocks.
+    tx: mpsc::Sender<Vec<u8>>,
+    /// Read end of the shutdown pipe, polled by the I/O threads.
+    shutdown_rx: Arc<OwnedFd>,
+    /// Write end of the shutdown pipe: closing it (on drop) signals shutdown.
+    _shutdown_tx: OwnedFd,
 }
 
 fn winsize(cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> libc::winsize {
@@ -142,15 +153,46 @@ impl Pty {
 
             // ---- parent ----
             libc::close(slave);
-            libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
-            Ok(Pty { master, pid })
+            let master = OwnedFd::from_raw_fd(master);
+            set_cloexec(master.as_raw_fd());
+            // Non-blocking master: the I/O threads poll it together with the shutdown pipe.
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+
+            let mut pipe_fds = [-1; 2];
+            if libc::pipe(pipe_fds.as_mut_ptr()) != 0 {
+                let e = io::Error::last_os_error();
+                drop(master);
+                reap_child(pid);
+                return Err(e);
+            }
+            let shutdown_rx = Arc::new(OwnedFd::from_raw_fd(pipe_fds[0]));
+            let shutdown_tx = OwnedFd::from_raw_fd(pipe_fds[1]);
+            set_cloexec(shutdown_rx.as_raw_fd());
+            set_cloexec(shutdown_tx.as_raw_fd());
+
+            let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            let writer_fd = dup_cloexec(master.as_raw_fd())?;
+            let writer_shutdown = shutdown_rx.clone();
+            std::thread::Builder::new()
+                .name("pty-writer".into())
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    while let Ok(data) = rx.recv() {
+                        if !write_all(writer_fd.as_raw_fd(), &data, writer_shutdown.as_raw_fd()) {
+                            break;
+                        }
+                    }
+                })?;
+
+            Ok(Pty { master, pid, tx, shutdown_rx, _shutdown_tx: shutdown_tx })
         }
     }
 
     /// Query the current working directory of the foreground process group (or
     /// the login shell itself) directly from the OS kernel.
     pub fn cwd(&self) -> Option<String> {
-        let pgrp = unsafe { libc::tcgetpgrp(self.master) };
+        let pgrp = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
         if pgrp > 0 && pgrp != self.pid {
             if let Some(dir) = pid_cwd(pgrp) {
                 return Some(dir);
@@ -163,42 +205,47 @@ impl Pty {
         let ws = winsize(cols, rows, cell_w, cell_h);
         // SAFETY: valid fd and pointer; the kernel sends SIGWINCH to the shell.
         unsafe {
-            libc::ioctl(self.master, libc::TIOCSWINSZ as _, &ws);
+            libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws);
         }
     }
 
+    /// Queue bytes for the shell. Never blocks the caller, even for huge pastes.
     pub fn write(&self, data: &[u8]) {
-        write_all(self.master, data);
+        let _ = self.tx.send(data.to_vec());
     }
 
-    /// Spawn Thread 1: blocking reads into a fixed 64 KB stack buffer, parsed by
-    /// `vte` directly into the locked grid. Coalesces back-to-back shell writes
+    /// Spawn Thread 1: reads into a fixed 64 KB stack buffer, parsed by `vte`
+    /// directly into the locked grid. Coalesces back-to-back shell writes
     /// (e.g. `\r\n` + `PROMPT_SP` + multi-line Powerline prompt) so intermediate
-    /// incomplete states don't trigger redundant GPU frames.
+    /// incomplete states don't trigger redundant GPU frames. When the shell exits
+    /// or the `Pty` is dropped, the thread closes its descriptor and reaps the child.
     pub fn spawn_reader(
         &self,
         grid: Arc<Mutex<Grid>>,
         notify: impl Fn() + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> io::Result<()> {
-        // SAFETY: dup of a valid fd; the reader owns its own descriptor.
-        let fd = unsafe { libc::dup(self.master) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        let fd = dup_cloexec(self.master.as_raw_fd())?;
+        let shutdown = self.shutdown_rx.clone();
+        let tx = self.tx.clone();
+        let pid = self.pid;
         std::thread::Builder::new()
             .name("pty-reader".into())
             .stack_size(256 * 1024)
             .spawn(move || {
+                let raw = fd.as_raw_fd();
                 let mut buf = [0u8; 65536];
                 let mut parser = vte::Parser::new();
                 let mut reply: Vec<u8> = Vec::with_capacity(256);
                 loop {
+                    if !wait_ready(raw, libc::POLLIN, shutdown.as_raw_fd()) {
+                        break; // Pty dropped
+                    }
                     // SAFETY: buf is a valid writable buffer of buf.len() bytes.
-                    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                    let n = unsafe { libc::read(raw, buf.as_mut_ptr().cast(), buf.len()) };
                     if n < 0 {
-                        if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        let kind = io::Error::last_os_error().kind();
+                        if matches!(kind, io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) {
                             continue;
                         }
                         break; // EIO: slave closed (shell exited)
@@ -227,8 +274,8 @@ impl Pty {
                             was_bracketed = true;
                         }
                         if !reply.is_empty() {
-                            write_all(fd, &reply);
-                            reply.clear();
+                            // Same queue as keyboard input, so replies never interleave with a paste.
+                            let _ = tx.send(std::mem::take(&mut reply));
                         }
 
                         // When the user presses Enter at a prompt, zsh turns off bracketed paste
@@ -248,12 +295,12 @@ impl Pty {
                         } else {
                             0
                         };
-                        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                        let mut pfd = libc::pollfd { fd: raw, events: libc::POLLIN, revents: 0 };
                         let pr = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
                         if pr <= 0 || (pfd.revents & libc::POLLIN) == 0 {
                             break;
                         }
-                        let n2 = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                        let n2 = unsafe { libc::read(raw, buf.as_mut_ptr().cast(), buf.len()) };
                         if n2 <= 0 {
                             break;
                         }
@@ -261,36 +308,96 @@ impl Pty {
                     }
                     notify();
                 }
-                unsafe { libc::close(fd) };
+                // Release our handles on the master first so the terminal can hang up
+                // (the writer thread exits once every sender is gone).
+                drop(tx);
+                drop(fd);
+                reap_child(pid);
                 on_exit();
             })?;
         Ok(())
     }
 }
 
-impl Drop for Pty {
-    fn drop(&mut self) {
-        // SAFETY: closing our fd hangs up the terminal; SIGHUP ends the shell.
-        unsafe {
-            libc::close(self.master);
-            libc::kill(self.pid, libc::SIGHUP);
-            let mut status = 0;
-            libc::waitpid(self.pid, &mut status, libc::WNOHANG);
+fn set_cloexec(fd: RawFd) {
+    // SAFETY: fcntl on a descriptor we own.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+}
+
+fn dup_cloexec(fd: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: dup of a valid fd; the returned descriptor is owned by the caller.
+    let new_fd = unsafe { libc::dup(fd) };
+    if new_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    set_cloexec(new_fd);
+    Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
+}
+
+/// Block until `fd` reports `events` (or hangs up / errors). Returns `false` once the
+/// shutdown pipe becomes readable or is closed.
+fn wait_ready(fd: RawFd, events: libc::c_short, shutdown: RawFd) -> bool {
+    loop {
+        let mut fds = [
+            libc::pollfd { fd, events, revents: 0 },
+            libc::pollfd { fd: shutdown, events: libc::POLLIN, revents: 0 },
+        ];
+        // SAFETY: fds is a valid array of two pollfd structs.
+        let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if r < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        if fds[1].revents != 0 {
+            return false;
+        }
+        if fds[0].revents != 0 {
+            return true;
         }
     }
 }
 
-fn write_all(fd: RawFd, mut data: &[u8]) {
+/// Write all of `data` to the non-blocking master, waiting for buffer space as needed.
+/// Returns `false` if the terminal is gone or shutdown was requested.
+fn write_all(fd: RawFd, mut data: &[u8], shutdown: RawFd) -> bool {
     while !data.is_empty() {
         // SAFETY: data is a valid readable slice.
         let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
         if n < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
+            match io::Error::last_os_error().kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => {
+                    if !wait_ready(fd, libc::POLLOUT, shutdown) {
+                        return false;
+                    }
+                    continue;
+                }
+                _ => return false,
             }
-            return;
         }
         data = &data[n as usize..];
+    }
+    true
+}
+
+/// Reap the shell. Give it a moment to exit on hangup, then SIGKILL so a shell that
+/// ignores SIGHUP can never linger as an orphan. Safe to signal `pid` here: it cannot
+/// be reused until it has been waited for, and this is the only place that waits.
+fn reap_child(pid: libc::pid_t) {
+    let mut status = 0;
+    for _ in 0..40 {
+        // SAFETY: plain libc FFI with a valid pointer.
+        let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if r != 0 {
+            return; // reaped, or not our child (ECHILD)
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        libc::waitpid(pid, &mut status, 0);
     }
 }
 
@@ -334,6 +441,45 @@ pub(crate) fn pid_cwd(pid: libc::pid_t) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_pty_never_blocks_and_reaps_the_shell() {
+        let pty = Pty::spawn_in(80, 24, 8, 16, None, None).expect("spawn pty");
+        let pid = pty.pid;
+        let (tx, rx) = std::sync::mpsc::channel();
+        pty.spawn_reader(Arc::new(Mutex::new(Grid::new(80, 24))), || {}, move || {
+            let _ = tx.send(());
+        })
+        .expect("spawn reader");
+
+        // Far more than the kernel PTY buffer: must be queued, not block the caller.
+        let start = std::time::Instant::now();
+        pty.write(&vec![b'x'; 4 << 20]);
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+
+        drop(pty);
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("reader thread exits");
+        // Reaped: the pid no longer exists as our child (not even as a zombie).
+        let r = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(r, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn shell_exit_is_reported_and_reaped() {
+        let pty = Pty::spawn_in(80, 24, 8, 16, None, None).expect("spawn pty");
+        let pid = pty.pid;
+        let (tx, rx) = std::sync::mpsc::channel();
+        pty.spawn_reader(Arc::new(Mutex::new(Grid::new(80, 24))), || {}, move || {
+            let _ = tx.send(());
+        })
+        .expect("spawn reader");
+        pty.write(b"exit\r");
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("on_exit fires");
+        let r = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(r, -1);
+        drop(pty);
+    }
 
     #[test]
     fn current_process_cwd_resolves() {
