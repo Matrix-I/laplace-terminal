@@ -96,7 +96,8 @@ fn vs_main(
     out.uv = (sxy + corner) * u.cell / u.atlas_size;
     out.local = corner;
 
-    var f = select(unpack(fg), unpack(u.default_fg), (fg & 0xFFu) == 0u);
+    // fg low byte: bit 7 = explicit color, bits 0-1 = bold / italic (atlas variants).
+    var f = select(unpack(fg), unpack(u.default_fg), (fg & 0x80u) == 0u);
     var b = select(unpack(bg), unpack(u.default_bg), (bg & 0x80u) == 0u);
     let is_cursor = !is_tab_row && !is_preview && u.cursor_visible != 0u && col == u.cursor.x && row == u.cursor.y;
     if (is_cursor && u.cursor_style == 0u) {

@@ -22,7 +22,17 @@ pub const BLANK_SLOT: u16 = 0;
 /// Codepoints use at most 21 bits, so the high bits are free.
 const WIDE_LEFT: u32 = 0x4000_0000;
 const WIDE_RIGHT: u32 = 0x8000_0000;
+/// Slot-map key tags for synthetic bold / italic variants.
+const STYLE_BOLD: u32 = 0x1000_0000;
+const STYLE_ITALIC: u32 = 0x2000_0000;
 const CODEPOINT_MASK: u32 = 0x001F_FFFF;
+
+/// Glyph style requested by a cell.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct GlyphStyle {
+    pub bold: bool,
+    pub italic: bool,
+}
 
 pub struct FontSet {
     pub primary: fontdue::Font,
@@ -139,11 +149,21 @@ impl Atlas {
     /// Atlas slots for a glyph of display width `width`. Double-width glyphs are
     /// rasterized across two cells and split into a left and a right slot; for
     /// narrow glyphs the right slot is blank.
-    pub fn glyph_slots(&mut self, queue: &wgpu::Queue, cp: u32, width: usize) -> (u16, u16) {
+    pub fn glyph_slots(&mut self, queue: &wgpu::Queue, cp: u32, width: usize, style: GlyphStyle) -> (u16, u16) {
+        let mut key = cp;
+        // Cell-exact sprites (box drawing, Powerline...) must keep connecting seamlessly.
+        if !is_builtin_sprite(cp) {
+            if style.bold {
+                key |= STYLE_BOLD;
+            }
+            if style.italic {
+                key |= STYLE_ITALIC;
+            }
+        }
         if width == 2 {
-            (self.slot(queue, cp | WIDE_LEFT), self.slot(queue, cp | WIDE_RIGHT))
+            (self.slot(queue, key | WIDE_LEFT), self.slot(queue, key | WIDE_RIGHT))
         } else {
-            (self.slot(queue, cp), BLANK_SLOT)
+            (self.slot(queue, key), BLANK_SLOT)
         }
     }
 
@@ -202,21 +222,57 @@ impl Atlas {
     fn rasterize(&mut self, key: u32) {
         let half = key & (WIDE_LEFT | WIDE_RIGHT);
         let cp = key & CODEPOINT_MASK;
+        let style = GlyphStyle { bold: key & STYLE_BOLD != 0, italic: key & STYLE_ITALIC != 0 };
         let mut buf = std::mem::take(&mut self.scratch);
         if half == 0 {
             buf.fill(0);
             self.rasterize_into(&mut buf, self.cell_w, cp);
+            self.apply_style(&mut buf, self.cell_w as usize, style);
         } else {
             // Rasterize across two cells, then keep the requested half.
             let (cw, ch) = (self.cell_w as usize, self.cell_h as usize);
             let mut wide = vec![0u8; 2 * cw * ch];
             self.rasterize_into(&mut wide, 2 * self.cell_w, cp);
+            self.apply_style(&mut wide, 2 * cw, style);
             let x0 = if half == WIDE_RIGHT { cw } else { 0 };
             for y in 0..ch {
                 buf[y * cw..(y + 1) * cw].copy_from_slice(&wide[y * 2 * cw + x0..y * 2 * cw + x0 + cw]);
             }
         }
         self.scratch = buf;
+    }
+
+    /// Synthesize bold (horizontal dilation) and italic (shear around the baseline)
+    /// on a `w × cell_h` coverage canvas, so any font works without bold/italic faces.
+    fn apply_style(&self, buf: &mut [u8], w: usize, style: GlyphStyle) {
+        let h = self.cell_h as usize;
+        if style.italic {
+            let mut row = vec![0u8; w];
+            for y in 0..h {
+                // ~12° slant: rows above the baseline move right, rows below move left.
+                let shift = ((self.baseline - y as i32) as f32 * 0.21).round() as isize;
+                let src = &buf[y * w..(y + 1) * w];
+                row.fill(0);
+                for (x, &v) in src.iter().enumerate() {
+                    let nx = x as isize + shift;
+                    if (0..w as isize).contains(&nx) {
+                        row[nx as usize] = v;
+                    }
+                }
+                buf[y * w..(y + 1) * w].copy_from_slice(&row);
+            }
+        }
+        if style.bold {
+            let stroke = ((self.px / 16.0).round() as usize).max(1);
+            for y in 0..h {
+                let line = &mut buf[y * w..(y + 1) * w];
+                for x in (1..w).rev() {
+                    let lo = x.saturating_sub(stroke);
+                    let m = line[lo..x].iter().copied().max().unwrap_or(0);
+                    line[x] = line[x].max(m);
+                }
+            }
+        }
     }
 
     /// Rasterize `cp` into `buf`, a zeroed `cw × cell_h` canvas.
@@ -374,6 +430,11 @@ fn stem_boost(v: u8) -> u8 {
 // ============================================================================
 // Built-in Procedural Sprite Renderer (Ghostty-style `font/sprite`)
 // ============================================================================
+
+/// Codepoints drawn procedurally by [`draw_builtin_sprite`].
+fn is_builtin_sprite(cp: u32) -> bool {
+    matches!(cp, 0xE0A0..=0xE0D7 | 0x2500..=0x259F | 0x25E2..=0x25E5 | 0x2800..=0x28FF)
+}
 
 fn draw_builtin_sprite(buf: &mut [u8], cw: u32, ch: u32, cp: u32) -> bool {
     if cw == 0 || ch == 0 {

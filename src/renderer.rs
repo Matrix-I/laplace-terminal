@@ -8,8 +8,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use winit::window::Window;
 
-use crate::atlas::{Atlas, FontSet};
-use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink, BG_UNDERLINE};
+use crate::atlas::{Atlas, FontSet, GlyphStyle};
+use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink, BG_UNDERLINE, FG_BOLD, FG_ITALIC};
 use crate::history::HistorySearch;
 use crate::split::PaneRect;
 
@@ -605,7 +605,7 @@ impl Renderer {
                 if col + w > cols {
                     break;
                 }
-                let (left, right) = self.atlas.glyph_slots(&self.queue, ch as u32, w);
+                let (left, right) = self.atlas.glyph_slots(&self.queue, ch as u32, w, GlyphStyle::default());
                 self.instances[row_start + col] = Instance { glyph: left as u32, fg: 0, bg: BG_UNDERLINE };
                 if w == 2 {
                     self.instances[row_start + col + 1] = Instance { glyph: right as u32, fg: 0, bg: BG_UNDERLINE };
@@ -744,7 +744,8 @@ impl Renderer {
                 (0, Some(right)) => right,
                 (cp, _) => {
                     let width = char::from_u32(cp).map_or(1, char_width);
-                    let (left, right) = self.atlas.glyph_slots(&self.queue, cp, width);
+                    let style = GlyphStyle { bold: cell.fg & FG_BOLD != 0, italic: cell.fg & FG_ITALIC != 0 };
+                    let (left, right) = self.atlas.glyph_slots(&self.queue, cp, width, style);
                     if width == 2 {
                         wide_right = Some(right);
                     }

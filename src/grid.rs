@@ -61,8 +61,12 @@ pub fn set_palette(pal: &[u32; 16]) {
     }
 }
 
-/// `fg` low byte: 0xFF = explicit color, 0x00 = default foreground.
-pub const FG_SET: u32 = 0xFF;
+/// `fg` low byte bit: explicit foreground color (otherwise default fg).
+pub const FG_SET: u32 = 0x80;
+/// `fg` low byte bit: bold glyph.
+pub const FG_BOLD: u32 = 0x01;
+/// `fg` low byte bit: italic glyph.
+pub const FG_ITALIC: u32 = 0x02;
 /// `bg` low byte bit: explicit background color (otherwise default bg).
 pub const BG_SET: u32 = 0x80;
 /// `bg` low byte bit: draw an underline.
@@ -81,7 +85,7 @@ const ATTR_HIDDEN: u8 = 1 << 5;
 pub struct Cell {
     /// Unicode scalar value (0 = empty).
     pub codepoint: u32,
-    /// Packed `0xRRGGBBAA`; AA = 0xFF if explicit, 0 for default fg.
+    /// Packed `0xRRGGBB` + flags in the low byte (`FG_SET`, `FG_BOLD`, `FG_ITALIC`).
     pub fg: u32,
     /// Packed `0xRRGGBB` + style flags in the low byte (`BG_SET`, `BG_UNDERLINE`).
     pub bg: u32,
@@ -102,8 +106,25 @@ struct Cursor {
     col: usize,
     pen: Pen,
     line_drawing: bool,
+    origin_mode: bool,
 }
 
+/// Mouse reporting requested by the application (DECSET 9 / 1000 / 1002 / 1003).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    /// Button presses and releases only.
+    Click,
+    /// Presses, releases, and motion while a button is held.
+    Drag,
+    /// All motion, with or without a button held.
+    Motion,
+}
+
+/// A text selection. The public API uses visible `(row, col)` coordinates; the grid
+/// stores rows as absolute line numbers so the selection stays on its text while
+/// output scrolls and while the viewport moves through history.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
     pub start: (usize, usize), // (row, col)
@@ -155,6 +176,15 @@ pub struct Grid {
     scroll_top: usize,
     scroll_bot: usize,
 
+    /// Per physical main-screen row: the line continues on the next row (soft wrap).
+    wrapped: Vec<bool>,
+    /// Horizontal tab stops, one flag per column.
+    tab_stops: Vec<bool>,
+    /// IRM: printing shifts the rest of the line right instead of overwriting.
+    insert_mode: bool,
+    /// Lines ever pushed into scrollback; anchors absolute line numbers.
+    lines_pushed: usize,
+
     pub cursor_visible: bool,
     /// Last DECSCUSR (`CSI Ps SP q`) value: 0 = config default,
     /// 1/2 = blinking/steady block, 3/4 = underline, 5/6 = bar.
@@ -162,13 +192,31 @@ pub struct Grid {
     pub app_cursor: bool,
     pub bracketed_paste: bool,
     pub sync_output: bool,
+    /// When synchronized output (DECSET 2026) began; rendering is deferred meanwhile.
+    pub sync_started: Option<std::time::Instant>,
     autowrap: bool,
+
+    pub mouse_tracking: MouseTracking,
+    /// SGR mouse encoding (DECSET 1006).
+    pub mouse_sgr: bool,
+    /// Report focus in/out (DECSET 1004).
+    pub focus_events: bool,
+    /// Translate the mouse wheel into arrow keys on the alternate screen (DECSET 1007).
+    pub alt_scroll: bool,
 
     /// Window/tab title set via OSC 0 / OSC 2 (e.g. `user@host:~/dir` or running command).
     pub title: String,
+    /// Set when the title or the reported working directory changes.
+    pub title_changed: bool,
+    /// Working directory reported by the shell via OSC 7 (`file://host/path`).
+    pub reported_cwd: Option<String>,
+    /// Text an application asked to place on the clipboard via OSC 52.
+    pub clipboard_request: Option<String>,
+    /// OSC 133;B: absolute line and column where the command input starts.
+    prompt_input_mark: Option<(usize, usize)>,
 
-    /// Active mouse text selection in visible screen coordinates.
-    pub selection: Option<Selection>,
+    /// Active mouse text selection (rows are absolute line numbers).
+    selection: Option<Selection>,
 
     /// Per visible row dirty flags, plus a "everything changed" shortcut.
     pub dirty: Vec<bool>,
@@ -202,13 +250,26 @@ impl Grid {
             wrap_pending: false,
             scroll_top: 0,
             scroll_bot: rows - 1,
+            wrapped: vec![false; cap],
+            tab_stops: default_tab_stops(cols),
+            insert_mode: false,
+            lines_pushed: 0,
             cursor_visible: true,
             cursor_shape: 0,
             app_cursor: false,
             bracketed_paste: false,
             sync_output: false,
+            sync_started: None,
             autowrap: true,
+            mouse_tracking: MouseTracking::Off,
+            mouse_sgr: false,
+            focus_events: false,
+            alt_scroll: true,
             title: String::new(),
+            title_changed: false,
+            reported_cwd: None,
+            clipboard_request: None,
+            prompt_input_mark: None,
             selection: None,
             dirty: vec![true; rows],
             all_dirty: true,
@@ -259,6 +320,46 @@ impl Grid {
     }
 
     /// Cursor position in screen coordinates, if it should be drawn.
+    /// Absolute line number of visible row `r`.
+    #[inline]
+    fn abs_line(&self, r: usize) -> usize {
+        if self.alt_active {
+            self.lines_pushed + r
+        } else {
+            self.lines_pushed + r - self.display_offset
+        }
+    }
+
+    /// Cells of absolute line `l`, if it is still in scrollback or on screen.
+    fn line_cells(&self, l: usize) -> Option<&[Cell]> {
+        let c = self.cols;
+        if self.alt_active {
+            let r = l.checked_sub(self.lines_pushed).filter(|&r| r < self.rows)?;
+            return Some(&self.alt[r * c..(r + 1) * c]);
+        }
+        let i = l.checked_sub(self.lines_pushed - self.history).filter(|&i| i < self.history + self.rows)?;
+        let p = (self.top + self.cap - self.history + i) % self.cap;
+        Some(&self.cells[p * c..(p + 1) * c])
+    }
+
+    /// Whether absolute line `l` soft-wraps onto the next line.
+    fn line_wrapped(&self, l: usize) -> bool {
+        if self.alt_active {
+            return false;
+        }
+        l.checked_sub(self.lines_pushed - self.history)
+            .filter(|&i| i < self.history + self.rows)
+            .is_some_and(|i| self.wrapped[(self.top + self.cap - self.history + i) % self.cap])
+    }
+
+    #[inline]
+    fn set_wrapped(&mut self, r: usize, on: bool) {
+        if !self.alt_active {
+            let p = (self.top + r) % self.cap;
+            self.wrapped[p] = on;
+        }
+    }
+
     pub fn cursor_pos(&self) -> Option<(usize, usize)> {
         if !self.cursor_visible {
             return None;
@@ -294,7 +395,25 @@ impl Grid {
         }
         let r = self.display_row(self.cur.row);
         let cur_col = self.cur.col.min(self.cols);
+        let cmd_start = match self.prompt_input_mark {
+            // Shell integration (OSC 133;B) marked exactly where the input begins.
+            Some((line, col)) if line == self.abs_line(self.cur.row) && col <= cur_col => col,
+            _ => self.guess_command_start(r, cur_col),
+        };
 
+        let last_non_blank = r[cmd_start..]
+            .iter()
+            .rposition(|c| !Self::is_blank(c.codepoint))
+            .map(|idx| cmd_start + idx + 1)
+            .unwrap_or(cmd_start);
+
+        let cmd_end = last_non_blank.max(cur_col).min(self.cols);
+        (cmd_start, cmd_end)
+    }
+
+    /// Guess where the command input starts on a prompt line from common prompt
+    /// glyphs (Powerline separators, `$`, `%`, `❯`, ...) when no OSC 133 mark exists.
+    fn guess_command_start(&self, r: &[Cell], cur_col: usize) -> usize {
         // 1. Check for Powerline segment separator U+E0B0 ('') before or at cursor
         let mut pl_end = None;
         if let Some(last_pl) = r.iter().take(cur_col + 1).rposition(|c| c.codepoint == 0xE0B0) {
@@ -367,16 +486,7 @@ impl Grid {
             }
         }
 
-        let cmd_start = pl_end.or(sign_end).unwrap_or(0).min(cur_col);
-
-        let last_non_blank = r[cmd_start..]
-            .iter()
-            .rposition(|c| !Self::is_blank(c.codepoint))
-            .map(|idx| cmd_start + idx + 1)
-            .unwrap_or(cmd_start);
-
-        let cmd_end = last_non_blank.max(cur_col).min(self.cols);
-        (cmd_start, cmd_end)
+        pl_end.or(sign_end).unwrap_or(0).min(cur_col)
     }
 
     /// Calculate the arrow-key escape sequences needed to move the shell cursor to `(pane_row, pane_col)`.
@@ -488,6 +598,7 @@ impl Grid {
     }
 
     /// Scroll the viewport through history (positive = towards older lines).
+    /// The selection stays attached to its text.
     pub fn scroll_display(&mut self, delta: isize) {
         if self.alt_active {
             return;
@@ -495,7 +606,6 @@ impl Grid {
         let new = (self.display_offset as isize + delta).clamp(0, self.history as isize) as usize;
         if new != self.display_offset {
             self.display_offset = new;
-            self.selection = None;
             self.all_dirty = true;
         }
     }
@@ -518,7 +628,12 @@ impl Grid {
         self.all_dirty = true;
     }
 
+    /// Set the selection from visible `(row, col)` coordinates.
     pub fn set_selection(&mut self, sel: Option<Selection>) {
+        let sel = sel.map(|s| Selection {
+            start: (self.abs_line(s.start.0), s.start.1),
+            end: (self.abs_line(s.end.0), s.end.1),
+        });
         if self.selection != sel {
             self.selection = sel;
             self.all_dirty = true;
@@ -531,7 +646,8 @@ impl Grid {
             return false;
         };
         let (start, end) = sel.ordered();
-        (row, col) >= start && (row, col) <= end
+        let pos = (self.abs_line(row), col);
+        pos >= start && pos <= end
     }
 
     #[inline]
@@ -564,9 +680,9 @@ impl Grid {
         // 1. Try URL matching first
         let mut idx = 0;
         while idx < chars.len() {
-            let rem: String = chars[idx..].iter().collect();
-            let is_https = rem.starts_with("https://");
-            let is_http = rem.starts_with("http://");
+            let starts_with = |pat: &str| pat.chars().enumerate().all(|(k, p)| chars.get(idx + k) == Some(&p));
+            let is_https = starts_with("https://");
+            let is_http = !is_https && starts_with("http://");
             if is_https || is_http {
                 let start = idx;
                 let mut end = if is_https { idx + 8 } else { idx + 7 };
@@ -797,44 +913,42 @@ impl Grid {
         self.selected_text().unwrap_or_default()
     }
 
-    /// Extract the currently selected text across one or more rows.
+    /// Extract the currently selected text. Soft-wrapped lines are joined without
+    /// a newline, so a long command or URL copies as one line.
     pub fn selected_text(&self) -> Option<String> {
         let sel = self.selection?;
-        let ((r0, c0), (r1, c1)) = sel.ordered();
-        if r0 >= self.rows {
-            return None;
-        }
-        let r1 = r1.min(self.rows.saturating_sub(1));
+        let ((l0, c0), (l1, c1)) = sel.ordered();
+        let last_col = self.cols.saturating_sub(1);
         let mut out = String::new();
-        for r in r0..=r1 {
-            if r > r0 {
-                out.push('\n');
-            }
-            let row = self.display_row(r);
-            let sc = if r == r0 { c0.min(self.cols.saturating_sub(1)) } else { 0 };
-            let ec = if r == r1 { c1.min(self.cols.saturating_sub(1)) } else { self.cols.saturating_sub(1) };
-            if sc > ec {
-                continue;
-            }
+        for l in l0..=l1 {
+            let Some(row) = self.line_cells(l) else { continue };
+            let sc = if l == l0 { c0.min(last_col) } else { 0 };
+            let ec = if l == l1 { c1.min(last_col) } else { last_col };
             let mut line = String::new();
-            let mut skip_next = false;
-            for cell in &row[sc..=ec] {
-                if skip_next {
-                    skip_next = false;
-                    continue;
+            if sc <= ec {
+                let mut skip_next = false;
+                for cell in &row[sc..=ec] {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    let ch = char::from_u32(cell.codepoint).filter(|&c| c != '\0').unwrap_or(' ');
+                    if char_width(ch) == 2 {
+                        skip_next = true;
+                    }
+                    line.push(ch);
                 }
-                let ch = char::from_u32(cell.codepoint)
-                    .filter(|&c| c != '\0')
-                    .unwrap_or(' ');
-                if char_width(ch) == 2 {
-                    skip_next = true;
-                }
-                line.push(ch);
             }
-            if r < r1 || ec + 1 == self.cols {
+            let wraps = l < l1 && self.line_wrapped(l);
+            if wraps {
+                out.push_str(&line);
+            } else if l < l1 || ec == last_col {
                 out.push_str(line.trim_end_matches(' '));
             } else {
                 out.push_str(&line);
+            }
+            if l < l1 && !wraps {
+                out.push('\n');
             }
         }
         let trimmed = out.trim_end_matches(' ').to_string();
@@ -892,6 +1006,10 @@ impl Grid {
         if c0 < c1 {
             self.row_mut(r)[c0..c1].fill(b);
         }
+        if c1 == self.cols {
+            // The wrap marker lives in the last column; erasing it ends the wrap.
+            self.set_wrapped(r, false);
+        }
         self.mark(r);
     }
 
@@ -906,6 +1024,9 @@ impl Grid {
         let d = self.row_start(dst);
         let c = self.cols;
         self.buf_mut().copy_within(s..s + c, d);
+        if !self.alt_active {
+            self.wrapped[d / c] = self.wrapped[s / c];
+        }
         self.mark(dst);
     }
 
@@ -916,14 +1037,17 @@ impl Grid {
         }
         let new_cap = (self.cap * 2).min(max_cap);
         let mut new_cells = bytemuck::zeroed_vec::<Cell>(self.cols * new_cap);
+        let mut new_wrapped = vec![false; new_cap];
         let n_lines = self.history + self.rows;
         let w = self.cols;
         for i in 0..n_lines {
             let op = (self.top + self.cap - self.history + i) % self.cap;
             let src = op * self.cols;
             new_cells[i * self.cols..i * self.cols + w].copy_from_slice(&self.cells[src..src + w]);
+            new_wrapped[i] = self.wrapped[op];
         }
         self.cells = new_cells;
+        self.wrapped = new_wrapped;
         self.cap = new_cap;
         self.top = self.history;
     }
@@ -944,6 +1068,7 @@ impl Grid {
                     self.grow_capacity();
                 }
                 self.top = (self.top + 1) % self.cap;
+                self.lines_pushed += 1;
                 if self.history < self.cap - self.rows {
                     self.history += 1;
                 }
@@ -1009,7 +1134,36 @@ impl Grid {
         if p.attrs & ATTR_UNDERLINE != 0 {
             bg |= BG_UNDERLINE;
         }
+        if p.attrs & ATTR_BOLD != 0 {
+            fg |= FG_BOLD;
+        }
+        if p.attrs & ATTR_ITALIC != 0 {
+            fg |= FG_ITALIC;
+        }
         (fg, bg)
+    }
+
+    fn tab_forward(&mut self, n: usize) {
+        for _ in 0..n {
+            let next = (self.cur.col + 1..self.cols).find(|&c| self.tab_stops[c]);
+            self.cur.col = next.unwrap_or(self.cols - 1);
+        }
+    }
+
+    fn tab_backward(&mut self, n: usize) {
+        for _ in 0..n {
+            let prev = (1..self.cur.col).rev().find(|&c| self.tab_stops[c]);
+            self.cur.col = prev.unwrap_or(0);
+        }
+    }
+
+    /// Move to a 1-based row parameter, honoring origin mode (DECOM).
+    fn goto_row(&mut self, row_param: usize) {
+        if self.cur.origin_mode {
+            self.cur.row = (self.scroll_top + row_param - 1).min(self.scroll_bot);
+        } else {
+            self.cur.row = (row_param - 1).min(self.rows - 1);
+        }
     }
 
     fn clamp_cursor(&mut self) {
@@ -1039,6 +1193,7 @@ impl Grid {
             }
         }
         self.wrap_pending = false;
+        self.selection = None;
         self.all_dirty = true;
     }
 
@@ -1054,6 +1209,15 @@ impl Grid {
         self.app_cursor = false;
         self.bracketed_paste = false;
         self.autowrap = true;
+        self.insert_mode = false;
+        self.sync_output = false;
+        self.sync_started = None;
+        self.mouse_tracking = MouseTracking::Off;
+        self.mouse_sgr = false;
+        self.focus_events = false;
+        self.alt_scroll = true;
+        self.tab_stops = default_tab_stops(self.cols);
+        self.selection = None;
         self.clear_rows(0, self.rows);
         self.all_dirty = true;
     }
@@ -1068,49 +1232,104 @@ impl Grid {
         if cols == self.cols && rows == self.rows {
             return;
         }
-        let max_cap = SCROLLBACK + rows;
-        let needed = (self.history + self.rows + 1).max(rows * 2).max(64);
-        let new_cap = needed.min(max_cap);
-        let mut cells = bytemuck::zeroed_vec::<Cell>(cols * new_cap);
 
-        // Logical line 0 = oldest history line; the screen starts at `history`.
-        let main_row = if self.alt_active { self.saved_main.row } else { self.cur.row };
+        // 1. Main screen + scrollback -> logical lines (soft wraps joined), tracking
+        //    the main cursor as (line, offset).
+        let main_cur = if self.alt_active { self.saved_main } else { self.cur };
         let total = self.history + self.rows;
-        let mut new_top = self.history;
-        if rows < self.rows {
-            // Shrinking: push lines into history only as needed to keep the cursor visible.
-            new_top += (main_row + 1).saturating_sub(rows);
-        } else {
-            // Growing: pull lines back out of history.
-            new_top = new_top.saturating_sub(rows - self.rows);
+        let cursor_row = self.history + main_cur.row.min(self.rows - 1);
+        let mut lines: Vec<Vec<Cell>> = Vec::new();
+        let mut current: Vec<Cell> = Vec::new();
+        let mut cursor = (0, 0);
+        for i in 0..total {
+            let p = (self.top + self.cap - self.history + i) % self.cap;
+            if i == cursor_row {
+                cursor = (lines.len(), current.len() + main_cur.col);
+            }
+            current.extend_from_slice(&self.cells[p * self.cols..(p + 1) * self.cols]);
+            if self.wrapped[p] && i + 1 < total {
+                continue;
+            }
+            let keep = if lines.len() == cursor.0 && i >= cursor_row { cursor.1 } else { 0 };
+            let content = current.iter().rposition(|c| c.codepoint != 0 || c.bg & BG_SET != 0).map_or(0, |i| i + 1);
+            current.truncate(content.max(keep).min(current.len()));
+            lines.push(std::mem::take(&mut current));
         }
-        let new_hist = new_top.min(new_cap - rows);
-        let start = new_top - new_hist;
-        let n_lines = total.saturating_sub(start).min(new_hist + rows);
-        let w = cols.min(self.cols);
-        for i in 0..n_lines {
-            let op = (self.top + self.cap - self.history + start + i) % self.cap;
-            let src = op * self.cols;
-            cells[i * cols..i * cols + w].copy_from_slice(&self.cells[src..src + w]);
+        // Blank lines below the cursor are not content worth keeping.
+        while lines.len() > cursor.0 + 1 && lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
         }
-        let new_main_row =
-            ((main_row + self.history) as isize - new_top as isize).clamp(0, rows as isize - 1) as usize;
+
+        // 2. Re-wrap every logical line to the new width.
+        let mut out: Vec<Cell> = Vec::new();
+        let mut out_wrapped: Vec<bool> = Vec::new();
+        let mut new_cursor = (0, 0);
+        for (li, line) in lines.iter().enumerate() {
+            let first_row = out_wrapped.len();
+            out.resize(out.len() + cols, Cell::default());
+            out_wrapped.push(false);
+            let mut col = 0;
+            let mut i = 0;
+            while i < line.len() {
+                let cell = line[i];
+                let w = if char::from_u32(cell.codepoint).is_some_and(|c| char_width(c) == 2) { 2.min(cols) } else { 1 };
+                if col + w > cols {
+                    *out_wrapped.last_mut().unwrap() = true;
+                    out.resize(out.len() + cols, Cell::default());
+                    out_wrapped.push(false);
+                    col = 0;
+                }
+                if li == cursor.0 && (i..i + w).contains(&cursor.1) {
+                    new_cursor = (out_wrapped.len() - 1, col);
+                }
+                let base = out.len() - cols;
+                out[base + col] = cell;
+                if w == 2 {
+                    out[base + col + 1] = Cell { codepoint: 0, ..cell };
+                }
+                col += w;
+                i += if w == 2 && line.get(i + 1).is_some_and(|c| c.codepoint == 0) { 2 } else { 1 };
+            }
+            if li == cursor.0 && cursor.1 >= line.len() {
+                let extra = cursor.1 - line.len();
+                let row = (out_wrapped.len() - 1).max(first_row);
+                new_cursor = (row, (col + extra).min(cols - 1));
+            }
+        }
+
+        // 3. Keep the cursor on screen; everything above it becomes scrollback.
+        let total_rows = out_wrapped.len().max(new_cursor.0 + 1);
+        let screen_start = total_rows.saturating_sub(rows).min(new_cursor.0).max((new_cursor.0 + 1).saturating_sub(rows));
+        let new_hist = screen_start.min(SCROLLBACK);
+        let first = screen_start - new_hist;
+        let new_cap = (new_hist + rows).max(rows * 2).max(64).min(SCROLLBACK + rows);
+        let mut cells = bytemuck::zeroed_vec::<Cell>(cols * new_cap);
+        let mut wrapped = vec![false; new_cap];
+        for (dst, src) in (first..(screen_start + rows).min(out_wrapped.len())).enumerate() {
+            cells[dst * cols..(dst + 1) * cols].copy_from_slice(&out[src * cols..(src + 1) * cols]);
+            wrapped[dst] = out_wrapped[src];
+        }
 
         let mut alt = bytemuck::zeroed_vec::<Cell>(cols * rows);
+        let w = cols.min(self.cols);
         for r in 0..rows.min(self.rows) {
             alt[r * cols..r * cols + w].copy_from_slice(&self.alt[r * self.cols..r * self.cols + w]);
         }
 
         self.cells = cells;
+        self.wrapped = wrapped;
         self.alt = alt;
         self.cap = new_cap;
         self.top = new_hist;
         self.history = new_hist;
         self.display_offset = 0;
+        let main_row = new_cursor.0 - screen_start;
         if self.alt_active {
-            self.saved_main.row = new_main_row;
+            self.saved_main.row = main_row;
+            self.saved_main.col = new_cursor.1;
         } else {
-            self.cur.row = new_main_row;
+            self.cur.row = main_row;
+            self.cur.col = new_cursor.1;
         }
         self.cols = cols;
         self.rows = rows;
@@ -1119,9 +1338,12 @@ impl Grid {
             c.row = c.row.min(rows - 1);
             c.col = c.col.min(cols - 1);
         }
+        self.tab_stops = default_tab_stops(cols);
         self.scroll_top = 0;
         self.scroll_bot = rows - 1;
         self.wrap_pending = false;
+        self.selection = None;
+        self.prompt_input_mark = None;
         self.dirty = vec![true; rows];
         self.all_dirty = true;
     }
@@ -1226,6 +1448,61 @@ pub fn char_width(c: char) -> usize {
     c.width().unwrap_or(0).min(2)
 }
 
+/// Extract the path from an OSC 7 payload (`file://host/percent%20encoded/path`).
+fn parse_osc7_path(payload: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(payload).ok()?;
+    let rest = s.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let mut out = Vec::with_capacity(path.len());
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(b) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Standard base64 decoder for OSC 52 payloads (capped at 1 MiB of input).
+fn decode_base64(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() > 1 << 20 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for &c in data {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn default_tab_stops(cols: usize) -> Vec<bool> {
+    (0..cols).map(|c| c > 0 && c % 8 == 0).collect()
+}
+
 /// DEC Special Graphics (ESC ( 0) used by tmux, mc, etc. for box drawing.
 fn dec_line_drawing(c: char) -> char {
     match c {
@@ -1251,6 +1528,7 @@ impl Perform for Grid {
         if self.wrap_pending {
             self.wrap_pending = false;
             if self.autowrap {
+                self.set_wrapped(self.cur.row, true);
                 self.cur.col = 0;
                 self.linefeed();
             }
@@ -1260,17 +1538,35 @@ impl Perform for Grid {
                 return;
             }
             self.clear_cols(self.cur.row, self.cur.col, self.cols);
+            self.set_wrapped(self.cur.row, true);
             self.cur.col = 0;
             self.linefeed();
         }
         let (fg, bg) = self.colors();
         let (row, col) = (self.cur.row, self.cur.col);
+        let blank = self.blank();
+        let cols = self.cols;
+        let insert = self.insert_mode;
         {
             let r = self.row_mut(row);
+            if insert && col + w < cols {
+                r.copy_within(col..cols - w, col + w);
+            }
+            // Never leave half of a double-width character behind.
+            if col > 0 && r[col].codepoint == 0 && char::from_u32(r[col - 1].codepoint).is_some_and(|p| char_width(p) == 2) {
+                r[col - 1] = blank;
+            }
+            let last = col + w - 1;
+            if last + 1 < cols && char::from_u32(r[last].codepoint).is_some_and(|p| char_width(p) == 2) {
+                r[last + 1] = blank;
+            }
             r[col] = Cell { codepoint: c as u32, fg, bg };
             if w == 2 {
                 r[col + 1] = Cell { codepoint: 0, fg, bg };
             }
+        }
+        if col + w >= cols {
+            self.set_wrapped(row, false);
         }
         self.mark(row);
         let next = col + w;
@@ -1288,9 +1584,7 @@ impl Perform for Grid {
                 self.cur.col = self.cur.col.saturating_sub(1);
                 self.wrap_pending = false;
             }
-            0x09 => {
-                self.cur.col = ((self.cur.col / 8 + 1) * 8).min(self.cols - 1);
-            }
+            0x09 => self.tab_forward(1),
             0x0A..=0x0C => {
                 self.linefeed();
                 self.wrap_pending = false;
@@ -1343,11 +1637,18 @@ impl Perform for Grid {
                 self.cur.col = 0;
             }
             'G' | '`' => self.cur.col = (arg(0, 1) - 1).min(cols - 1),
-            'd' => self.cur.row = (arg(0, 1) - 1).min(rows - 1),
+            'd' => self.goto_row(arg(0, 1)),
             'H' | 'f' => {
-                self.cur.row = (arg(0, 1) - 1).min(rows - 1);
+                self.goto_row(arg(0, 1));
                 self.cur.col = (arg(1, 1) - 1).min(cols - 1);
             }
+            'I' => self.tab_forward(arg(0, 1)),
+            'Z' => self.tab_backward(arg(0, 1)),
+            'g' => match raw(0) {
+                0 => self.tab_stops[self.cur.col] = false,
+                3 => self.tab_stops.fill(false),
+                _ => {}
+            },
             'J' => {
                 let (r, c) = (self.cur.row, self.cur.col);
                 match raw(0) {
@@ -1396,6 +1697,7 @@ impl Perform for Grid {
                 let row = self.row_mut(r);
                 row.copy_within(c..cols - k, c + k);
                 row[c..c + k].fill(b);
+                self.set_wrapped(r, false);
                 self.mark(r);
             }
             'P' => {
@@ -1405,6 +1707,7 @@ impl Perform for Grid {
                 let row = self.row_mut(r);
                 row.copy_within(c + k..cols, c);
                 row[cols - k..].fill(b);
+                self.set_wrapped(r, false);
                 self.mark(r);
             }
             'X' => {
@@ -1419,7 +1722,7 @@ impl Perform for Grid {
                 if t < b {
                     self.scroll_top = t;
                     self.scroll_bot = b;
-                    self.cur.row = 0;
+                    self.cur.row = if self.cur.origin_mode { t } else { 0 };
                     self.cur.col = 0;
                 }
             }
@@ -1428,12 +1731,31 @@ impl Perform for Grid {
                 self.cur = self.saved;
                 self.clamp_cursor();
             }
+            'h' | 'l' if !private => {
+                let on = action == 'h';
+                for &mode in &p[..n] {
+                    if mode == 4 {
+                        self.insert_mode = on;
+                    }
+                }
+            }
             'h' | 'l' if private => {
                 let on = action == 'h';
                 for &mode in &p[..n] {
                     match mode {
                         1 => self.app_cursor = on,
+                        6 => {
+                            self.cur.origin_mode = on;
+                            self.cur.row = if on { self.scroll_top } else { 0 };
+                            self.cur.col = 0;
+                        }
                         7 => self.autowrap = on,
+                        9 | 1000 => self.mouse_tracking = if on { MouseTracking::Click } else { MouseTracking::Off },
+                        1002 => self.mouse_tracking = if on { MouseTracking::Drag } else { MouseTracking::Off },
+                        1003 => self.mouse_tracking = if on { MouseTracking::Motion } else { MouseTracking::Off },
+                        1004 => self.focus_events = on,
+                        1006 => self.mouse_sgr = on,
+                        1007 => self.alt_scroll = on,
                         25 => {
                             if self.cursor_visible != on {
                                 self.cursor_visible = on;
@@ -1443,7 +1765,10 @@ impl Perform for Grid {
                         47 | 1047 => self.set_alt(on, false),
                         1049 => self.set_alt(on, true),
                         2004 => self.bracketed_paste = on,
-                        2026 => self.sync_output = on,
+                        2026 => {
+                            self.sync_output = on;
+                            self.sync_started = on.then(std::time::Instant::now);
+                        }
                         _ => {}
                     }
                 }
@@ -1451,11 +1776,9 @@ impl Perform for Grid {
             'n' => match raw(0) {
                 5 => self.response.extend_from_slice(b"\x1b[0n"),
                 6 => {
-                    if private {
-                        let _ = write!(self.response, "\x1b[?{};{}R", self.cur.row + 1, self.cur.col + 1);
-                    } else {
-                        let _ = write!(self.response, "\x1b[{};{}R", self.cur.row + 1, self.cur.col + 1);
-                    }
+                    let row = if self.cur.origin_mode { self.cur.row - self.scroll_top } else { self.cur.row } + 1;
+                    let q = if private { "?" } else { "" };
+                    let _ = write!(self.response, "\x1b[{q}{row};{}R", self.cur.col + 1);
                 }
                 _ => {}
             },
@@ -1464,7 +1787,14 @@ impl Perform for Grid {
                 let mode = raw(0);
                 let state = match mode {
                     1 => if self.app_cursor { 1 } else { 2 },
+                    6 => if self.cur.origin_mode { 1 } else { 2 },
                     7 => if self.autowrap { 1 } else { 2 },
+                    1000 => if self.mouse_tracking == MouseTracking::Click { 1 } else { 2 },
+                    1002 => if self.mouse_tracking == MouseTracking::Drag { 1 } else { 2 },
+                    1003 => if self.mouse_tracking == MouseTracking::Motion { 1 } else { 2 },
+                    1004 => if self.focus_events { 1 } else { 2 },
+                    1006 => if self.mouse_sgr { 1 } else { 2 },
+                    1007 => if self.alt_scroll { 1 } else { 2 },
                     25 => if self.cursor_visible { 1 } else { 2 },
                     1049 => if self.alt_active { 1 } else { 2 },
                     2004 => if self.bracketed_paste { 1 } else { 2 },
@@ -1492,15 +1822,47 @@ impl Perform for Grid {
         if params.len() < 2 {
             return;
         }
-        if matches!(params[0], b"0" | b"2") {
-            if let Ok(s) = std::str::from_utf8(params[1]) {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() && self.title != trimmed {
-                    self.title.clear();
-                    self.title.push_str(trimmed);
+        match params[0] {
+            b"0" | b"2" => {
+                if let Ok(s) = std::str::from_utf8(params[1]) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() && self.title != trimmed {
+                        self.title.clear();
+                        self.title.push_str(trimmed);
+                        self.title_changed = true;
+                    }
                 }
+                return;
             }
-            return;
+            b"7" => {
+                let cwd = parse_osc7_path(params[1]);
+                if cwd.is_some() && cwd != self.reported_cwd {
+                    self.reported_cwd = cwd;
+                    self.title_changed = true;
+                }
+                return;
+            }
+            b"52" => {
+                // `52;<targets>;<base64>`. Only setting is supported: reading the
+                // clipboard from the terminal would leak it to any program.
+                if let Some(text) = params.get(2).filter(|d| **d != b"?").and_then(|d| decode_base64(d)) {
+                    if let Ok(text) = String::from_utf8(text) {
+                        self.clipboard_request = Some(text);
+                    }
+                }
+                return;
+            }
+            b"133" => {
+                match params[1].first() {
+                    Some(b'B') => {
+                        self.prompt_input_mark = Some((self.abs_line(self.cur.row), self.cur.col));
+                    }
+                    Some(b'A' | b'C' | b'D') => self.prompt_input_mark = None,
+                    _ => {}
+                }
+                return;
+            }
+            _ => {}
         }
         if params[1] != b"?" {
             return;
@@ -1537,6 +1899,7 @@ impl Perform for Grid {
             }
             ([], b'M') => self.reverse_index(),
             ([], b'c') => self.full_reset(),
+            ([], b'H') => self.tab_stops[self.cur.col] = true,
             ([b'('], b'0') => self.cur.line_drawing = true,
             ([b'('], b'B') => self.cur.line_drawing = false,
             _ => {}
@@ -1638,6 +2001,160 @@ mod tests {
         let c = g.display_row(0)[0];
         assert_eq!(c.fg, palette(1) | FG_SET);
         assert_eq!(c.bg, 0x0102_0300 | BG_SET);
+    }
+
+    #[test]
+    fn bold_and_italic_are_stored_in_fg_flags() {
+        let mut g = Grid::new(8, 1);
+        feed(&mut g, "\x1b[1ma\x1b[3mb\x1b[22mc\x1b[0;31;1md");
+        let row = g.display_row(0);
+        assert_eq!(row[0].fg, FG_BOLD);
+        assert_eq!(row[1].fg, FG_BOLD | FG_ITALIC);
+        assert_eq!(row[2].fg, FG_ITALIC);
+        assert_eq!(row[3].fg, palette(1) | FG_SET | FG_BOLD);
+    }
+
+    #[test]
+    fn mouse_and_focus_modes() {
+        let mut g = Grid::new(8, 2);
+        assert_eq!(g.mouse_tracking, MouseTracking::Off);
+        feed(&mut g, "\x1b[?1002h\x1b[?1006h\x1b[?1004h");
+        assert_eq!(g.mouse_tracking, MouseTracking::Drag);
+        assert!(g.mouse_sgr && g.focus_events);
+        feed(&mut g, "\x1b[?1002$p");
+        assert_eq!(g.response, b"\x1b[?1002;1$y");
+        feed(&mut g, "\x1b[?1002l\x1bc");
+        assert_eq!(g.mouse_tracking, MouseTracking::Off);
+        assert!(!g.mouse_sgr && !g.focus_events);
+    }
+
+    #[test]
+    fn tab_stops_set_clear_and_move() {
+        let mut g = Grid::new(30, 1);
+        feed(&mut g, "\tA");
+        assert_eq!(g.display_row(0)[8].codepoint, 'A' as u32);
+        feed(&mut g, "\r\x1b[3g\x1b[5G\x1bH\r\tB");
+        assert_eq!(g.display_row(0)[4].codepoint, 'B' as u32);
+        feed(&mut g, "\x1b[Z");
+        assert_eq!(g.cur.col, 4);
+        feed(&mut g, "\x1b[3g\r\x1b[2I");
+        assert_eq!(g.cur.col, 29);
+    }
+
+    #[test]
+    fn insert_mode_shifts_text_right() {
+        let mut g = Grid::new(8, 1);
+        feed(&mut g, "abc\r\x1b[4hX\x1b[4lY");
+        assert_eq!(line(&g, 0), "XYbc");
+        let mut g = Grid::new(8, 1);
+        feed(&mut g, "abc\r\x1b[4hXY");
+        assert_eq!(line(&g, 0), "XYabc");
+    }
+
+    #[test]
+    fn origin_mode_positions_relative_to_scroll_region() {
+        let mut g = Grid::new(10, 10);
+        feed(&mut g, "\x1b[3;6r\x1b[?6h");
+        assert_eq!(g.cur.row, 2);
+        feed(&mut g, "\x1b[2;1H");
+        assert_eq!(g.cur.row, 3);
+        feed(&mut g, "\x1b[99;1H");
+        assert_eq!(g.cur.row, 5);
+        feed(&mut g, "\x1b[6n");
+        assert_eq!(g.response, b"\x1b[4;1R");
+        feed(&mut g, "\x1b[?6l");
+        assert_eq!(g.cur.row, 0);
+    }
+
+    #[test]
+    fn osc_7_52_and_133() {
+        let mut g = Grid::new(20, 2);
+        feed(&mut g, "\x1b]7;file://host/Users/me/My%20Dir\x07");
+        assert_eq!(g.reported_cwd.as_deref(), Some("/Users/me/My Dir"));
+        assert!(g.title_changed);
+
+        feed(&mut g, "\x1b]52;c;aGVsbG8gVmnhu4d0\x07");
+        assert_eq!(g.clipboard_request.as_deref(), Some("hello Việt"));
+        g.clipboard_request = None;
+        feed(&mut g, "\x1b]52;c;?\x07");
+        assert!(g.clipboard_request.is_none());
+
+        // Prompt "my-prompt>>" with the input start marked by OSC 133;B.
+        feed(&mut g, "\x1b]133;A\x07my-prompt>>\x1b]133;B\x07ls -la");
+        assert_eq!(g.current_prompt_input(), "ls -la");
+        assert_eq!(g.prompt_command_range().0, 11);
+    }
+
+    #[test]
+    fn overwriting_half_of_a_wide_char_clears_the_other_half() {
+        let mut g = Grid::new(6, 1);
+        feed(&mut g, "中\rx");
+        assert_eq!(g.display_row(0)[1].codepoint, 0);
+        assert_eq!(line(&g, 0), "x");
+        let mut g = Grid::new(6, 1);
+        feed(&mut g, "中\x1b[2Gy");
+        assert_eq!(g.display_row(0)[0].codepoint, 0);
+        assert_eq!(line(&g, 0), " y");
+    }
+
+    #[test]
+    fn selection_follows_text_when_output_scrolls() {
+        let mut g = Grid::new(10, 3);
+        feed(&mut g, "one\r\ntwo\r\nthree");
+        g.set_selection(Some(Selection { start: (1, 0), end: (1, 2) }));
+        assert_eq!(g.selected_text().as_deref(), Some("two"));
+        feed(&mut g, "\r\nfour");
+        // "two" moved up to row 0, and the selection moved with it.
+        assert!(g.is_selected(0, 0) && !g.is_selected(1, 0));
+        assert_eq!(g.selected_text().as_deref(), Some("two"));
+        g.scroll_display(1);
+        assert!(g.is_selected(1, 0));
+        assert_eq!(g.selected_text().as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn selection_joins_soft_wrapped_lines() {
+        let mut g = Grid::new(4, 3);
+        feed(&mut g, "abcdefg\r\nxy");
+        g.set_selection(Some(Selection { start: (0, 0), end: (2, 3) }));
+        assert_eq!(g.selected_text().as_deref(), Some("abcdefg\nxy"));
+    }
+
+    #[test]
+    fn resize_reflows_wrapped_lines() {
+        let mut g = Grid::new(10, 4);
+        feed(&mut g, "0123456789abcde\r\n$ ");
+        assert_eq!(line(&g, 0), "0123456789");
+        assert_eq!(line(&g, 1), "abcde");
+
+        g.resize(20, 4);
+        assert_eq!(line(&g, 0), "0123456789abcde");
+        assert_eq!(line(&g, 1), "$");
+        assert_eq!((g.cur.row, g.cur.col), (1, 2));
+
+        g.resize(5, 4);
+        assert_eq!(line(&g, 0), "01234");
+        assert_eq!(line(&g, 1), "56789");
+        assert_eq!(line(&g, 2), "abcde");
+        assert_eq!(line(&g, 3), "$");
+        assert_eq!((g.cur.row, g.cur.col), (3, 2));
+
+        g.resize(4, 2);
+        // Older rows go to scrollback; the cursor line stays visible.
+        assert_eq!(line(&g, 1), "$");
+        assert_eq!(g.cur.row, 1);
+        g.scroll_display(g.history as isize);
+        assert_eq!(line(&g, 0), "0123");
+    }
+
+    #[test]
+    fn resize_reflow_keeps_wide_chars_whole() {
+        let mut g = Grid::new(6, 2);
+        feed(&mut g, "ab中文");
+        g.resize(3, 3);
+        assert_eq!(line(&g, 0), "ab");
+        assert_eq!(g.display_row(1)[0].codepoint, '中' as u32);
+        assert_eq!(g.display_row(2)[0].codepoint, '文' as u32);
     }
 
     #[test]

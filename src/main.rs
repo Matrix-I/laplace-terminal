@@ -7,6 +7,7 @@ mod fontdb;
 mod grid;
 mod history;
 mod macos;
+mod mouse;
 mod pty;
 mod renderer;
 mod split;
@@ -48,7 +49,9 @@ impl Pane {
         if self.cached_cwd.is_some() && self.last_cwd_check.elapsed().as_millis() < 500 {
             return self.cached_cwd.clone();
         }
-        self.cached_cwd = self.pty.cwd();
+        // Prefer the directory the shell reports via OSC 7; fall back to asking the OS.
+        let reported = self.grid.lock().reported_cwd.clone();
+        self.cached_cwd = reported.filter(|d| std::path::Path::new(d).is_dir()).or_else(|| self.pty.cwd());
         self.last_cwd_check = std::time::Instant::now();
         self.cached_cwd.clone()
     }
@@ -157,6 +160,14 @@ struct State {
     ime_preedit: String,
     /// Last cursor cell reported to the IME for candidate window placement.
     ime_cursor_cell: Option<(usize, usize)>,
+    /// Mouse button held while the application tracks the mouse (for drag reports).
+    mouse_button_down: Option<mouse::Button>,
+    /// Last `(pane, row, col)` reported to a mouse-tracking application.
+    last_mouse_report: Option<(u64, usize, usize)>,
+    /// A frame was skipped because an application is in synchronized output.
+    sync_pending: bool,
+    /// When tab titles were last recomputed (they also refresh on OSC 0/2/7).
+    titles_refreshed_at: std::time::Instant,
 }
 
 struct App {
@@ -270,6 +281,10 @@ impl ApplicationHandler<AppEvent> for App {
             first_frame: true,
             ime_preedit: String::new(),
             ime_cursor_cell: None,
+            mouse_button_down: None,
+            last_mouse_report: None,
+            sync_pending: false,
+            titles_refreshed_at: std::time::Instant::now(),
         });
 
         #[cfg(target_os = "macos")]
@@ -289,6 +304,13 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::WakeUp => {
                 self.wakeup_queued.store(false, Ordering::Release);
                 if let Some(s) = &mut self.state {
+                    // OSC 52: applications (e.g. vim/tmux over ssh) setting the clipboard.
+                    for pane in s.tabs.iter().flat_map(|t| &t.panes) {
+                        let request = pane.grid.lock().clipboard_request.take();
+                        if let Some(text) = request {
+                            copy_to_clipboard(&text);
+                        }
+                    }
                     if !s.tabs.is_empty() {
                         render_active(s);
                     }
@@ -422,6 +444,12 @@ impl ApplicationHandler<AppEvent> for App {
                     s.window.set_cursor_visible(true);
                     s.mouse_hidden = false;
                 }
+                if !s.selecting && !s.history_search.is_open {
+                    let button = s.mouse_button_down.unwrap_or(mouse::Button::None);
+                    if report_mouse(s, button, mouse::Action::Motion) {
+                        return;
+                    }
+                }
                 if s.selecting {
                     if let (Some(start), Some(pane_id)) = (s.last_click_cell, s.active_click_pane_id) {
                         let show_tabs = s.tabs.len() > 1;
@@ -448,12 +476,27 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
 
-            WindowEvent::MouseInput {
-                state: btn_state,
-                button: MouseButton::Left,
-                ..
-            } => {
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 if s.tabs.is_empty() {
+                    return;
+                }
+                let reported = match button {
+                    MouseButton::Left => Some(mouse::Button::Left),
+                    MouseButton::Middle => Some(mouse::Button::Middle),
+                    MouseButton::Right => Some(mouse::Button::Right),
+                    _ => None,
+                };
+                if let (Some(b), false) = (reported, s.history_search.is_open || s.selecting) {
+                    let action = if btn_state == ElementState::Pressed { mouse::Action::Press } else { mouse::Action::Release };
+                    if report_mouse(s, b, action) {
+                        s.mouse_button_down = (action == mouse::Action::Press).then_some(b);
+                        return;
+                    }
+                }
+                if btn_state == ElementState::Released {
+                    s.mouse_button_down = None;
+                }
+                if button != MouseButton::Left {
                     return;
                 }
                 if s.history_search.is_open {
@@ -702,6 +745,16 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 };
                 if lines != 0 {
+                    let wheel = if lines > 0 { mouse::Button::WheelUp } else { mouse::Button::WheelDown };
+                    if report_mouse(s, wheel, mouse::Action::Press) {
+                        for _ in 1..lines.unsigned_abs() {
+                            report_mouse(s, wheel, mouse::Action::Press);
+                        }
+                        return;
+                    }
+                    if alt_screen_scroll(s, lines) {
+                        return;
+                    }
                     let show_tabs = s.tabs.len() > 1;
                     let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
                     let target_id = if let Some((cell_row, cell_col)) =
@@ -739,6 +792,12 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::Focused(focused) => {
                 s.focused = focused;
+                if let Some(tab) = s.tabs.get(s.active) {
+                    let pane = tab.active_pane();
+                    if pane.grid.lock().focus_events {
+                        pane.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                    }
+                }
                 if focused {
                     s.cursor_blink_epoch = std::time::Instant::now();
                     let mtime = config::config_mtime();
@@ -766,19 +825,20 @@ impl ApplicationHandler<AppEvent> for App {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
+        let mut deadline: Option<std::time::Instant> = None;
         if let Some(s) = &self.state {
+            let now = std::time::Instant::now();
+            if s.sync_pending {
+                deadline = Some(now + std::time::Duration::from_millis(16));
+            }
             if !s.tabs.is_empty() && s.focused && cursor_blinks(s) {
-                let now = std::time::Instant::now();
-                let elapsed = s.cursor_blink_epoch.elapsed();
-                let elapsed_ms = elapsed.as_millis();
+                let elapsed_ms = s.cursor_blink_epoch.elapsed().as_millis();
                 let next_boundary_ms = ((elapsed_ms / 500) + 1) * 500;
-                let dur_to_next = std::time::Duration::from_millis((next_boundary_ms - elapsed_ms) as u64);
-                let next_instant = now + dur_to_next;
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next_instant));
-                return;
+                let blink = now + std::time::Duration::from_millis((next_boundary_ms - elapsed_ms) as u64);
+                deadline = Some(deadline.map_or(blink, |d| d.min(blink)));
             }
         }
-        event_loop.set_control_flow(ControlFlow::Wait);
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
 
@@ -866,6 +926,7 @@ fn tab_title(tab: &mut Tab) -> String {
 }
 
 fn refresh_tab_titles(s: &mut State) {
+    s.titles_refreshed_at = std::time::Instant::now();
     let mut changed = s.tab_titles.len() != s.tabs.len();
     s.tab_titles.resize_with(s.tabs.len(), String::new);
     for (dst, tab) in s.tab_titles.iter_mut().zip(&mut s.tabs) {
@@ -961,7 +1022,24 @@ fn render_active(s: &mut State) {
     if s.tabs.is_empty() {
         return;
     }
-    refresh_tab_titles(s);
+    // Synchronized output (DECSET 2026): wait for the application to finish its
+    // frame, but never longer than 150ms.
+    let syncing = s.tabs[s.active].panes.iter().any(|p| {
+        let g = p.grid.lock();
+        g.sync_output && g.sync_started.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(150))
+    });
+    s.sync_pending = syncing;
+    if syncing {
+        return;
+    }
+
+    let mut titles_changed = false;
+    for pane in s.tabs.iter().flat_map(|t| &t.panes) {
+        titles_changed |= std::mem::take(&mut pane.grid.lock().title_changed);
+    }
+    if titles_changed || s.titles_refreshed_at.elapsed() >= std::time::Duration::from_secs(1) {
+        refresh_tab_titles(s);
+    }
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
     let blink_on = cursor_is_visible_now(s);
 
@@ -1082,6 +1160,84 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
             eprintln!("laplace: failed to open URL {target}: {e}");
         }
     }
+}
+
+/// Pane under the mouse pointer and the pane-relative `(row, col)` cell.
+fn pane_cell_at_mouse(s: &State) -> Option<(u64, usize, usize)> {
+    let show_tabs = s.tabs.len() > 1;
+    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+    let (row, col) = s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)?;
+    let tab = s.tabs.get(s.active)?;
+    tab.compute_pane_rects(cols, rows)
+        .into_iter()
+        .find(|r| col >= r.col && col < r.col + r.cols && row >= r.row && row < r.row + r.rows)
+        .map(|r| (r.id, row - r.row, col - r.col))
+}
+
+/// Forward a mouse event to the application in the pane under the pointer if it
+/// tracks the mouse (DECSET 1000/1002/1003). Returns `true` when the application
+/// owns the mouse, so the event must not drive selection or scrollback. Holding
+/// Shift bypasses reporting, as in other terminals; Cmd/Super stays free for links.
+fn report_mouse(s: &mut State, button: mouse::Button, action: mouse::Action) -> bool {
+    use crate::grid::MouseTracking;
+    if s.mods.shift_key() || s.mods.super_key() {
+        return false;
+    }
+    let Some((pane_id, row, col)) = pane_cell_at_mouse(s) else { return false };
+    let tab = &mut s.tabs[s.active];
+    let Some(pane) = tab.pane(pane_id) else { return false };
+    let (tracking, sgr) = {
+        let g = pane.grid.lock();
+        (g.mouse_tracking, g.mouse_sgr)
+    };
+    if tracking == MouseTracking::Off {
+        return false;
+    }
+    let wanted = match action {
+        mouse::Action::Press | mouse::Action::Release => true,
+        mouse::Action::Motion => {
+            let moved = s.last_mouse_report != Some((pane_id, row, col));
+            moved
+                && (tracking == MouseTracking::Motion
+                    || (tracking == MouseTracking::Drag && button != mouse::Button::None))
+        }
+    };
+    if wanted {
+        let mods = mouse::Mods { shift: false, alt: s.mods.alt_key(), ctrl: s.mods.control_key() };
+        if let Some(bytes) = mouse::encode(button, action, mods, row, col, sgr) {
+            pane.pty.write(&bytes);
+        }
+        s.last_mouse_report = Some((pane_id, row, col));
+    }
+    if action == mouse::Action::Press && tab.active_pane_id != pane_id {
+        tab.active_pane_id = pane_id;
+        refresh_tab_titles(s);
+        s.renderer.invalidate();
+        s.window.request_redraw();
+    }
+    true
+}
+
+/// Alternate scroll (DECSET 1007): on the alternate screen without mouse tracking,
+/// the wheel sends arrow keys so `less`, `man` and editors scroll naturally.
+fn alt_screen_scroll(s: &mut State, lines: isize) -> bool {
+    let Some(tab) = s.tabs.get(s.active) else { return false };
+    let pane = tab.active_pane();
+    let (alt, enabled, app_cursor) = {
+        let g = pane.grid.lock();
+        (g.alt_active, g.alt_scroll, g.app_cursor)
+    };
+    if !alt || !enabled {
+        return false;
+    }
+    let key: &[u8] = match (lines > 0, app_cursor) {
+        (true, true) => b"\x1bOA",
+        (true, false) => b"\x1b[A",
+        (false, true) => b"\x1bOB",
+        (false, false) => b"\x1b[B",
+    };
+    pane.pty.write(&key.repeat(lines.unsigned_abs()));
+    true
 }
 
 fn handle_ime(s: &mut State, ime: Ime) {
@@ -2183,7 +2339,11 @@ fn handle_key(
                 return;
             }
 
-            let cmd = s.tabs[s.active].active_pane().grid.lock().current_prompt_input();
+            let cmd = {
+                let g = s.tabs[s.active].active_pane().grid.lock();
+                // Full-screen apps (vim, less, REPL UIs) are not shell commands.
+                if g.alt_active { String::new() } else { g.current_prompt_input() }
+            };
             if !cmd.is_empty() {
                 s.history_search.add_session_command(&cmd);
             }
