@@ -1843,15 +1843,8 @@ fn handle_key(
                         g.reset_display();
                         g.bracketed_paste
                     };
-                    if bracketed {
-                        let mut payload = Vec::with_capacity(text.len() + 12);
-                        payload.extend_from_slice(b"\x1b[200~");
-                        payload.extend_from_slice(text.as_bytes());
-                        payload.extend_from_slice(b"\x1b[201~");
-                        s.tabs[s.active].active_pane().pty.write(&payload);
-                    } else {
-                        s.tabs[s.active].active_pane().pty.write(text.as_bytes());
-                    }
+                    let payload = paste_payload(&text, bracketed);
+                    s.tabs[s.active].active_pane().pty.write(&payload);
                     s.window.request_redraw();
                 }
             }
@@ -2299,6 +2292,26 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+/// Build the bytes sent to the PTY for a clipboard paste.
+///
+/// ESC (and the 8-bit C1 CSI, U+009B) is stripped so clipboard content can never
+/// smuggle in `\x1b[201~` to terminate bracketed paste early and execute the rest
+/// as typed input, nor inject escape sequences into programs without bracketed paste.
+fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(text.len() + 12);
+    if bracketed {
+        payload.extend_from_slice(b"\x1b[200~");
+    }
+    let mut buf = [0u8; 4];
+    for ch in text.chars().filter(|&c| c != '\x1b' && c != '\u{9b}') {
+        payload.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    }
+    if bracketed {
+        payload.extend_from_slice(b"\x1b[201~");
+    }
+    payload
+}
+
 fn paste_from_clipboard() -> Option<String> {
     use std::process::{Command, Stdio};
 
@@ -2338,6 +2351,32 @@ fn main() {
         state: None,
     };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::paste_payload;
+
+    #[test]
+    fn bracketed_paste_wraps_plain_text() {
+        assert_eq!(paste_payload("ls -la\n", true), b"\x1b[200~ls -la\n\x1b[201~");
+        assert_eq!(paste_payload("ls -la\n", false), b"ls -la\n");
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_be_terminated_early() {
+        let evil = "echo hi\x1b[201~rm -rf ~\n";
+        let out = paste_payload(evil, true);
+        assert_eq!(out, b"\x1b[200~echo hi[201~rm -rf ~\n\x1b[201~");
+        // Exactly one start and one end marker: the injected terminator is neutralized.
+        let end_markers = out.windows(6).filter(|w| *w == b"\x1b[201~").count();
+        assert_eq!(end_markers, 1);
+    }
+
+    #[test]
+    fn paste_strips_escape_and_c1_csi_but_keeps_unicode() {
+        assert_eq!(paste_payload("Việt\x1b[31m\u{9b}2Jnam", false), "Việt[31m2Jnam".as_bytes());
+    }
 }
 
 #[cfg(test)]

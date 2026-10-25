@@ -15,8 +15,7 @@
 //! Zero shell plugins required; works natively in any shell (zsh, bash, fish, sh).
 
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -423,135 +422,221 @@ fn candidate_history_files() -> Vec<PathBuf> {
     unique
 }
 
+/// One logical history entry: its exact on-disk byte range plus the decoded command.
+#[derive(Debug)]
+struct RawEntry {
+    /// Byte range in the file, including the trailing newline(s).
+    span: std::ops::Range<usize>,
+    /// Decoded command, or `None` for blank lines and bash timestamp comments.
+    command: Option<String>,
+    /// Bash `HISTTIMEFORMAT` comment line (`#1729835432`) that belongs to the next entry.
+    is_timestamp: bool,
+}
+
+fn is_fish_history(path: &Path) -> bool {
+    path.to_string_lossy().contains("fish_history")
+}
+
+/// Zsh history files are "metafied": bytes `0x83..` are escaped as `0x83, byte ^ 0x20`.
+fn is_zsh_history(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name.contains("zsh") || name.contains("zhistory") {
+        return true;
+    }
+    let shell_is_zsh = std::env::var("SHELL").is_ok_and(|s| s.ends_with("zsh"));
+    shell_is_zsh && std::env::var_os("HISTFILE").is_some_and(|h| Path::new(&h) == path)
+}
+
+/// Reverse zsh's `metafy()`: `0x83, b` decodes to `b ^ 0x20`.
+fn unmetafy(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut it = bytes.iter();
+    while let Some(&b) = it.next() {
+        if b == 0x83 {
+            if let Some(&next) = it.next() {
+                out.push(next ^ 0x20);
+                continue;
+            }
+        }
+        out.push(b);
+    }
+    out
+}
+
+fn decode_history_bytes(bytes: &[u8], zsh: bool) -> String {
+    if zsh && bytes.contains(&0x83) {
+        if let Ok(s) = String::from_utf8(unmetafy(bytes)) {
+            return s;
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Split a bash / zsh history file into entries. A line ending in `\` continues
+/// onto the next line (zsh multi-line commands); the backslash is dropped.
+fn split_line_entries(bytes: &[u8], zsh: bool) -> Vec<RawEntry> {
+    let mut entries = Vec::new();
+    let mut start = 0;
+    let mut pos = 0;
+    let mut content: Vec<u8> = Vec::new();
+    while pos < bytes.len() {
+        let line_end = bytes[pos..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |i| pos + i);
+        let next = (line_end + 1).min(bytes.len());
+        let line = &bytes[pos..line_end];
+        if !content.is_empty() {
+            content.push(b'\n');
+        }
+        if let Some(stripped) = line.strip_suffix(b"\\") {
+            if next < bytes.len() {
+                content.extend_from_slice(stripped);
+                pos = next;
+                continue;
+            }
+        }
+        content.extend_from_slice(line);
+        entries.push(line_entry(start..next, &content, zsh));
+        content.clear();
+        start = next;
+        pos = next;
+    }
+    entries
+}
+
+fn line_entry(span: std::ops::Range<usize>, content: &[u8], zsh: bool) -> RawEntry {
+    let text = decode_history_bytes(content, zsh);
+    let line = text.trim();
+    if line.starts_with('#') && line.chars().skip(1).all(|c| c.is_ascii_digit()) {
+        return RawEntry { span, command: None, is_timestamp: true };
+    }
+    // Zsh extended format: `: <timestamp>:<duration>;<command>`
+    let cmd = match line.strip_prefix(": ").and_then(|_| line.find(';')) {
+        Some(pos) => line[pos + 1..].trim(),
+        None => line,
+    };
+    let command = (!cmd.is_empty()).then(|| cmd.to_string());
+    RawEntry { span, command, is_timestamp: false }
+}
+
+/// Split a fish history file into `- cmd: <command>` blocks (each block runs until
+/// the next `- cmd:` line and includes its `when:` / `paths:` lines).
+fn split_fish_entries(bytes: &[u8]) -> Vec<RawEntry> {
+    let mut entries: Vec<RawEntry> = Vec::new();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let line_end = bytes[pos..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |i| pos + i);
+        let next = (line_end + 1).min(bytes.len());
+        let line = String::from_utf8_lossy(&bytes[pos..line_end]);
+        if let Some(rest) = line.trim().strip_prefix("- cmd:") {
+            let cmd = rest.trim().replace("\\n", "\n").replace("\\\\", "\\");
+            let command = (!cmd.is_empty()).then_some(cmd);
+            entries.push(RawEntry { span: pos..next, command, is_timestamp: false });
+        } else if let Some(last) = entries.last_mut() {
+            last.span.end = next;
+        } else {
+            // Preamble before the first entry.
+            entries.push(RawEntry { span: pos..next, command: None, is_timestamp: false });
+        }
+        pos = next;
+    }
+    entries
+}
+
+fn split_history_entries(path: &Path, bytes: &[u8]) -> Vec<RawEntry> {
+    if is_fish_history(path) {
+        split_fish_entries(bytes)
+    } else {
+        split_line_entries(bytes, is_zsh_history(path))
+    }
+}
+
 /// Parse shell history file into commands (appends in reverse-chronological order).
 fn parse_history_file(path: &Path, out: &mut Vec<String>) {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let reader = BufReader::new(file);
-
-    let is_fish = path.to_string_lossy().contains("fish_history");
-    if is_fish {
-        parse_fish_file(reader, out);
-        return;
-    }
-
-    // Standard / extended Zsh and Bash history
-    let mut raw_lines = Vec::new();
-    let mut current = String::new();
-
-    for line_res in reader.split(b'\n') {
-        let bytes = match line_res {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let s = String::from_utf8_lossy(&bytes);
-        if current.is_empty() {
-            current.push_str(&s);
-        } else {
-            current.push('\n');
-            current.push_str(&s);
-        }
-        if current.ends_with('\\') {
-            current.pop(); // strip continuation backslash
-            continue;
-        }
-        let trimmed = current.trim();
-        if !trimmed.is_empty() {
-            raw_lines.push(trimmed.to_string());
-        }
-        current.clear();
-    }
-    if !current.trim().is_empty() {
-        raw_lines.push(current.trim().to_string());
-    }
-
-    // Iterate backwards (file bottom has the most recent commands)
-    for line in raw_lines.into_iter().rev() {
-        // Bash timestamp comment: `#1729835432`
-        if line.starts_with('#') && line.chars().skip(1).all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-
-        // Zsh extended format: `: <timestamp>:<duration>;<command>`
-        let cmd = if line.starts_with(": ") {
-            if let Some(pos) = line.find(';') {
-                line[pos + 1..].trim()
-            } else {
-                line.trim()
-            }
-        } else {
-            line.trim()
-        };
-
-        if !cmd.is_empty() {
-            out.push(cmd.to_string());
-        }
-    }
+    let Ok(bytes) = std::fs::read(path) else { return };
+    // File bottom has the most recent commands.
+    out.extend(split_history_entries(path, &bytes).into_iter().rev().filter_map(|e| e.command));
 }
 
-/// Parse Fish history file (`- cmd: <command>\n  when: <timestamp>`).
-fn parse_fish_file(reader: BufReader<File>, out: &mut Vec<String>) {
-    let mut cmds = Vec::new();
-    for line_res in reader.lines() {
-        let line = match line_res {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("- cmd:") {
-            let cmd = rest.trim();
-            if !cmd.is_empty() {
-                let unescaped = cmd.replace("\\n", "\n");
-                cmds.push(unescaped);
+/// Return `bytes` with every entry equal to `cmd` removed (along with a bash
+/// timestamp comment directly preceding it), or `None` if nothing matched.
+/// All other entries are kept byte-for-byte, so metafied zsh data is never re-encoded.
+fn strip_command_entries(path: &Path, bytes: &[u8], cmd: &str) -> Option<Vec<u8>> {
+    let mut kept: Vec<&RawEntry> = Vec::new();
+    let mut removed = false;
+    let entries = split_history_entries(path, bytes);
+    for entry in &entries {
+        if entry.command.as_deref() == Some(cmd) {
+            removed = true;
+            if kept.last().is_some_and(|e| e.is_timestamp) {
+                kept.pop();
             }
+            continue;
         }
+        kept.push(entry);
     }
-    // Reverse to place newest commands first
-    for cmd in cmds.into_iter().rev() {
-        out.push(cmd);
+    if !removed {
+        return None;
     }
+    let mut out = Vec::with_capacity(bytes.len());
+    for entry in kept {
+        out.extend_from_slice(&bytes[entry.span.clone()]);
+    }
+    Some(out)
 }
 
-/// Remove a deleted command from the user's primary history file on disk.
+/// Remove `cmd` from one history file: write the result to a private temp file in
+/// the same directory and atomically `rename` it over the original. If the shell
+/// appends to the file meanwhile, start over from the newer content.
+fn remove_command_from_file(path: &Path, cmd: &str) -> std::io::Result<bool> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Rewrite the real file, not a symlink pointing at it (e.g. dotfiles repos).
+    // The format is still detected from the configured path (`HISTFILE`, `.zsh_history`).
+    let format_path = path;
+    let path = std::fs::canonicalize(path)?;
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{file_name}.laplace-{}.tmp", std::process::id()));
+
+    for _ in 0..3 {
+        let before = std::fs::metadata(&path)?;
+        let original = std::fs::read(&path)?;
+        let Some(updated) = strip_command_entries(format_path, &original, cmd) else {
+            return Ok(false);
+        };
+
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let written = file
+            .write_all(&updated)
+            .and_then(|_| file.sync_all())
+            .and_then(|_| std::fs::set_permissions(&tmp, before.permissions()));
+        drop(file);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+
+        let after = std::fs::metadata(&path)?;
+        if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Remove a deleted command from every shell history file that contains it.
 fn remove_from_disk_history(cmd_to_remove: &str) {
-    let files = candidate_history_files();
-    for path in files {
+    for path in candidate_history_files() {
         if !path.exists() {
             continue;
         }
-        let content = match std::fs::read(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let text = String::from_utf8_lossy(&content);
-        let mut new_lines = Vec::new();
-        let mut removed = false;
-
-        for line in text.lines() {
-            let raw_cmd = if line.starts_with(": ") {
-                if let Some(pos) = line.find(';') {
-                    line[pos + 1..].trim()
-                } else {
-                    line.trim()
-                }
-            } else {
-                line.trim()
-            };
-            if raw_cmd == cmd_to_remove {
-                removed = true;
-                continue; // omit line
-            }
-            new_lines.push(line);
-        }
-
-        if removed {
-            if let Ok(mut file) = File::create(&path) {
-                for line in new_lines {
-                    let _ = writeln!(file, "{}", line);
-                }
-            }
+        if let Err(e) = remove_command_from_file(&path, cmd_to_remove) {
+            eprintln!("laplace: failed to update history file {path:?}: {e}");
         }
     }
 }
@@ -1132,6 +1217,68 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], "git status");
         assert_eq!(out[1], "cargo check");
+    }
+
+    fn temp_history(name: &str, content: &[u8]) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("laplace_hist_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, content).expect("write temp hist");
+        path
+    }
+
+    #[test]
+    fn zsh_metafied_entries_decode_and_survive_removal() {
+        // "ăn" = C4 83 6E, stored metafied by zsh as C4 83 A3 6E.
+        let content = b": 1:0;echo \xC4\x83\xA3n\n: 2:0;git status\n: 3:0;ls\n";
+        let path = temp_history(".zsh_history", content);
+
+        let mut out = Vec::new();
+        parse_history_file(&path, &mut out);
+        assert_eq!(out, vec!["ls", "git status", "echo ăn"]);
+
+        assert!(remove_command_from_file(&path, "git status").expect("remove"));
+        assert_eq!(std::fs::read(&path).unwrap(), b": 1:0;echo \xC4\x83\xA3n\n: 3:0;ls\n");
+
+        assert!(remove_command_from_file(&path, "echo ăn").expect("remove unicode"));
+        assert_eq!(std::fs::read(&path).unwrap(), b": 3:0;ls\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn removal_drops_whole_multiline_entry() {
+        let content = b": 1:0;git commit -m \\\n  \"multi\"\n: 2:0;ls\n";
+        let path = temp_history(".zsh_history", content);
+        assert!(remove_command_from_file(&path, "git commit -m \n  \"multi\"").expect("remove"));
+        assert_eq!(std::fs::read(&path).unwrap(), b": 2:0;ls\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn removal_drops_bash_timestamp_and_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_history(".bash_history", b"#100\ncargo check\n#200\ngit status\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(remove_command_from_file(&path, "cargo check").expect("remove"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"#200\ngit status\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!remove_command_from_file(&path, "not there").expect("no-op"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn removal_drops_fish_block() {
+        let content = b"- cmd: ls\n  when: 1\n- cmd: echo a\\nb\n  when: 2\n  paths:\n    - b\n";
+        let path = temp_history("fish_history", content);
+        let mut out = Vec::new();
+        parse_history_file(&path, &mut out);
+        assert_eq!(out, vec!["echo a\nb", "ls"]);
+        assert!(remove_command_from_file(&path, "echo a\nb").expect("remove"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"- cmd: ls\n  when: 1\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
