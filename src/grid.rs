@@ -509,7 +509,7 @@ impl Grid {
         if target_col > cmd_start
             && target_col < self.cols
             && r[target_col].codepoint == 0
-            && char::from_u32(r[target_col - 1].codepoint).is_some_and(|c| char_width(c) == 2)
+            && is_wide_cp(r[target_col - 1].codepoint)
         {
             target_col -= 1;
         }
@@ -952,7 +952,7 @@ impl Grid {
         // Step back over the placeholder half of a double-width character.
         let col = if r[col].codepoint == 0
             && col > 0
-            && char::from_u32(r[col - 1].codepoint).is_some_and(|c| char_width(c) == 2)
+            && is_wide_cp(r[col - 1].codepoint)
         {
             col - 1
         } else {
@@ -1249,7 +1249,7 @@ impl Grid {
             let mut i = 0;
             while i < line.len() {
                 let cell = line[i];
-                let w = if char::from_u32(cell.codepoint).is_some_and(|c| char_width(c) == 2) { 2.min(cols) } else { 1 };
+                let w = if is_wide_cp(cell.codepoint) { 2.min(cols) } else { 1 };
                 if col + w > cols {
                     *out_wrapped.last_mut().unwrap() = true;
                     out.resize(out.len() + cols, Cell::default());
@@ -1425,6 +1425,16 @@ pub fn char_width(c: char) -> usize {
     c.width().unwrap_or(0).min(2)
 }
 
+/// Smallest codepoint `char_width` reports as double-width (Hangul Jamo).
+const FIRST_WIDE: u32 = 0x1100;
+
+/// Whether a cell's codepoint is a double-width character. Called for every
+/// printed character, so ASCII and other narrow text skip the width tables.
+#[inline]
+fn is_wide_cp(cp: u32) -> bool {
+    cp >= FIRST_WIDE && char::from_u32(cp).is_some_and(|c| char_width(c) == 2)
+}
+
 /// Extract the path from an OSC 7 payload (`file://host/percent%20encoded/path`).
 fn parse_osc7_path(payload: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(payload).ok()?;
@@ -1544,11 +1554,11 @@ impl Perform for Grid {
                 r.copy_within(col..cols - w, col + w);
             }
             // Never leave half of a double-width character behind.
-            if col > 0 && r[col].codepoint == 0 && char::from_u32(r[col - 1].codepoint).is_some_and(|p| char_width(p) == 2) {
+            if col > 0 && r[col].codepoint == 0 && is_wide_cp(r[col - 1].codepoint) {
                 r[col - 1] = blank;
             }
             let last = col + w - 1;
-            if last + 1 < cols && char::from_u32(r[last].codepoint).is_some_and(|p| char_width(p) == 2) {
+            if last + 1 < cols && is_wide_cp(r[last].codepoint) {
                 r[last + 1] = blank;
             }
             r[col] = Cell { codepoint: c as u32, fg, bg };
@@ -2074,6 +2084,14 @@ mod tests {
         feed(&mut g, "\x1b]133;A\x07my-prompt>>\x1b]133;B\x07ls -la");
         assert_eq!(g.current_prompt_input(), "ls -la");
         assert_eq!(g.prompt_command_range().0, 11);
+    }
+
+    #[test]
+    fn is_wide_cp_matches_char_width_for_every_codepoint() {
+        for cp in 0..=0x10FFFF {
+            let expected = char::from_u32(cp).is_some_and(|c| char_width(c) == 2);
+            assert_eq!(is_wide_cp(cp), expected, "U+{cp:04X}");
+        }
     }
 
     #[test]
