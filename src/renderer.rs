@@ -806,7 +806,7 @@ impl Renderer {
             if avail == 0 {
                 continue;
             }
-            let chars: Vec<char> = title.chars().collect();
+            let chars: Vec<char> = tab_label(title).chars().collect();
             let display: Vec<char> = if chars.len() <= avail {
                 chars
             } else if avail > 1 {
@@ -1179,8 +1179,36 @@ impl Renderer {
 
 fn make_bind_group(
     device: &wgpu::Device,
+/// Tab bar label for a window title: drops a leading `user@host:` (or `user:`)
+/// prompt prefix so narrow tabs show only the path. The window title keeps the
+/// full string.
+fn tab_label(title: &str) -> &str {
+    if let Some((prefix, rest)) = title.split_once(':') {
+        if !prefix.is_empty()
+            && !prefix.chars().any(char::is_whitespace)
+            && (rest.starts_with('~') || (rest.starts_with('/') && !rest.starts_with("//")))
+        {
+            return rest;
+        }
+    }
+    title
+}
+
     bgl: &wgpu::BindGroupLayout,
     uniform_buf: &wgpu::Buffer,
+    use super::tab_label;
+
+    #[test]
+    fn test_tab_label_strips_user_host_prefix() {
+        assert_eq!(tab_label("linh@mac:~/Desktop/personal/fastdb"), "~/Desktop/personal/fastdb");
+        assert_eq!(tab_label("linh:~/src"), "~/src");
+        assert_eq!(tab_label("root@box:/etc [Z]"), "/etc [Z]");
+        assert_eq!(tab_label("~/src"), "~/src");
+        assert_eq!(tab_label("vim: notes.md"), "vim: notes.md");
+        assert_eq!(tab_label("shell"), "shell");
+        assert_eq!(tab_label("http://x"), "http://x");
+    }
+
     atlas: &Atlas,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
