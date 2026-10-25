@@ -24,6 +24,7 @@
 - **Built-in CLI History Search:** Press `Ctrl+R` (or `Cmd+R` on macOS, `Super+R` on Linux) to open a zero-latency fuzzy history search popup with character-level match highlighting. Press `Enter` to run, `Tab` to insert into the prompt for editing, and `Esc` to close. Preserves `Ctrl+R` redo inside vim/nano!
 - **Click-to-Position Cursor:** Click anywhere on the active command line to immediately move the shell cursor to that character, with automatic alignment for wide Unicode glyphs, CJK characters, and multi-byte prompt symbols (`❯`, `🦀`, emojis).
 - **Ergonomic Line & Word Editing:** Out-of-the-box support for word jumping (`Option+Left/Right` on macOS without interfering with Mission Control Spaces, `Ctrl+Left/Right` on Linux), prompt-aware deletion before cursor (`Ctrl+U`), delete to line end (`Ctrl+K`), and instant scrollback clear (`Cmd+K` / `Ctrl+Shift+K`).
+- **Full-Screen App & Unicode Support:** Mouse reporting (X10/SGR, click, drag and motion tracking) for vim, tmux and htop; focus events; alternate scroll in `less`/`man`; IME input (Vietnamese Telex/VNI, CJK); combining-mark composition; double-width CJK/emoji glyphs; bold/italic text; reflow of wrapped lines on resize; synchronized output; OSC 7 (cwd), OSC 52 (set clipboard) and OSC 133 (prompt marks).
 - **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and built-in palettes.
 
 ---
@@ -101,6 +102,7 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 | **Reload config file** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Live reload without losing shell session |
 | **Open URL or path** | <kbd>Cmd</kbd> + <kbd>Click</kbd> | <kbd>Ctrl</kbd> + <kbd>Click</kbd> *(or <kbd>Super</kbd> + <kbd>Click</kbd>)* | Opens in default browser / editor via `open` or `xdg-open` |
 | **Hover URL preview** | <kbd>Cmd</kbd> + <kbd>Mouse Move</kbd> | <kbd>Ctrl</kbd> + <kbd>Mouse Move</kbd> *(or <kbd>Super</kbd>)* | Underlines URL and displays preview pill |
+| **Select text in mouse apps** | <kbd>Shift</kbd> + <kbd>Drag</kbd> | <kbd>Shift</kbd> + <kbd>Drag</kbd> | Bypasses mouse reporting in vim/tmux/htop to select and copy locally |
 | **Click to position cursor** | <kbd>Mouse Left Click</kbd> | <kbd>Mouse Left Click</kbd> | Repositions cursor to clicked character on active command line (Unicode & wide-char aligned) |
 | **Jump word backward / forward** | <kbd>Option</kbd> + <kbd>←</kbd> / <kbd>→</kbd> | <kbd>Ctrl</kbd> + <kbd>←</kbd> / <kbd>→</kbd> *(or <kbd>Alt</kbd> + Arrows)* | Jumps cursor backward/forward by word (`\x1bb` / `\x1bf`). On macOS, strictly `Option+Arrows` to avoid Mission Control Spaces collision |
 | **Delete before cursor** | <kbd>Ctrl</kbd> + <kbd>U</kbd> | <kbd>Ctrl</kbd> + <kbd>U</kbd> | Prompt-aware deletion from prompt to cursor (preserves prompt & text after cursor; preserves Vim scroll in alt screen) |
