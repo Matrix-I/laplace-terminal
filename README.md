@@ -22,6 +22,8 @@
 - **Ghostty-Style Splits / Panes:** Split any tab horizontally or vertically (`Cmd+D` / `Cmd+Shift+D` on macOS, `Ctrl+Shift+D` / `Ctrl+Shift+E` on Linux). Seamlessly navigate between panes (`Cmd+Option+Arrows` / `Cmd+[` / `Cmd+]`), resize splits (`Cmd+Ctrl+Arrows`), toggle zoom (`Cmd+Shift+Enter`), or equalize ratios (`Cmd+Option+=`). Renders sleek hairline divider borders with zero overhead in the same single GPU instanced draw call.
 - **Smart Hyperlink & Path Detection:** `Cmd+Click` (macOS) / `Ctrl+Click` (Linux) on URLs or local filesystem paths (`~/...`, `./...`, or absolute paths) to open them directly in your default browser or editor.
 - **Built-in CLI History Search:** Press `Ctrl+R` (or `Cmd+R` on macOS, `Super+R` on Linux) to open a zero-latency fuzzy history search popup with character-level match highlighting. Press `Enter` to run, `Tab` to insert into the prompt for editing, and `Esc` to close. Preserves `Ctrl+R` redo inside vim/nano!
+- **Click-to-Position Cursor:** Click anywhere on the active command line to immediately move the shell cursor to that character, with automatic alignment for wide Unicode glyphs, CJK characters, and multi-byte prompt symbols (`❯`, `🦀`, emojis).
+- **Ergonomic Line & Word Editing:** Out-of-the-box support for word jumping (`Option+Left/Right` on macOS without interfering with Mission Control Spaces, `Ctrl+Left/Right` on Linux), prompt-aware deletion before cursor (`Ctrl+U`), delete to line end (`Ctrl+K`), and instant scrollback clear (`Cmd+K` / `Ctrl+Shift+K`).
 - **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and built-in palettes.
 
 ---
@@ -99,6 +101,11 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 | **Reload config file** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Live reload without losing shell session |
 | **Open URL or path** | <kbd>Cmd</kbd> + <kbd>Click</kbd> | <kbd>Ctrl</kbd> + <kbd>Click</kbd> *(or <kbd>Super</kbd> + <kbd>Click</kbd>)* | Opens in default browser / editor via `open` or `xdg-open` |
 | **Hover URL preview** | <kbd>Cmd</kbd> + <kbd>Mouse Move</kbd> | <kbd>Ctrl</kbd> + <kbd>Mouse Move</kbd> *(or <kbd>Super</kbd>)* | Underlines URL and displays preview pill |
+| **Click to position cursor** | <kbd>Mouse Left Click</kbd> | <kbd>Mouse Left Click</kbd> | Repositions cursor to clicked character on active command line (Unicode & wide-char aligned) |
+| **Jump word backward / forward** | <kbd>Option</kbd> + <kbd>←</kbd> / <kbd>→</kbd> | <kbd>Ctrl</kbd> + <kbd>←</kbd> / <kbd>→</kbd> *(or <kbd>Alt</kbd> + Arrows)* | Jumps cursor backward/forward by word (`\x1bb` / `\x1bf`). On macOS, strictly `Option+Arrows` to avoid Mission Control Spaces collision |
+| **Delete before cursor** | <kbd>Ctrl</kbd> + <kbd>U</kbd> | <kbd>Ctrl</kbd> + <kbd>U</kbd> | Prompt-aware deletion from prompt to cursor (preserves prompt & text after cursor; preserves Vim scroll in alt screen) |
+| **Delete after cursor** | <kbd>Ctrl</kbd> + <kbd>K</kbd> | <kbd>Ctrl</kbd> + <kbd>K</kbd> | Deletes all text from cursor to end of command line (`kill-line`) |
+| **Clear screen & scrollback** | <kbd>Cmd</kbd> + <kbd>K</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>K</kbd> | Clears scrollback history buffer and redraws prompt at top (matches Terminal.app / iTerm2 / Ghostty) |
 | **CLI History Search** | <kbd>Ctrl</kbd> + <kbd>R</kbd> *(or <kbd>Cmd</kbd> + <kbd>R</kbd>)* | <kbd>Ctrl</kbd> + <kbd>R</kbd> *(or <kbd>Super</kbd> + <kbd>R</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>)* | Built-in fuzzy history search; `Enter`: execute, `Tab`: insert, `Esc`: close; preserves vim redo |
 | **Scroll history locally** | <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | <kbd>Shift</kbd> + <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | Scrolls active tab's scrollback buffer |
 
