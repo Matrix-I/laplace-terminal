@@ -2170,6 +2170,8 @@ fn handle_key(
         Key::Named(NamedKey::Space) => {
             if ctrl { b"\x00" } else if alt { b"\x1b " } else { b" " }
         }
+        Key::Named(NamedKey::ArrowLeft) if !shift && !super_key && (alt ^ ctrl) => b"\x1bb",
+        Key::Named(NamedKey::ArrowRight) if !shift && !super_key && (alt ^ ctrl) => b"\x1bf",
         Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::Home | NamedKey::End)) => {
             let code = match k {
                 NamedKey::ArrowUp => b'A',

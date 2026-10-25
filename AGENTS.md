@@ -40,6 +40,9 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **CLI History Search** | `Ctrl + R` *(or `Cmd + R`)* | `Ctrl + R` *(or `Super + R` / `Ctrl + Shift + R`)* | Zero-latency fuzzy history search; preserves vim redo in alternate screen. |
 | **Split Pane Right (Vertical)** | `Cmd + D` | `Ctrl + Shift + D` *(or `Super + D`)* | Splits active pane vertically with hairline divider. |
 | **Split Pane Down (Horizontal)** | `Cmd + Shift + D` | `Ctrl + Shift + E` / `Super + Shift + D` / `Ctrl + Alt + D` | Splits active pane horizontally. |
+| **Delete Before Cursor** | `Cmd + Backspace` | `Ctrl + Shift + Backspace` *(or `Super + Backspace`)* | Deletes all text from prompt to cursor (preserves prompt & text after cursor). |
+| **Delete After Cursor** | `Cmd + Delete` / `Cmd + K` | `Ctrl + Shift + Delete` / `Ctrl + Shift + K` *(or `Super + Delete/K`)* | Deletes all text from cursor to end of command line (`kill-line`). |
+| **Jump Word Backward / Forward** | `Option + Left / Right` *(or `Ctrl + Left / Right`)* | `Ctrl + Left / Right` *(or `Alt + Left / Right`)* | Jumps cursor backward/forward by word (`\x1bb` / `\x1bf`). |
 | **Toggle Split Zoom** | `Cmd + Shift + Enter` | `Ctrl + Shift + Enter` *(or `Super + Shift + Enter`)* | Zooms active split to full tab size and back. |
 | **Equalize Splits** | `Cmd + Option + =` / `Cmd + Ctrl + =` | `Ctrl + Alt + =` *(or `Super + Alt + =`)* | Balances split ratios evenly across pane tree. |
 | **Navigate Splits / Tabs** | `Cmd + Arrows` *(or `Cmd + Option + Arrows`)* | `Ctrl + Alt + Arrows` *(or `Super + Arrows`)* | Directional spatial navigation between splits (cycles tabs at edges). |
