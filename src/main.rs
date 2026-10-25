@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -153,6 +153,10 @@ struct State {
     focused: bool,
     history_search: HistorySearch,
     first_frame: bool,
+    /// IME composition in progress (Telex, Pinyin, ...); keys belong to the IME while non-empty.
+    ime_preedit: String,
+    /// Last cursor cell reported to the IME for candidate window placement.
+    ime_cursor_cell: Option<(usize, usize)>,
 }
 
 struct App {
@@ -185,6 +189,8 @@ impl ApplicationHandler<AppEvent> for App {
             .with_transparent(cfg.background_opacity < 1.0)
             .with_inner_size(LogicalSize::new(960.0, 600.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        // Composed input (Vietnamese Telex/VNI, CJK) arrives as `WindowEvent::Ime`.
+        window.set_ime_allowed(true);
 
         #[cfg(target_os = "macos")]
         {
@@ -262,6 +268,8 @@ impl ApplicationHandler<AppEvent> for App {
             focused: true,
             history_search: HistorySearch::new(),
             first_frame: true,
+            ime_preedit: String::new(),
+            ime_cursor_cell: None,
         });
 
         #[cfg(target_os = "macos")]
@@ -722,8 +730,12 @@ impl ApplicationHandler<AppEvent> for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                handle_key(s, &event, event_loop, &self.proxy, &self.wakeup_queued);
+                if s.ime_preedit.is_empty() {
+                    handle_key(s, &event, event_loop, &self.proxy, &self.wakeup_queued);
+                }
             }
+
+            WindowEvent::Ime(ime) => handle_ime(s, ime),
 
             WindowEvent::Focused(focused) => {
                 s.focused = focused;
@@ -979,7 +991,22 @@ fn render_active(s: &mut State) {
         hovered_link,
         blink_on,
         Some(&s.history_search),
+        &s.ime_preedit,
     );
+
+    // Keep the IME candidate window next to the text cursor.
+    let cursor_cell = render_panes.iter().find(|p| p.is_active).and_then(|p| {
+        let (cx, cy) = p.grid.lock().cursor_pos()?;
+        Some((p.rect.row + cy, p.rect.col + cx))
+    });
+    if cursor_cell.is_some() && cursor_cell != s.ime_cursor_cell {
+        s.ime_cursor_cell = cursor_cell;
+        if let Some((row, col)) = cursor_cell {
+            let (x, y) = s.renderer.cell_origin_px(row, col, show_tabs);
+            let (cw, ch) = s.renderer.cell_size();
+            s.window.set_ime_cursor_area(PhysicalPosition::new(x, y), PhysicalSize::new(cw, ch));
+        }
+    }
 
     if s.first_frame {
         s.first_frame = false;
@@ -1053,6 +1080,43 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
 
         if let Err(e) = res {
             eprintln!("laplace: failed to open URL {target}: {e}");
+        }
+    }
+}
+
+fn handle_ime(s: &mut State, ime: Ime) {
+    match ime {
+        Ime::Preedit(text, _) => {
+            if s.ime_preedit != text {
+                s.ime_preedit = text;
+                s.cursor_blink_epoch = std::time::Instant::now();
+                s.window.request_redraw();
+            }
+        }
+        Ime::Commit(text) => {
+            s.ime_preedit.clear();
+            if s.tabs.is_empty() || text.is_empty() {
+                return;
+            }
+            if s.history_search.is_open {
+                for c in text.chars() {
+                    s.history_search.append_char(c);
+                }
+                s.renderer.invalidate();
+            } else {
+                let pane = s.tabs[s.active].active_pane();
+                pane.grid.lock().reset_display();
+                pane.pty.write(text.as_bytes());
+            }
+            s.cursor_blink_epoch = std::time::Instant::now();
+            s.window.request_redraw();
+        }
+        Ime::Enabled => {}
+        Ime::Disabled => {
+            if !s.ime_preedit.is_empty() {
+                s.ime_preedit.clear();
+                s.window.request_redraw();
+            }
         }
     }
 }

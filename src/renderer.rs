@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet};
-use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink};
+use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink, BG_UNDERLINE};
 use crate::history::HistorySearch;
 use crate::split::PaneRect;
 
@@ -74,6 +74,8 @@ pub struct Renderer {
     last_cursor_visible: bool,
     /// Hovered link and the id of the pane it belongs to.
     last_hovered_link: Option<(u64, Hyperlink)>,
+    /// IME composition text drawn at the cursor on the last frame.
+    last_preedit: String,
 }
 
 impl Renderer {
@@ -247,6 +249,7 @@ impl Renderer {
             last_cursor: None,
             last_cursor_visible: true,
             last_hovered_link: None,
+            last_preedit: String::new(),
         }
     }
 }
@@ -361,6 +364,15 @@ impl Renderer {
         Some(TabBarAction::Select(tab_i.min(n - 1)))
     }
 
+    /// Physical pixel position of the top-left corner of terminal cell `(row, col)`
+    /// (the inverse of [`Renderer::pixel_to_cell`]).
+    pub fn cell_origin_px(&self, row: usize, col: usize, show_tab_bar: bool) -> (f64, f64) {
+        let top_y = if show_tab_bar { self.pad + self.atlas.cell_h * 2 } else { self.pad };
+        let x = self.pad as f64 + (col as u32 * self.atlas.cell_w) as f64;
+        let y = top_y as f64 + (row as u32 * self.atlas.cell_h) as f64;
+        (x, y)
+    }
+
     /// Map a physical window cursor position `(x_px, y_px)` to a terminal grid
     /// cell `(row, col)`. Returns `None` if the cursor is inside the tab bar.
     pub fn pixel_to_cell(
@@ -396,9 +408,16 @@ impl Renderer {
         hovered_link: Option<(u64, &Hyperlink)>,
         cursor_blink_on: bool,
         history_search: Option<&HistorySearch>,
+        preedit: &str,
     ) {
         if panes.is_empty() {
             return;
+        }
+        if self.last_preedit != preedit {
+            // Repaint the cells the previous composition covered.
+            self.force_full = true;
+            self.last_preedit.clear();
+            self.last_preedit.push_str(preedit);
         }
         let top_rows = usize::from(tab_bar.is_some());
         if self.last_hovered_link.as_ref().map(|(id, l)| (*id, l)) != hovered_link {
@@ -572,6 +591,32 @@ impl Renderer {
             hi = hi.max(preview_row);
         }
 
+        // IME composition (e.g. Telex / Pinyin preedit): underlined text at the cursor,
+        // with the cursor moved to the end of the composition.
+        let mut cursor = active_cur;
+        if let (false, Some((cx, cy))) = (preedit.is_empty(), active_cur) {
+            let row_start = cy * cols;
+            let mut col = cx;
+            for ch in preedit.chars() {
+                let w = char_width(ch);
+                if w == 0 {
+                    continue;
+                }
+                if col + w > cols {
+                    break;
+                }
+                let (left, right) = self.atlas.glyph_slots(&self.queue, ch as u32, w);
+                self.instances[row_start + col] = Instance { glyph: left as u32, fg: 0, bg: BG_UNDERLINE };
+                if w == 2 {
+                    self.instances[row_start + col + 1] = Instance { glyph: right as u32, fg: 0, bg: BG_UNDERLINE };
+                }
+                col += w;
+            }
+            cursor = Some((col.min(cols - 1), cy));
+            lo = lo.min(cy);
+            hi = hi.max(cy);
+        }
+
         if let Some(search) = history_search {
             if search.is_open {
                 self.build_history_popup(cols, total_rows, search, &mut lo, &mut hi);
@@ -587,7 +632,7 @@ impl Renderer {
                 bytemuck::cast_slice(&self.instances[a..b]),
             );
         }
-        let (cx, cy) = active_cur.unwrap_or((0, 0));
+        let (cx, cy) = cursor.unwrap_or((0, 0));
         let tab_info = match tab_bar {
             Some((titles, active_idx)) => ((active_idx as u32) << 16) | (titles.len() as u32 & 0xFFFF),
             None => 0,
