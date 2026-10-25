@@ -256,12 +256,9 @@ impl Pty {
                     }
 
                     let mut chunk_len = n as usize;
-                    let mut total_bytes = 0usize;
                     let batch_start = std::time::Instant::now();
-                    let mut was_bracketed = grid.lock().bracketed_paste;
                     loop {
-                        total_bytes += chunk_len;
-                        let (sync_active, now_bracketed) = {
+                        let sync_active = {
                             let mut g = grid.lock();
                             for &b in &buf[..chunk_len] {
                                 parser.advance(&mut *g, b);
@@ -269,33 +266,22 @@ impl Pty {
                             if !g.response.is_empty() {
                                 std::mem::swap(&mut g.response, &mut reply);
                             }
-                            (g.sync_output, g.bracketed_paste)
+                            g.sync_output
                         };
-                        if now_bracketed {
-                            was_bracketed = true;
-                        }
                         if !reply.is_empty() {
                             // Same queue as keyboard input, so replies never interleave with a paste.
                             let _ = tx.send(std::mem::take(&mut reply));
                         }
 
-                        // When the user presses Enter at a prompt, zsh turns off bracketed paste
-                        // (`\x1b[?2004l`), emits `PROMPT_SP` (`%\r \r\x1b[J`, < 512 bytes), runs
-                        // prompt git status (~25-35ms), and then emits the prompt + `\x1b[?2004h`.
-                        // Waiting up to 40ms for the prompt to arrive avoids rendering an
-                        // intermediate blank-line jump before the prompt appears.
-                        let awaiting_prompt = was_bracketed && !now_bracketed && total_bytes < 512;
-                        let max_batch_ms = if sync_active || awaiting_prompt { 45 } else { 3 };
+                        // Never hold output back waiting for the next prompt: prompt themes take
+                        // anywhere from a few ms to hundreds (e.g. git status), and holding the
+                        // newline after Enter until then makes typing feel uneven. Only an
+                        // application's synchronized-output frame (DECSET 2026) is waited for.
+                        let max_batch_ms = if sync_active { 45 } else { 3 };
                         if batch_start.elapsed().as_millis() >= max_batch_ms {
                             break;
                         }
-                        let wait_ms = if awaiting_prompt {
-                            40
-                        } else if sync_active {
-                            6
-                        } else {
-                            0
-                        };
+                        let wait_ms = if sync_active { 6 } else { 0 };
                         let mut pfd = libc::pollfd { fd: raw, events: libc::POLLIN, revents: 0 };
                         let pr = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
                         if pr <= 0 || (pfd.revents & libc::POLLIN) == 0 {
@@ -480,6 +466,44 @@ mod tests {
         let r = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
         assert_eq!(r, -1);
         drop(pty);
+    }
+
+    #[test]
+    fn output_after_enter_is_not_held_back_waiting_for_the_prompt() {
+        let pty = Pty::spawn_in(80, 24, 8, 16, None, None).expect("spawn pty");
+        let grid = Arc::new(Mutex::new(Grid::new(80, 24)));
+        let screen = |g: &Grid| -> String {
+            let row = |r: usize| -> String { g.display_row(r).iter().map(|c| char::from_u32(c.codepoint).filter(|&c| c != '\0').unwrap_or(' ')).collect() };
+            (0..24).map(|r| row(r).trim_end().to_string()).collect::<Vec<_>>().join("\n")
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let notify_grid = grid.clone();
+        pty.spawn_reader(grid, move || {
+            let _ = tx.send(screen(&notify_grid.lock()));
+        }, || {})
+        .expect("spawn reader");
+
+        // Let the shell finish starting up before typing.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        while rx.try_recv().is_ok() {}
+        // Like zsh after Enter: bracketed paste goes off, a newline is echoed, and the
+        // prompt follows once its precmd finishes (10ms here; agnoster's git status
+        // takes 40-200ms). `%s%s` keeps the markers out of the echoed command line.
+        pty.write(b"printf '\\033[?2004h'; sleep 0.3; printf '\\033[?2004l\\r\\n%s%s' AF TER; sleep 0.01; printf '%s%s' PRO MPT\r");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut frames = Vec::new();
+        while let Ok(text) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            let done = text.contains("PROMPT");
+            frames.push(text);
+            if done {
+                break;
+            }
+        }
+        assert!(frames.last().is_some_and(|t| t.contains("PROMPT")), "prompt never arrived");
+        assert!(
+            frames.iter().any(|t| t.contains("AFTER") && !t.contains("PROMPT")),
+            "the newline after Enter was only shown together with the prompt"
+        );
     }
 
     #[test]
