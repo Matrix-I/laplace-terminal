@@ -270,30 +270,173 @@ impl Grid {
 
     /// Extract text typed by user on the active prompt line (before the cursor).
     pub fn current_prompt_input(&self) -> String {
-        if self.cur.row >= self.rows {
+        if self.cur.row >= self.rows || self.cols == 0 {
             return String::new();
         }
-        let row = self.display_row(self.cur.row);
-        let end_col = self.cur.col.min(row.len());
-        let raw: String = row[..end_col]
+        let (cmd_start, _) = self.prompt_command_range();
+        let r = self.display_row(self.cur.row);
+        let end_col = self.cur.col.min(r.len());
+        if cmd_start >= end_col {
+            return String::new();
+        }
+        r[cmd_start..end_col]
             .iter()
-            .map(|c| char::from_u32(c.codepoint).unwrap_or(' '))
-            .collect();
-        let s = raw.trim_end();
-        const PROMPT_SIGNS: &[&str] = &["❯ ", "➜ ", "% ", "$ ", "# ", "> ", ": "];
-        let mut last_sign_end = None;
-        for sign in PROMPT_SIGNS {
-            if let Some(pos) = s.rfind(sign) {
-                let end = pos + sign.len();
-                if last_sign_end.map_or(true, |cur| end > cur) {
-                    last_sign_end = Some(end);
+            .filter_map(|c| if c.codepoint != 0 { char::from_u32(c.codepoint) } else { None })
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    /// Returns the column range `(cmd_start_col, cmd_end_col)` for the active command line on `self.cur.row`.
+    pub fn prompt_command_range(&self) -> (usize, usize) {
+        if self.cur.row >= self.rows || self.cols == 0 {
+            return (0, 0);
+        }
+        let r = self.display_row(self.cur.row);
+        let cur_col = self.cur.col.min(self.cols);
+
+        // 1. Check for Powerline segment separator U+E0B0 ('') before or at cursor
+        let mut pl_end = None;
+        if let Some(last_pl) = r.iter().take(cur_col + 1).rposition(|c| c.codepoint == 0xE0B0) {
+            let mut sc = last_pl + 1;
+            while sc < self.cols && Self::is_blank(r[sc].codepoint) {
+                sc += 1;
+            }
+            if sc < self.cols
+                && matches!(
+                    char::from_u32(r[sc].codepoint),
+                    Some('$' | '%' | '#' | '❯' | '>' | '➜')
+                )
+            {
+                sc += 1;
+                while sc < self.cols && Self::is_blank(r[sc].codepoint) {
+                    sc += 1;
+                }
+            }
+            pl_end = Some(sc.min(cur_col));
+        }
+
+        // 2. Search for standard prompt signs using exact column-level matching
+        let mut sign_end = None;
+        const PROMPT_SIGNS: &[&[char]] = &[
+            &['❯', ' '],
+            &['➜', ' '],
+            &['%', ' '],
+            &['$', ' '],
+            &['#', ' '],
+            &['>', ' '],
+            &[':', ' '],
+            &['λ', ' '],
+            &['»', ' '],
+            &['›', ' '],
+            &['>', '>', '>', ' '],
+        ];
+
+        let search_limit = (cur_col + 1).min(r.len());
+        for &sign in PROMPT_SIGNS {
+            let sign_len = sign.len();
+            if search_limit >= sign_len {
+                for i in (0..=search_limit - sign_len).rev() {
+                    let matches = sign.iter().enumerate().all(|(k, &ch)| {
+                        r[i + k].codepoint == ch as u32
+                    });
+                    if matches {
+                        let end = i + sign_len;
+                        if sign_end.map_or(true, |cur| end > cur) {
+                            sign_end = Some(end);
+                        }
+                        break;
+                    }
                 }
             }
         }
-        if let Some(pos) = last_sign_end {
-            s[pos..].trim().to_string()
+
+        if sign_end.is_none() {
+            for &sym in &['❯', '➜', '%', '$', '#', '>', 'λ', '»', '›'] {
+                if let Some(pos) = r[..search_limit].iter().rposition(|c| c.codepoint == sym as u32) {
+                    let end = pos + 1;
+                    if end <= cur_col {
+                        let mut sc = end;
+                        while sc < self.cols && Self::is_blank(r[sc].codepoint) {
+                            sc += 1;
+                        }
+                        sign_end = Some(sc.min(cur_col));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let cmd_start = pl_end.or(sign_end).unwrap_or(0).min(cur_col);
+
+        let last_non_blank = r[cmd_start..]
+            .iter()
+            .rposition(|c| !Self::is_blank(c.codepoint))
+            .map(|idx| cmd_start + idx + 1)
+            .unwrap_or(cmd_start);
+
+        let cmd_end = last_non_blank.max(cur_col).min(self.cols);
+        (cmd_start, cmd_end)
+    }
+
+    /// Calculate the arrow-key escape sequences needed to move the shell cursor to `(pane_row, pane_col)`.
+    /// Returns `None` if the click is outside the active command prompt line or no movement is needed.
+    pub fn calculate_cursor_movement_to(&self, pane_row: usize, pane_col: usize) -> Option<Vec<u8>> {
+        if self.alt_active || self.display_offset != 0 {
+            return None;
+        }
+        if pane_row != self.cur.row || self.cur.row >= self.rows || self.cols == 0 {
+            return None;
+        }
+
+        let r = self.display_row(self.cur.row);
+        let cur_col = self.cur.col.min(self.cols);
+        let (cmd_start, cmd_end) = self.prompt_command_range();
+
+        let mut target_col = pane_col.clamp(cmd_start, cmd_end);
+
+        // If target_col lands on a wide-character dummy cell (codepoint == 0 following a width-2 character), snap to character start
+        if target_col > cmd_start
+            && target_col < self.cols
+            && r[target_col].codepoint == 0
+            && char::from_u32(r[target_col - 1].codepoint).map_or(false, |c| char_width(c) == 2)
+        {
+            target_col -= 1;
+        }
+
+        if target_col == cur_col {
+            return None;
+        }
+
+        let seq_left = if self.app_cursor { b"\x1bOD" } else { b"\x1b[D" };
+        let seq_right = if self.app_cursor { b"\x1bOC" } else { b"\x1b[C" };
+
+        if target_col < cur_col {
+            let mut count = 0;
+            for c in &r[target_col..cur_col] {
+                if c.codepoint != 0 {
+                    count += 1;
+                }
+            }
+            let count = count.max(1);
+            let mut bytes = Vec::with_capacity(count * seq_left.len());
+            for _ in 0..count {
+                bytes.extend_from_slice(seq_left);
+            }
+            Some(bytes)
         } else {
-            String::new()
+            let mut count = 0;
+            for c in &r[cur_col..target_col] {
+                if c.codepoint != 0 {
+                    count += 1;
+                }
+            }
+            let count = count.max(1);
+            let mut bytes = Vec::with_capacity(count * seq_right.len());
+            for _ in 0..count {
+                bytes.extend_from_slice(seq_right);
+            }
+            Some(bytes)
         }
     }
 
@@ -1506,5 +1649,58 @@ mod tests {
         g.resize(30, 8);
         g.scroll_display(g.history as isize);
         assert_eq!(line(&g, 0), "line 000");
+    }
+
+    #[test]
+    fn cursor_movement_on_click() {
+        let mut g = Grid::new(80, 5);
+        feed(&mut g, "$ cargo build");
+        // Prompt is "$ " (cols 0..1), command is "cargo build" (cols 2..12), cursor is at col 13
+        assert_eq!(g.cur.row, 0);
+        assert_eq!(g.cur.col, 13);
+        assert_eq!(g.prompt_command_range(), (2, 13));
+
+        // Click at col 4 (letter 'r' in cargo): moves left by 9 columns
+        let left_bytes = g.calculate_cursor_movement_to(0, 4).expect("move left");
+        assert_eq!(left_bytes, b"\x1b[D".repeat(9));
+
+        // Click before prompt at col 0: clamped to col 2 (start of command), moves left by 11
+        let clamp_left = g.calculate_cursor_movement_to(0, 0).expect("clamp to start");
+        assert_eq!(clamp_left, b"\x1b[D".repeat(11));
+
+        // Click at col 50: clamped to col 13 (end of command) -> already at col 13 -> None
+        assert!(g.calculate_cursor_movement_to(0, 50).is_none());
+
+        // Now move cursor to col 2 (start of cargo)
+        g.cur.col = 2;
+        // Click at col 8 (start of build): moves right by 6
+        let right_bytes = g.calculate_cursor_movement_to(0, 8).expect("move right");
+        assert_eq!(right_bytes, b"\x1b[C".repeat(6));
+
+        // Click on different row returns None
+        assert!(g.calculate_cursor_movement_to(1, 8).is_none());
+
+        // Alt screen active returns None
+        g.alt_active = true;
+        assert!(g.calculate_cursor_movement_to(0, 8).is_none());
+        g.alt_active = false;
+
+        // Scrolled into history returns None
+        g.display_offset = 1;
+        assert!(g.calculate_cursor_movement_to(0, 8).is_none());
+        g.display_offset = 0;
+
+        // Wide character test
+        let mut g_emoji = Grid::new(80, 5);
+        feed(&mut g_emoji, "❯ 🦀 test");
+        // "❯ " (cols 0..1), 🦀 (cols 2..3, width 2), " test" (cols 4..8), cursor at col 9
+        assert_eq!(g_emoji.cur.col, 9);
+        // Click at col 2 on 🦀: 5 characters between col 2 and 9 (test=4, space=1, 🦀=1, dummy cell skipped)
+        let emoji_click = g_emoji.calculate_cursor_movement_to(0, 2).expect("emoji move");
+        assert_eq!(emoji_click, b"\x1b[D".repeat(6));
+
+        // Click at dummy cell 3 on 🦀: snaps to col 2 and also moves 6 chars left
+        let dummy_click = g_emoji.calculate_cursor_movement_to(0, 3).expect("dummy snap");
+        assert_eq!(dummy_click, b"\x1b[D".repeat(6));
     }
 }

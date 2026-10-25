@@ -608,10 +608,25 @@ impl ApplicationHandler<AppEvent> for App {
                             s.selecting = false;
                             if s.drag_moved {
                                 if let Some(pane_id) = s.active_click_pane_id {
-                                    if let Some(pane) = s.tabs[s.active].pane(pane_id) {
+                                    if let Some(pane) = s.tabs.get(s.active).and_then(|t| t.pane(pane_id)) {
                                         let text = pane.grid.lock().selected_text();
                                         if let Some(t) = text {
                                             copy_to_clipboard(&t);
+                                        }
+                                    }
+                                }
+                            } else if s.click_count == 1 && !s.history_search.is_open {
+                                if let (Some(pane_id), Some((pane_row, pane_col))) =
+                                    (s.active_click_pane_id, s.last_click_cell)
+                                {
+                                    if let Some(pane) = s.tabs.get(s.active).and_then(|t| t.pane(pane_id)) {
+                                        let move_bytes = pane
+                                            .grid
+                                            .lock()
+                                            .calculate_cursor_movement_to(pane_row, pane_col);
+                                        if let Some(bytes) = move_bytes {
+                                            pane.pty.write(&bytes);
+                                            s.window.request_redraw();
                                         }
                                     }
                                 }
