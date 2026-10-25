@@ -17,6 +17,8 @@ parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
 pollster = "0.4"
 memmap2 = "0.9"
+unicode-width = "0.2"
+unicode-normalization = "0.1"
 
 # Phase 5: only compile the one GPU backend each platform needs (no DX12 / GL / WebGPU).
 [target.'cfg(target_os = "macos")'.dependencies]

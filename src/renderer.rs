@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet};
-use crate::grid::{default_bg, default_fg, Grid, Hyperlink};
+use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink};
 use crate::history::HistorySearch;
 use crate::split::PaneRect;
 
@@ -717,8 +717,20 @@ impl Renderer {
                     && ar.col + ar.cols > rect.col
             });
 
+        // Right half of a double-width glyph, drawn in the placeholder cell after it.
+        let mut wide_right: Option<u16> = None;
         for (col, (dst, cell)) in out.iter_mut().zip(row).enumerate() {
-            let slot = self.atlas.slot(&self.queue, cell.codepoint);
+            let slot = match (cell.codepoint, wide_right.take()) {
+                (0, Some(right)) => right,
+                (cp, _) => {
+                    let width = char::from_u32(cp).map_or(1, char_width);
+                    let (left, right) = self.atlas.glyph_slots(&self.queue, cp, width);
+                    if width == 2 {
+                        wide_right = Some(right);
+                    }
+                    left
+                }
+            };
             let underline_flag = if is_link_row {
                 if let Some(l) = hovered_link {
                     if col >= l.start_col && col <= l.end_col { 1u32 } else { 0u32 }

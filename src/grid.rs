@@ -845,6 +845,35 @@ impl Grid {
     // Primitive edits (all in place, no allocation)
     // ------------------------------------------------------------------
 
+    /// Fold a combining mark (e.g. the NFD accents in "Việt") into the previously
+    /// printed character when a precomposed form exists. Marks with no precomposed
+    /// form are dropped, as before, since a cell holds a single codepoint.
+    fn combine_with_previous(&mut self, mark: char) {
+        let row = self.cur.row;
+        let col = if self.wrap_pending {
+            self.cur.col
+        } else if self.cur.col > 0 {
+            self.cur.col - 1
+        } else {
+            return;
+        };
+        let r = self.row_mut(row);
+        // Step back over the placeholder half of a double-width character.
+        let col = if r[col].codepoint == 0
+            && col > 0
+            && char::from_u32(r[col - 1].codepoint).is_some_and(|c| char_width(c) == 2)
+        {
+            col - 1
+        } else {
+            col
+        };
+        let Some(base) = char::from_u32(r[col].codepoint).filter(|&c| c != '\0') else { return };
+        if let Some(composed) = unicode_normalization::char::compose(base, mark) {
+            r[col].codepoint = composed as u32;
+            self.mark(row);
+        }
+    }
+
     #[inline]
     fn mark(&mut self, r: usize) {
         if let Some(d) = self.dirty.get_mut(r) {
@@ -1190,17 +1219,11 @@ fn palette(i: u8) -> u32 {
     }
 }
 
-/// Display width of a character: 0 (combining), 1, or 2 (CJK / emoji).
-fn char_width(c: char) -> usize {
-    let c = c as u32;
-    match c {
-        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
-        | 0x200B..=0x200F | 0xFE00..=0xFE0F => 0,
-        0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F | 0x1F900..=0x1F9FF | 0x20000..=0x3FFFD => 2,
-        _ => 1,
-    }
+/// Display width of a character: 0 (combining / zero-width), 1, or 2 (CJK / emoji),
+/// following the Unicode East Asian Width and emoji presentation tables.
+pub fn char_width(c: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    c.width().unwrap_or(0).min(2)
 }
 
 /// DEC Special Graphics (ESC ( 0) used by tmux, mc, etc. for box drawing.
@@ -1219,6 +1242,7 @@ impl Perform for Grid {
         let c = if self.cur.line_drawing { dec_line_drawing(c) } else { c };
         let mut w = char_width(c);
         if w == 0 {
+            self.combine_with_previous(c);
             return;
         }
         if w == 2 && self.cols < 2 {
@@ -1539,6 +1563,44 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
+    }
+
+    #[test]
+    fn combining_marks_compose_into_precomposed_chars() {
+        let mut g = Grid::new(20, 3);
+        // NFD "Việt Nam": e + U+0323 (dot below) + U+0302 (circumflex).
+        feed(&mut g, "Vie\u{0323}\u{0302}t Nam");
+        assert_eq!(line(&g, 0), "Việt Nam");
+        assert_eq!(g.cur.col, 8);
+
+        // Mark at the very start of a line has no base and is dropped.
+        feed(&mut g, "\r\n\u{0301}a");
+        assert_eq!(line(&g, 1), "a");
+    }
+
+    #[test]
+    fn combining_mark_at_right_margin_uses_pending_wrap_cell() {
+        let mut g = Grid::new(4, 2);
+        feed(&mut g, "abce\u{0301}");
+        assert_eq!(line(&g, 0), "abcé");
+        feed(&mut g, "x");
+        assert_eq!(line(&g, 1), "x");
+    }
+
+    #[test]
+    fn unicode_widths_follow_east_asian_and_emoji_tables() {
+        assert_eq!(char_width('a'), 1);
+        assert_eq!(char_width('ệ'), 1);
+        assert_eq!(char_width('中'), 2);
+        assert_eq!(char_width('🚀'), 2);
+        assert_eq!(char_width('\u{0301}'), 0);
+        assert_eq!(char_width('\u{200D}'), 0);
+
+        let mut g = Grid::new(10, 2);
+        feed(&mut g, "🚀x");
+        assert_eq!(g.display_row(0)[0].codepoint, '🚀' as u32);
+        assert_eq!(g.display_row(0)[1].codepoint, 0);
+        assert_eq!(g.display_row(0)[2].codepoint, 'x' as u32);
     }
 
     #[test]

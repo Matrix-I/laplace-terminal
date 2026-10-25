@@ -18,6 +18,12 @@ use std::sync::Arc;
 /// Slot 0 is always blank (space / empty cell).
 pub const BLANK_SLOT: u16 = 0;
 
+/// Slot-map key tags for the two halves of a double-width glyph (CJK, emoji).
+/// Codepoints use at most 21 bits, so the high bits are free.
+const WIDE_LEFT: u32 = 0x4000_0000;
+const WIDE_RIGHT: u32 = 0x8000_0000;
+const CODEPOINT_MASK: u32 = 0x001F_FFFF;
+
 pub struct FontSet {
     pub primary: fontdue::Font,
     pub fallbacks: Vec<fontdue::Font>,
@@ -130,7 +136,19 @@ impl Atlas {
         std::mem::take(&mut self.evicted)
     }
 
-    /// Atlas slot for `cp`, rasterizing and uploading it on a cache miss.
+    /// Atlas slots for a glyph of display width `width`. Double-width glyphs are
+    /// rasterized across two cells and split into a left and a right slot; for
+    /// narrow glyphs the right slot is blank.
+    pub fn glyph_slots(&mut self, queue: &wgpu::Queue, cp: u32, width: usize) -> (u16, u16) {
+        if width == 2 {
+            (self.slot(queue, cp | WIDE_LEFT), self.slot(queue, cp | WIDE_RIGHT))
+        } else {
+            (self.slot(queue, cp), BLANK_SLOT)
+        }
+    }
+
+    /// Atlas slot for `cp` (optionally tagged with `WIDE_LEFT` / `WIDE_RIGHT`),
+    /// rasterizing and uploading it on a cache miss.
     pub fn slot(&mut self, queue: &wgpu::Queue, cp: u32) -> u16 {
         if cp == 0 || cp == 32 {
             return BLANK_SLOT;
@@ -181,21 +199,41 @@ impl Atlas {
         s
     }
 
-    fn rasterize(&mut self, cp: u32) {
-        self.scratch.fill(0);
+    fn rasterize(&mut self, key: u32) {
+        let half = key & (WIDE_LEFT | WIDE_RIGHT);
+        let cp = key & CODEPOINT_MASK;
+        let mut buf = std::mem::take(&mut self.scratch);
+        if half == 0 {
+            buf.fill(0);
+            self.rasterize_into(&mut buf, self.cell_w, cp);
+        } else {
+            // Rasterize across two cells, then keep the requested half.
+            let (cw, ch) = (self.cell_w as usize, self.cell_h as usize);
+            let mut wide = vec![0u8; 2 * cw * ch];
+            self.rasterize_into(&mut wide, 2 * self.cell_w, cp);
+            let x0 = if half == WIDE_RIGHT { cw } else { 0 };
+            for y in 0..ch {
+                buf[y * cw..(y + 1) * cw].copy_from_slice(&wide[y * 2 * cw + x0..y * 2 * cw + x0 + cw]);
+            }
+        }
+        self.scratch = buf;
+    }
+
+    /// Rasterize `cp` into `buf`, a zeroed `cw × cell_h` canvas.
+    fn rasterize_into(&self, buf: &mut [u8], cw: u32, cp: u32) {
         let Some(ch) = char::from_u32(cp) else { return };
 
         // 1. Ghostty-style built-in cell-exact sprite glyphs:
         //    Powerline, Box Drawing, Block Elements, Geometric triangles, Braille.
-        if draw_builtin_sprite(&mut self.scratch, self.cell_w, self.cell_h, cp) {
+        if draw_builtin_sprite(buf, cw, self.cell_h, cp) {
             return;
         }
 
         // 2. Primary font (only if the font actually contains a glyph for `ch`).
         if self.fonts.primary.lookup_glyph_index(ch) != 0 {
             rasterize_with_font(
-                &mut self.scratch,
-                self.cell_w as i32,
+                buf,
+                cw as i32,
                 self.cell_h as i32,
                 self.baseline,
                 self.px,
@@ -210,8 +248,8 @@ impl Atlas {
         for fb in &self.fonts.fallbacks {
             if fb.lookup_glyph_index(ch) != 0 {
                 rasterize_with_font(
-                    &mut self.scratch,
-                    self.cell_w as i32,
+                    buf,
+                    cw as i32,
                     self.cell_h as i32,
                     self.baseline,
                     self.px,
@@ -224,7 +262,7 @@ impl Atlas {
         }
 
         // 4. Built-in Nerd Font PUA icon fallbacks when no Nerd Font is installed.
-        if draw_nerd_icon_fallback(&mut self.scratch, self.cell_w, self.cell_h, cp) {
+        if draw_nerd_icon_fallback(buf, cw, self.cell_h, cp) {
             return;
         }
 
@@ -235,8 +273,8 @@ impl Atlas {
         #[cfg(target_os = "macos")]
         if !(0xE000..=0xF8FF).contains(&cp) && cp < 0xF0000 {
             if macos_coretext_rasterize(
-                &mut self.scratch,
-                self.cell_w,
+                buf,
+                cw,
                 self.cell_h,
                 self.baseline,
                 self.px,
