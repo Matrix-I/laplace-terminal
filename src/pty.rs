@@ -108,7 +108,8 @@ impl Pty {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut::<libc::termios>(),
-                &mut ws,
+                // `*mut winsize` on macOS, `*const winsize` on Linux.
+                std::ptr::addr_of_mut!(ws) as _,
             ) != 0
             {
                 return Err(io::Error::last_os_error());

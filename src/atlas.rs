@@ -326,18 +326,8 @@ impl Atlas {
         // Skip Private Use Area codepoints (0xE000..=0xF8FF, 0xF0000..=0x10FFFF) because
         // macOS system fonts do not map Nerd Font PUA glyphs and searching the CoreText
         // cascade list for unmapped PUA characters takes ~50ms on first encounter.
-        #[cfg(target_os = "macos")]
         if !(0xE000..=0xF8FF).contains(&cp) && cp < 0xF0000 {
-            if macos_coretext_rasterize(
-                buf,
-                cw,
-                self.cell_h,
-                self.baseline,
-                self.px,
-                ch,
-            ) {
-                return;
-            }
+            macos_coretext_rasterize(buf, cw, self.cell_h, self.baseline, self.px, ch);
         }
     }
 
@@ -365,6 +355,7 @@ impl Atlas {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rasterize_with_font(
     scratch: &mut [u8],
     cw: i32,
@@ -781,6 +772,7 @@ fn draw_powerline(buf: &mut [u8], cw: u32, ch: u32, cp: u32) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_rect(buf: &mut [u8], cw: u32, ch: u32, x0: u32, y0: u32, x1: u32, y1: u32, val: u8) {
     let x0 = x0.min(cw);
     let x1 = x1.min(cw);
@@ -884,11 +876,10 @@ fn draw_braille(buf: &mut [u8], cw: u32, ch: u32, bits: u8) {
     rasterize_supersampled(buf, cw, ch, |x, y| {
         for (c, &cx) in xs.iter().enumerate() {
             for (row, &cy) in ys.iter().enumerate() {
-                if (bits & (1 << BIT_MAP[c][row])) != 0 {
-                    if (x - cx).powi(2) + (y - cy).powi(2) <= r * r {
+                if (bits & (1 << BIT_MAP[c][row])) != 0
+                    && (x - cx).powi(2) + (y - cy).powi(2) <= r * r {
                         return true;
                     }
-                }
             }
         }
         false
@@ -1199,6 +1190,13 @@ fn draw_nerd_icon_fallback(buf: &mut [u8], cw: u32, ch: u32, cp: u32) -> bool {
 // ============================================================================
 // macOS CoreText + CoreGraphics System Fallback Rasterizer
 // ============================================================================
+
+/// System font fallback is CoreText-only; elsewhere the fontconfig-free fallback
+/// chain above is all there is.
+#[cfg(not(target_os = "macos"))]
+fn macos_coretext_rasterize(_buf: &mut [u8], _cw: u32, _ch_px: u32, _baseline: i32, _px: f32, _ch: char) -> bool {
+    false
+}
 
 #[cfg(target_os = "macos")]
 fn macos_coretext_rasterize(

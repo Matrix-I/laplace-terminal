@@ -461,7 +461,7 @@ impl Grid {
                     });
                     if matches {
                         let end = i + sign_len;
-                        if sign_end.map_or(true, |cur| end > cur) {
+                        if sign_end.is_none_or(|cur| end > cur) {
                             sign_end = Some(end);
                         }
                         break;
@@ -509,7 +509,7 @@ impl Grid {
         if target_col > cmd_start
             && target_col < self.cols
             && r[target_col].codepoint == 0
-            && char::from_u32(r[target_col - 1].codepoint).map_or(false, |c| char_width(c) == 2)
+            && char::from_u32(r[target_col - 1].codepoint).is_some_and(|c| char_width(c) == 2)
         {
             target_col -= 1;
         }
@@ -697,18 +697,7 @@ impl Grid {
                     }
                     end += 1;
                 }
-                while end > start {
-                    let last_ch = chars[end - 1];
-                    if matches!(last_ch, '.' | ',' | ';' | ':' | '!' | '?' | '\'') {
-                        end -= 1;
-                    } else if last_ch == ')' && !chars[start..end].contains(&'(') {
-                        end -= 1;
-                    } else if last_ch == ']' && !chars[start..end].contains(&'[') {
-                        end -= 1;
-                    } else {
-                        break;
-                    }
-                }
+                let end = trim_trailing_punctuation(&chars, start, end);
                 if col >= start && col < end && end > start + 7 {
                     let url_str: String = chars[start..end].iter().collect();
                     return Some(Hyperlink {
@@ -738,19 +727,7 @@ impl Grid {
             end += 1;
         }
 
-        // Strip trailing sentence punctuation
-        while end > start {
-            let last_ch = chars[end - 1];
-            if matches!(last_ch, '.' | ',' | ';' | ':' | '!' | '?' | '\'') {
-                end -= 1;
-            } else if last_ch == ')' && !chars[start..end].contains(&'(') {
-                end -= 1;
-            } else if last_ch == ']' && !chars[start..end].contains(&'[') {
-                end -= 1;
-            } else {
-                break;
-            }
-        }
+        let end = trim_trailing_punctuation(&chars, start, end);
 
         if start >= end || end - start < 2 {
             return None;
@@ -844,7 +821,7 @@ impl Grid {
                 if matches!(
                     char::from_u32(r[sc].codepoint),
                     Some('$' | '%' | '#' | '❯' | '>' | '➜')
-                ) && sc + 1 <= ec
+                ) && sc < ec
                     && Self::is_blank(r[sc + 1].codepoint)
                 {
                     sc += 1;
@@ -871,7 +848,7 @@ impl Grid {
         if matches!(
             char::from_u32(r[start_col].codepoint),
             Some('$' | '%' | '#' | '❯' | '>' | '➜')
-        ) && start_col + 1 <= end_col
+        ) && start_col < end_col
             && Self::is_blank(r[start_col + 1].codepoint)
         {
             start_col += 1;
@@ -1497,6 +1474,20 @@ fn decode_base64(data: &[u8]) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Drop trailing sentence punctuation from a detected link `chars[start..end]`,
+/// keeping a closing `)` / `]` that has a matching opener inside the link.
+fn trim_trailing_punctuation(chars: &[char], start: usize, mut end: usize) -> usize {
+    while end > start {
+        let unbalanced = |close: char, open: char| chars[end - 1] == close && !chars[start..end].contains(&open);
+        if matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?' | '\'') || unbalanced(')', '(') || unbalanced(']', '[') {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    end
 }
 
 fn default_tab_stops(cols: usize) -> Vec<bool> {

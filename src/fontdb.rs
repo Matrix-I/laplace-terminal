@@ -100,7 +100,7 @@ fn best_match(files: &[&PathBuf], want: &str) -> Option<FaceRef> {
             }
 
             let score = style_score(&face.subfamily) + if exact_match { 0 } else { 10 };
-            if best.as_ref().map_or(true, |(s, _)| score < *s) {
+            if best.as_ref().is_none_or(|(s, _)| score < *s) {
                 best = Some((score, FaceRef { path: path.to_string_lossy().into_owned(), index: face.index }));
                 if score == 0 {
                     return best.map(|(_, f)| f);
@@ -249,7 +249,7 @@ fn read_name_table(f: &File, font_off: u64) -> Option<FaceNameInfo> {
             break;
         }
     }
-    if name_len < 6 || name_len > 1 << 20 {
+    if !(6..=1 << 20).contains(&name_len) {
         return None;
     }
     let t = read_at(f, name_off, name_len)?;
@@ -280,7 +280,7 @@ fn read_name_table(f: &File, font_off: u64) -> Option<FaceNameInfo> {
         };
         let text = match (platform, encoding) {
             (0, _) | (3, 0 | 1 | 10) => {
-                let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
                 String::from_utf16_lossy(&units)
             }
             (1, 0) => raw.iter().map(|&b| b as char).collect(),
@@ -310,7 +310,7 @@ fn keep(slot: &mut Option<(u8, String)>, prio: u8, text: String) {
     if text.is_empty() {
         return;
     }
-    if slot.as_ref().map_or(true, |(p, _)| prio < *p) {
+    if slot.as_ref().is_none_or(|(p, _)| prio < *p) {
         *slot = Some((prio, text));
     }
 }

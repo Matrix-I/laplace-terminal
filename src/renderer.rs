@@ -425,7 +425,7 @@ impl Renderer {
             self.last_hovered_link = hovered_link.map(|(id, l)| (id, l.clone()));
         }
 
-        let is_search_open = history_search.map_or(false, |h| h.is_open);
+        let is_search_open = history_search.is_some_and(|h| h.is_open);
         let (cols, term_rows) = self.grid_size_for_tabs(tab_bar.is_some());
         let total_rows = term_rows + top_rows;
         let n = cols * total_rows;
@@ -720,7 +720,7 @@ impl Renderer {
         let row = g.display_row(src_row);
         let start = dst_row * window_cols + dst_col;
         let out = &mut self.instances[start..start + p_cols];
-        let is_link_row = hovered_link.map_or(false, |l| l.row == src_row);
+        let is_link_row = hovered_link.is_some_and(|l| l.row == src_row);
         let is_last_row = src_row + 1 == rect.rows;
 
         let is_border_right_active = is_active
@@ -1011,8 +1011,8 @@ impl Renderer {
             let q_chars: Vec<char> = search.query.chars().collect();
             let max_q = popup_w.saturating_sub(6);
             let display_q = q_chars.len().min(max_q);
-            for i in 0..display_q {
-                let slot = self.atlas.slot(queue, q_chars[i] as u32) as u32;
+            for (i, &ch) in q_chars.iter().take(display_q).enumerate() {
+                let slot = self.atlas.slot(queue, ch as u32) as u32;
                 self.instances[r1 + x0 + 4 + i] = Instance { glyph: slot, fg: QUERY_FG, bg: POPUP_BG };
             }
             if x0 + 4 + display_q < x0 + popup_w - 1 {
@@ -1064,8 +1064,7 @@ impl Renderer {
                     let display_len = cmd_chars.len().min(avail_w);
                     let is_truncated = cmd_chars.len() > avail_w;
 
-                    for ci in 0..display_len {
-                        let ch = cmd_chars[ci];
+                    for (ci, &ch) in cmd_chars.iter().take(display_len).enumerate() {
                         let is_match = m.match_indices.contains(&ci);
                         let fg = if is_match {
                             MATCH_FG

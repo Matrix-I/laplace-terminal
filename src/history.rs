@@ -657,15 +657,13 @@ pub fn parse_fzf_query(query: &str) -> Vec<FzfTerm> {
         if raw.is_empty() {
             continue;
         }
-        if raw.starts_with('!') {
-            let rest = &raw[1..];
+        if let Some(rest) = raw.strip_prefix('!') {
             if rest.starts_with('\'') || rest.starts_with('"') {
                 let pat = rest[1..].trim_end_matches('"');
                 if !pat.is_empty() {
                     terms.push(FzfTerm::Inverse(pat.to_string()));
                 }
-            } else if rest.starts_with('^') {
-                let pat = &rest[1..];
+            } else if let Some(pat) = rest.strip_prefix('^') {
                 if !pat.is_empty() {
                     terms.push(FzfTerm::InversePrefix(pat.to_string()));
                 }
@@ -682,8 +680,7 @@ pub fn parse_fzf_query(query: &str) -> Vec<FzfTerm> {
             if !pat.is_empty() {
                 terms.push(FzfTerm::Exact(pat.to_string()));
             }
-        } else if raw.starts_with('^') {
-            let pat = &raw[1..];
+        } else if let Some(pat) = raw.strip_prefix('^') {
             if !pat.is_empty() {
                 terms.push(FzfTerm::Prefix(pat.to_string()));
             }
@@ -840,19 +837,16 @@ fn match_ascii_terms(terms: &[PreparedTerm], text: &str, recency_rank: usize) ->
                 }
             }
             TermKind::Exact => {
-                if let Some(byte_pos) = target.windows(p_len).position(|w| w == p_pat.as_slice()) {
-                    all_match_indices.extend(byte_pos..byte_pos + p_len);
-                    total_score += 2000 - (byte_pos as i32 * 3);
-                    if byte_pos == 0 {
-                        total_score += 500;
-                    } else {
-                        let prev = t_bytes[byte_pos - 1];
-                        if prev == b' ' || prev == b'-' || prev == b'_' || prev == b'/' || prev == b'.' {
-                            total_score += 300;
-                        }
-                    }
+                let byte_pos = target.windows(p_len).position(|w| w == p_pat.as_slice())?;
+                all_match_indices.extend(byte_pos..byte_pos + p_len);
+                total_score += 2000 - (byte_pos as i32 * 3);
+                if byte_pos == 0 {
+                    total_score += 500;
                 } else {
-                    return None;
+                    let prev = t_bytes[byte_pos - 1];
+                    if prev == b' ' || prev == b'-' || prev == b'_' || prev == b'/' || prev == b'.' {
+                        total_score += 300;
+                    }
                 }
             }
             TermKind::Fuzzy => {
@@ -967,21 +961,18 @@ fn match_unicode_terms(terms: &[PreparedTerm], text: &str, recency_rank: usize) 
                 }
             }
             TermKind::Exact => {
-                if let Some(byte_pos) = target.find(p_pat.as_str()) {
-                    let char_pos = target[..byte_pos].chars().count();
-                    let p_len = p_chars.len();
-                    all_match_indices.extend(char_pos..char_pos + p_len);
-                    total_score += 2000 - (char_pos as i32 * 3);
-                    if char_pos == 0 {
-                        total_score += 500;
-                    } else {
-                        let prev = t_chars[char_pos - 1];
-                        if prev == ' ' || prev == '-' || prev == '_' || prev == '/' || prev == '.' {
-                            total_score += 300;
-                        }
-                    }
+                let byte_pos = target.find(p_pat.as_str())?;
+                let char_pos = target[..byte_pos].chars().count();
+                let p_len = p_chars.len();
+                all_match_indices.extend(char_pos..char_pos + p_len);
+                total_score += 2000 - (char_pos as i32 * 3);
+                if char_pos == 0 {
+                    total_score += 500;
                 } else {
-                    return None;
+                    let prev = t_chars[char_pos - 1];
+                    if prev == ' ' || prev == '-' || prev == '_' || prev == '/' || prev == '.' {
+                        total_score += 300;
+                    }
                 }
             }
             TermKind::Fuzzy => {

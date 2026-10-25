@@ -55,8 +55,8 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 
 ### 3. Implementation Checklist for New Shortcuts
 
-When introducing any new key binding or mouse interaction in `src/main.rs`:
-1. **Never hardcode macOS-only modifiers without an `#[cfg(not(target_os = "macos"))]` branch.**
+When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` / `resolve_named`) and execute it in `run_action` / `run_tab_action` in `src/main.rs`; mouse interactions live in `src/main.rs` (encoding in `src/mouse.rs`):
+1. **Define both platforms in the keymap** (`Platform::MacOs` / `Platform::Linux`) and add a case to the keymap tests — both tables are tested on any host.
 2. **Check for PTY collisions**: Verify if the proposed `Ctrl + <Key>` combination emits an ASCII control code (`\x00`..`\x1f`) needed by shell or text editors (vim, nano). If it does, use `Ctrl + Shift` instead.
 3. **Verify UI representation**: If the UI renders a badge or hint (e.g. `src/renderer.rs`), ensure macOS displays `⌘` and Linux displays `^` (for Ctrl) or `Alt+`, and ensure the actual key handler matches the visual symbol.
 4. **Compile verification**:
@@ -69,7 +69,9 @@ When introducing any new key binding or mouse interaction in `src/main.rs`:
 
 | Module | Responsibility |
 | :--- | :--- |
-| `src/main.rs` | winit event loop, tabs/panes state, key & mouse handling, clipboard |
+| `src/main.rs` | winit event loop, tabs/panes state, shortcut execution, mouse & IME handling, clipboard |
+| `src/keymap.rs` | Pure shortcut resolution and key-to-byte encoding for macOS and Linux (unit-tested) |
+| `src/mouse.rs` | Mouse reporting encoding (X10 / SGR) for applications that track the mouse |
 | `src/pty.rs` | `openpty` + `fork`/`execve`, PTY reader thread (parses into the grid) |
 | `src/grid.rs` | 12-byte `Cell`, scrollback ring buffer, `vte::Perform` implementation |
 | `src/renderer.rs` | wgpu pipeline, instance buffer, tab bar, history popup |
@@ -78,7 +80,7 @@ When introducing any new key binding or mouse interaction in `src/main.rs`:
 | `src/split.rs` | Split-pane layout tree |
 | `src/history.rs` | Shell history search (fzf-style matching) |
 | `src/config.rs` | Ghostty-compatible config parsing and themes |
-| `src/macos.rs` | Objective-C FFI for window/vibrancy/dock integration |
+| `src/macos.rs` | Objective-C FFI (`msg_send!`) for window/vibrancy/dock integration; no-op stubs elsewhere |
 
 ## Core Invariants
 
@@ -103,5 +105,6 @@ When introducing any new key binding or mouse interaction in `src/main.rs`:
   - `cargo test`
   - `cargo clippy --all-targets` — do not add new warnings.
 - Add unit tests next to the code (`#[cfg(test)] mod tests`) for parser, grid, and keybinding behavior changes; use the existing `feed()` helper in `grid.rs` tests.
+- PTY tests call `openpty`, which the Claude Code sandbox blocks (EPERM); run `cargo test` outside the sandbox.
 - Every new or changed shortcut must also update the Standard Shortcut Matrix above and the README.
 - Commit messages follow Conventional Commits (`feat(scope): ...`, `fix(scope): ...`, `docs(scope): ...`).

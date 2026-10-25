@@ -6,6 +6,7 @@ mod config;
 mod fontdb;
 mod grid;
 mod history;
+mod keymap;
 mod macos;
 mod mouse;
 mod pty;
@@ -170,9 +171,33 @@ struct State {
     titles_refreshed_at: std::time::Instant,
 }
 
-struct App {
+/// Wakes the event loop from PTY reader threads, coalescing bursts of output
+/// into a single pending `WakeUp`.
+#[derive(Clone)]
+struct Waker {
     proxy: EventLoopProxy<AppEvent>,
-    wakeup_queued: Arc<AtomicBool>,
+    queued: Arc<AtomicBool>,
+}
+
+impl Waker {
+    fn wake(&self) {
+        if !self.queued.swap(true, Ordering::AcqRel) {
+            let _ = self.proxy.send_event(AppEvent::WakeUp);
+        }
+    }
+
+    /// Re-arm before rendering so output arriving during the draw schedules another frame.
+    fn rearm(&self) {
+        self.queued.store(false, Ordering::Release);
+    }
+
+    fn is_queued(&self) -> bool {
+        self.queued.load(Ordering::Acquire)
+    }
+}
+
+struct App {
+    waker: Waker,
     state: Option<State>,
 }
 
@@ -242,12 +267,10 @@ impl ApplicationHandler<AppEvent> for App {
             pane_id,
             cols,
             rows,
-            cw,
-            ch,
+            (cw, ch),
             None,
             Some(cfg.shell_integration_features),
-            &self.proxy,
-            &self.wakeup_queued,
+            &self.waker,
         )
         .expect("spawn initial PTY");
         let mut tab = Tab::new(tab_id, pane);
@@ -288,21 +311,15 @@ impl ApplicationHandler<AppEvent> for App {
         });
 
         #[cfg(target_os = "macos")]
-        macos::register_reopen_handler(self.proxy.clone());
+        macos::register_reopen_handler(self.waker.proxy.clone());
 
-        #[cfg(target_os = "macos")]
-        unsafe {
-            extern "C" {
-                fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-            }
-            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-        }
+        macos::release_free_memory();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::WakeUp => {
-                self.wakeup_queued.store(false, Ordering::Release);
+                self.waker.rearm();
                 if let Some(s) = &mut self.state {
                     // OSC 52: applications (e.g. vim/tmux over ssh) setting the clipboard.
                     for pane in s.tabs.iter().flat_map(|t| &t.panes) {
@@ -358,26 +375,8 @@ impl ApplicationHandler<AppEvent> for App {
 
                     s.tabs.remove(tab_pos);
                     if s.tabs.is_empty() {
-                        #[cfg(target_os = "macos")]
-                        {
-                            s.tab_titles.clear();
-                            s.hovered_link = None;
-                            s.selecting = false;
-                            s.active = 0;
-                            s.window.set_visible(false);
-                            unsafe {
-                                extern "C" {
-                                    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-                                }
-                                malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-                            }
-                            return;
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            event_loop.exit();
-                            return;
-                        }
+                        close_last_window(s, event_loop);
+                        return;
                     }
                     if s.active >= s.tabs.len() {
                         s.active = s.tabs.len() - 1;
@@ -393,7 +392,7 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Reopen => {
                 if let Some(s) = &mut self.state {
                     if s.tabs.is_empty() {
-                        open_fresh_tab(s, &self.proxy, &self.wakeup_queued);
+                        open_fresh_tab(s, &self.waker);
                     } else {
                         s.window.set_visible(true);
                         s.window.focus_window();
@@ -411,23 +410,8 @@ impl ApplicationHandler<AppEvent> for App {
         let Some(s) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => {
-                #[cfg(target_os = "macos")]
-                {
-                    s.tabs.clear();
-                    s.tab_titles.clear();
-                    s.hovered_link = None;
-                    s.selecting = false;
-                    s.active = 0;
-                    s.window.set_visible(false);
-                    unsafe {
-                        extern "C" {
-                            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-                        }
-                        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                event_loop.exit();
+                s.tabs.clear();
+                close_last_window(s, event_loop);
             }
 
             WindowEvent::ModifiersChanged(m) => {
@@ -576,27 +560,15 @@ impl ApplicationHandler<AppEvent> for App {
                         if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
                             match action {
                                 TabBarAction::Select(idx) => select_tab(s, idx),
-                                TabBarAction::NewTab => duplicate_active_tab(s, &self.proxy, &self.wakeup_queued),
+                                TabBarAction::NewTab => duplicate_active_tab(s, &self.waker),
                             }
                             return;
                         }
-                        let show_tabs = s.tabs.len() > 1;
-                        let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
                         let mut switched_active_pane = false;
-                        if let Some((cell_row, cell_col)) =
-                            s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
                         {
+                            let target = pane_cell_at_mouse(s);
                             let tab = &mut s.tabs[s.active];
-                            let rects = tab.compute_pane_rects(cols, rows);
-                            if let Some(target) = rects.iter().find(|r| {
-                                cell_col >= r.col
-                                    && cell_col < r.col + r.cols
-                                    && cell_row >= r.row
-                                    && cell_row < r.row + r.rows
-                            }) {
-                                let clicked_id = target.id;
-                                let pane_row = cell_row - target.row;
-                                let pane_col = cell_col - target.col;
+                            if let Some((clicked_id, pane_row, pane_col)) = target {
 
                                 if tab.active_pane_id != clicked_id {
                                     tab.active_pane_id = clicked_id;
@@ -755,26 +727,7 @@ impl ApplicationHandler<AppEvent> for App {
                     if alt_screen_scroll(s, lines) {
                         return;
                     }
-                    let show_tabs = s.tabs.len() > 1;
-                    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
-                    let target_id = if let Some((cell_row, cell_col)) =
-                        s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows)
-                    {
-                        let tab = &s.tabs[s.active];
-                        let rects = tab.compute_pane_rects(cols, rows);
-                        rects
-                            .iter()
-                            .find(|r| {
-                                cell_col >= r.col
-                                    && cell_col < r.col + r.cols
-                                    && cell_row >= r.row
-                                    && cell_row < r.row + r.rows
-                            })
-                            .map(|r| r.id)
-                            .unwrap_or(tab.active_pane_id)
-                    } else {
-                        s.tabs[s.active].active_pane_id
-                    };
+                    let target_id = pane_cell_at_mouse(s).map_or(s.tabs[s.active].active_pane_id, |(id, _, _)| id);
                     if let Some(pane) = s.tabs[s.active].pane(target_id) {
                         pane.grid.lock().scroll_display(lines);
                         s.window.request_redraw();
@@ -784,7 +737,7 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if s.ime_preedit.is_empty() {
-                    handle_key(s, &event, event_loop, &self.proxy, &self.wakeup_queued);
+                    handle_key(s, &event, event_loop, &self.waker);
                 }
             }
 
@@ -812,7 +765,7 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 // Re-arm before rendering so any PTY write during the draw schedules the next frame.
-                self.wakeup_queued.store(false, Ordering::Release);
+                self.waker.rearm();
                 render_active(s);
             }
 
@@ -821,7 +774,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.wakeup_queued.load(Ordering::Acquire) {
+        if self.waker.is_queued() {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
@@ -846,29 +799,18 @@ fn spawn_pane(
     pane_id: u64,
     cols: usize,
     rows: usize,
-    cw: u32,
-    ch: u32,
+    (cw, ch): (u32, u32),
     cwd: Option<&str>,
     shell_features: Option<crate::config::ShellFeatures>,
-    proxy: &EventLoopProxy<AppEvent>,
-    wakeup_queued: &Arc<AtomicBool>,
+    waker: &Waker,
 ) -> std::io::Result<Pane> {
     let grid = Arc::new(Mutex::new(Grid::new(cols, rows)));
     let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd, shell_features)?;
-    let p1 = proxy.clone();
-    let p2 = proxy.clone();
-    let queued = wakeup_queued.clone();
-    pty.spawn_reader(
-        grid.clone(),
-        move || {
-            if !queued.swap(true, Ordering::AcqRel) {
-                let _ = p1.send_event(AppEvent::WakeUp);
-            }
-        },
-        move || {
-            let _ = p2.send_event(AppEvent::ChildExit(pane_id));
-        },
-    )?;
+    let on_output = waker.clone();
+    let proxy = waker.proxy.clone();
+    pty.spawn_reader(grid.clone(), move || on_output.wake(), move || {
+        let _ = proxy.send_event(AppEvent::ChildExit(pane_id));
+    })?;
     Ok(Pane {
         id: pane_id,
         grid,
@@ -958,10 +900,8 @@ fn cursor_blinks(s: &State) -> bool {
         None => {
             if let Some(tab) = s.tabs.get(s.active) {
                 let g = tab.active_pane().grid.lock();
-                match g.cursor_shape {
-                    0 | 1 | 3 | 5 => true,
-                    _ => false,
-                }
+                // DECSCUSR odd values (and 0 = default) are the blinking styles.
+                matches!(g.cursor_shape, 0 | 1 | 3 | 5)
             } else {
                 true
             }
@@ -1088,13 +1028,7 @@ fn render_active(s: &mut State) {
 
     if s.first_frame {
         s.first_frame = false;
-        #[cfg(target_os = "macos")]
-        unsafe {
-            extern "C" {
-                fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-            }
-            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-        }
+        macos::release_free_memory();
     }
 }
 
@@ -1113,11 +1047,10 @@ pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result
 
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
     if is_path {
-        let path = if target.starts_with("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                std::path::PathBuf::from(home).join(&target[2..])
-            } else {
-                std::path::PathBuf::from(target)
+        let path = if let Some(rest) = target.strip_prefix("~/") {
+            match std::env::var("HOME") {
+                Ok(home) => std::path::PathBuf::from(home).join(rest),
+                Err(_) => std::path::PathBuf::from(target),
             }
         } else if target == "~" {
             std::env::var("HOME")
@@ -1345,8 +1278,7 @@ fn update_hovered_link(s: &mut State) {
 
 fn open_fresh_tab(
     s: &mut State,
-    proxy: &EventLoopProxy<AppEvent>,
-    wakeup_queued: &Arc<AtomicBool>,
+    waker: &Waker,
 ) {
     let (cols, rows) = s.renderer.grid_size_for_tabs(false);
     let (cw, ch) = s.renderer.cell_size();
@@ -1358,12 +1290,10 @@ fn open_fresh_tab(
         pane_id,
         cols,
         rows,
-        cw,
-        ch,
+        (cw, ch),
         None,
         Some(s.config.shell_integration_features),
-        proxy,
-        wakeup_queued,
+        waker,
     ) {
         Ok(pane) => {
             let mut tab = Tab::new(tab_id, pane);
@@ -1392,11 +1322,10 @@ fn open_fresh_tab(
 
 fn duplicate_active_tab(
     s: &mut State,
-    proxy: &EventLoopProxy<AppEvent>,
-    wakeup_queued: &Arc<AtomicBool>,
+    waker: &Waker,
 ) {
     if s.tabs.is_empty() {
-        open_fresh_tab(s, proxy, wakeup_queued);
+        open_fresh_tab(s, waker);
         return;
     }
     let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
@@ -1410,12 +1339,10 @@ fn duplicate_active_tab(
         pane_id,
         cols,
         rows,
-        cw,
-        ch,
+        (cw, ch),
         cwd.as_deref(),
         Some(s.config.shell_integration_features),
-        proxy,
-        wakeup_queued,
+        waker,
     ) {
         Ok(pane) => {
             let tab = Tab::new(id, pane);
@@ -1432,6 +1359,21 @@ fn duplicate_active_tab(
     }
 }
 
+/// The last tab is gone. On macOS the app keeps running in the Dock (at 0% CPU)
+/// and a Dock click reopens a fresh tab; elsewhere the process exits.
+fn close_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
+    if cfg!(target_os = "macos") {
+        s.tab_titles.clear();
+        s.hovered_link = None;
+        s.selecting = false;
+        s.active = 0;
+        s.window.set_visible(false);
+        macos::release_free_memory();
+    } else {
+        event_loop.exit();
+    }
+}
+
 fn select_tab(s: &mut State, idx: usize) {
     if idx < s.tabs.len() && idx != s.active {
         s.active = idx;
@@ -1441,41 +1383,15 @@ fn select_tab(s: &mut State, idx: usize) {
     }
 }
 
-fn close_active_tab(s: &mut State, _event_loop: &ActiveEventLoop) {
+fn close_active_tab(s: &mut State, event_loop: &ActiveEventLoop) {
     if s.tabs.is_empty() {
-        #[cfg(target_os = "macos")]
-        {
-            s.window.set_visible(false);
-            return;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            _event_loop.exit();
-            return;
-        }
+        close_last_window(s, event_loop);
+        return;
     }
     s.tabs.remove(s.active);
     if s.tabs.is_empty() {
-        #[cfg(target_os = "macos")]
-        {
-            s.tab_titles.clear();
-            s.hovered_link = None;
-            s.selecting = false;
-            s.active = 0;
-            s.window.set_visible(false);
-            unsafe {
-                extern "C" {
-                    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-                }
-                malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-            }
-            return;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            _event_loop.exit();
-            return;
-        }
+        close_last_window(s, event_loop);
+        return;
     }
     if s.active >= s.tabs.len() {
         s.active = s.tabs.len() - 1;
@@ -1489,8 +1405,7 @@ fn close_active_tab(s: &mut State, _event_loop: &ActiveEventLoop) {
 fn split_active_pane(
     s: &mut State,
     direction: SplitDirection,
-    proxy: &EventLoopProxy<AppEvent>,
-    wakeup_queued: &Arc<AtomicBool>,
+    waker: &Waker,
 ) {
     if s.tabs.is_empty() {
         return;
@@ -1524,12 +1439,10 @@ fn split_active_pane(
         new_id,
         new_rect.cols,
         new_rect.rows,
-        cw,
-        ch,
+        (cw, ch),
         cwd.as_deref(),
         Some(s.config.shell_integration_features),
-        proxy,
-        wakeup_queued,
+        waker,
     ) {
         Ok(new_pane) => {
             tab.panes.push(new_pane);
@@ -1741,762 +1654,236 @@ fn handle_key(
     s: &mut State,
     ev: &KeyEvent,
     event_loop: &ActiveEventLoop,
-    proxy: &EventLoopProxy<AppEvent>,
-    wakeup_queued: &Arc<AtomicBool>,
+    waker: &Waker,
 ) {
     if ev.state != ElementState::Pressed {
         return;
     }
-    let ctrl = s.mods.control_key();
-    let alt = s.mods.alt_key();
-    let shift = s.mods.shift_key();
-    let super_key = s.mods.super_key();
+    let m = keymap::Mods {
+        ctrl: s.mods.control_key(),
+        alt: s.mods.alt_key(),
+        shift: s.mods.shift_key(),
+        sup: s.mods.super_key(),
+    };
 
-    if !matches!(
+    let is_modifier = matches!(
         &ev.logical_key,
-        Key::Named(
-            NamedKey::Shift
-                | NamedKey::Control
-                | NamedKey::Alt
-                | NamedKey::Super
-                | NamedKey::Meta
-        )
-    ) {
-        if s.config.mouse_hide_while_typing && !s.mouse_hidden {
-            s.window.set_cursor_visible(false);
-            s.mouse_hidden = true;
-        }
+        Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super | NamedKey::Meta)
+    );
+    if !is_modifier && s.config.mouse_hide_while_typing && !s.mouse_hidden {
+        s.window.set_cursor_visible(false);
+        s.mouse_hidden = true;
     }
     s.cursor_blink_epoch = std::time::Instant::now();
 
-    if s.history_search.is_open {
-        let visible_rows = s.renderer.history_popup_geometry(&s.history_search).map_or(10, |g| g.4);
-        match &ev.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                s.history_search.close();
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::Enter) => {
-                let cmd_opt = s.history_search.selected_command().map(|c| c.to_string());
-                s.history_search.close();
-                s.renderer.invalidate();
-                if let Some(cmd) = cmd_opt {
-                    let mut payload = Vec::with_capacity(cmd.len() + 3);
-                    payload.extend_from_slice(b"\x05\x15");
-                    payload.extend_from_slice(cmd.as_bytes());
-                    payload.push(b'\r');
-                    s.tabs[s.active].active_pane().pty.write(&payload);
-                }
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::Tab) => {
-                let cmd_opt = s.history_search.selected_command().map(|c| c.to_string());
-                s.history_search.close();
-                s.renderer.invalidate();
-                if let Some(cmd) = cmd_opt {
-                    let mut payload = Vec::with_capacity(cmd.len() + 2);
-                    payload.extend_from_slice(b"\x05\x15");
-                    payload.extend_from_slice(cmd.as_bytes());
-                    s.tabs[s.active].active_pane().pty.write(&payload);
-                }
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::Delete) => {
-                s.history_search.delete_selected();
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::ArrowDown) => {
-                s.history_search.select_next(visible_rows);
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                s.history_search.select_prev();
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::PageDown) => {
-                s.history_search.page_down(visible_rows);
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::PageUp) => {
-                s.history_search.page_up(visible_rows);
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::Home) => {
-                s.history_search.select_first();
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::End) => {
-                s.history_search.select_last(visible_rows);
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::Backspace) => {
-                s.history_search.backspace();
-                s.renderer.invalidate();
-                s.window.request_redraw();
-                return;
-            }
-            Key::Character(ch) => {
-                if ctrl {
-                    match ch.as_str() {
-                        "r" => {
-                            // In fzf, Ctrl+R toggles sorting: Relevance vs Recency
-                            s.history_search.toggle_sort();
-                            s.renderer.invalidate();
-                            s.window.request_redraw();
-                            return;
-                        }
-                        "d" => {
-                            // Ctrl+D deletes selected entry from history
-                            s.history_search.delete_selected();
-                            s.renderer.invalidate();
-                            s.window.request_redraw();
-                            return;
-                        }
-                        "n" | "j" => {
-                            s.history_search.select_next(visible_rows);
-                            s.renderer.invalidate();
-                            s.window.request_redraw();
-                            return;
-                        }
-                        "p" | "k" => {
-                            s.history_search.select_prev();
-                            s.renderer.invalidate();
-                            s.window.request_redraw();
-                            return;
-                        }
-                        "c" | "g" => {
-                            s.history_search.close();
-                            s.renderer.invalidate();
-                            s.window.request_redraw();
-                            return;
-                        }
-                        "u" | "w" => {
-                            s.history_search.clear_query();
-                            s.renderer.invalidate();
-                            s.window.request_redraw();
-                            return;
-                        }
-                        _ => return,
-                    }
-                }
-                if alt && ch.eq_ignore_ascii_case("s") {
-                    s.history_search.toggle_sort();
-                    s.renderer.invalidate();
-                    s.window.request_redraw();
-                    return;
-                }
-                if !super_key && !alt {
-                    for c in ch.chars() {
-                        s.history_search.append_char(c);
-                    }
-                    s.renderer.invalidate();
-                    s.window.request_redraw();
-                    return;
-                }
-            }
-            _ => return,
-        }
-    }
-
-    if let Key::Character(ch) = &ev.logical_key {
-        // Clear Screen & Scrollback buffer: Cmd+K on macOS, Ctrl+Shift+K on Linux (matches Terminal.app, iTerm2, Ghostty)
-        #[cfg(target_os = "macos")]
-        let is_clear_screen = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("k");
-        #[cfg(not(target_os = "macos"))]
-        let is_clear_screen = ((super_key && !ctrl && !alt && !shift) || (ctrl && shift && !alt && !super_key))
-            && ch.eq_ignore_ascii_case("k");
-        if is_clear_screen && !s.tabs.is_empty() {
-            if let Some(tab) = s.tabs.get_mut(s.active) {
-                let pane = tab.active_pane_mut();
-                pane.grid.lock().clear_history();
-                pane.pty.write(b"\x0c");
-                s.window.request_redraw();
-            }
-            return;
-        }
-
-        // Built-in History Search:
-        // - Ctrl+R (at shell prompt when !alt_active)
-        // - macOS: Cmd+R
-        // - Linux: Super+R or Ctrl+Shift+R
-        let alt_active = s.tabs.get(s.active).map_or(false, |t| t.active_pane().grid.lock().alt_active);
-        #[cfg(target_os = "macos")]
-        let is_history = (ctrl && !shift && !alt && !super_key && !alt_active)
-            || (super_key && !ctrl && !alt && !shift);
-        #[cfg(not(target_os = "macos"))]
-        let is_history = (ctrl && !shift && !alt && !super_key && !alt_active)
-            || (super_key && !ctrl && !alt && !shift)
-            || (ctrl && shift && !alt && !super_key);
-        if is_history && ch.eq_ignore_ascii_case("r") {
-            let initial = {
-                let g = s.tabs[s.active].active_pane().grid.lock();
-                g.current_prompt_input()
-            };
-            let initial_ref = if initial.is_empty() { None } else { Some(initial.as_str()) };
-            s.history_search.open(initial_ref);
-            s.renderer.invalidate();
-            s.window.request_redraw();
-            return;
-        }
-
-        // Quit app: Cmd+Q on macOS, Ctrl+Shift+Q on Linux.
-        #[cfg(target_os = "macos")]
-        let is_quit = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("q");
-        #[cfg(not(target_os = "macos"))]
-        let is_quit = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
-            && ch.eq_ignore_ascii_case("q");
-        if is_quit {
-            event_loop.exit();
-            return;
-        }
-
-        // Minimize window: Cmd+M on macOS, Ctrl+Shift+M (or Super+M) on Linux.
-        #[cfg(target_os = "macos")]
-        let is_minimize = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("m");
-        #[cfg(not(target_os = "macos"))]
-        let is_minimize = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt))
-            && ch.eq_ignore_ascii_case("m");
-        if is_minimize {
-            s.window.set_minimized(true);
-            return;
-        }
-
-        #[cfg(target_os = "macos")]
-        let is_config = super_key && !ctrl && !alt && (ch == "," || (shift && ch == "<"));
-        #[cfg(not(target_os = "macos"))]
-        let is_config = ((ctrl && !alt && !super_key) || (super_key && !ctrl && !alt))
-            && (ch == "," || (shift && ch == "<"));
-        if is_config {
-            if shift {
-                reload_config(s);
-            } else {
-                config::open_config_in_editor();
-            }
-            return;
-        }
-
-        // New tab / duplicate tab:
-        // - macOS: Cmd+T or Cmd+N
-        // - Linux: Ctrl+Shift+T or Ctrl+Shift+N (or Super+T / Super+N)
-        #[cfg(target_os = "macos")]
-        let is_new_tab = super_key && !ctrl && !alt && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
-        #[cfg(not(target_os = "macos"))]
-        let is_new_tab = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
-            && (ch.eq_ignore_ascii_case("t") || ch.eq_ignore_ascii_case("n"));
-        if is_new_tab {
-            if s.tabs.is_empty() {
-                open_fresh_tab(s, proxy, wakeup_queued);
-            } else {
-                duplicate_active_tab(s, proxy, wakeup_queued);
-            }
-            return;
-        }
-
-        if s.tabs.is_empty() {
-            return;
-        }
-
-        // Split Right (vertical divider): Cmd+D on macOS, Ctrl+Shift+D / Super+D on Linux
-        #[cfg(target_os = "macos")]
-        let is_split_right = super_key && !ctrl && !alt && !shift && ch.eq_ignore_ascii_case("d");
-        #[cfg(not(target_os = "macos"))]
-        let is_split_right = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
-            && ch.eq_ignore_ascii_case("d");
-        if is_split_right {
-            split_active_pane(s, SplitDirection::Vertical, proxy, wakeup_queued);
-            return;
-        }
-
-        // Split Down (horizontal divider): Cmd+Shift+D on macOS, Ctrl+Shift+E / Super+Shift+D / Ctrl+Alt+D on Linux
-        #[cfg(target_os = "macos")]
-        let is_split_down = super_key && !ctrl && !alt && shift && ch.eq_ignore_ascii_case("d");
-        #[cfg(not(target_os = "macos"))]
-        let is_split_down = (super_key && shift && !ctrl && !alt && ch.eq_ignore_ascii_case("d"))
-            || (ctrl && shift && !alt && !super_key && ch.eq_ignore_ascii_case("e"))
-            || (ctrl && alt && !shift && !super_key && ch.eq_ignore_ascii_case("d"));
-        if is_split_down {
-            split_active_pane(s, SplitDirection::Horizontal, proxy, wakeup_queued);
-            return;
-        }
-
-        // Equalize splits: Cmd+Option+= or Cmd+Ctrl+= on macOS, Ctrl+Alt+= or Super+Alt+= on Linux
-        #[cfg(target_os = "macos")]
-        let is_equalize = (super_key && alt && !ctrl && (ch == "=" || ch == "+"))
-            || (super_key && ctrl && !alt && (ch == "=" || ch == "+"));
-        #[cfg(not(target_os = "macos"))]
-        let is_equalize = ((ctrl && alt && !super_key) || (super_key && alt && !ctrl))
-            && (ch == "=" || ch == "+");
-        if is_equalize {
-            equalize_splits(s);
-            return;
-        }
-
-        // Copy selection: Cmd+C on macOS, Ctrl+Shift+C on Linux.
-        #[cfg(target_os = "macos")]
-        let is_copy = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("c");
-        #[cfg(not(target_os = "macos"))]
-        let is_copy = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
-            && ch.eq_ignore_ascii_case("c");
-        if is_copy {
-            if let Some(text) = s.tabs[s.active].active_pane().grid.lock().selected_text() {
-                copy_to_clipboard(&text);
-            }
-            return;
-        }
-
-        // Paste clipboard: Cmd+V on macOS, Ctrl+Shift+V on Linux.
-        #[cfg(target_os = "macos")]
-        let is_paste = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("v");
-        #[cfg(not(target_os = "macos"))]
-        let is_paste = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
-            && ch.eq_ignore_ascii_case("v");
-        if is_paste {
-            if let Some(text) = paste_from_clipboard() {
-                if !text.is_empty() {
-                    let bracketed = {
-                        let mut g = s.tabs[s.active].active_pane().grid.lock();
-                        g.reset_display();
-                        g.bracketed_paste
-                    };
-                    let payload = paste_payload(&text, bracketed);
-                    s.tabs[s.active].active_pane().pty.write(&payload);
-                    s.window.request_redraw();
-                }
-            }
-            return;
-        }
-
-        // Close active split pane (or tab if last pane): Cmd+W on macOS, Ctrl+Shift+W on Linux.
-        #[cfg(target_os = "macos")]
-        let is_close_tab = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("w");
-        #[cfg(not(target_os = "macos"))]
-        let is_close_tab = ((ctrl && shift && !alt && !super_key) || (super_key && !ctrl && !alt && !shift))
-            && ch.eq_ignore_ascii_case("w");
-        if is_close_tab {
-            close_active_pane_or_tab(s, event_loop);
-            return;
-        }
-
-        // Switch tabs on macOS via Cmd+Shift+[ / ] (or Cmd+{ / }), and Cmd+1..9.
-        #[cfg(target_os = "macos")]
-        if super_key && !ctrl && !alt {
-            match ch.as_str() {
-                "{" | "[" if shift && s.tabs.len() > 1 => {
-                    let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                    select_tab(s, prev);
-                    return;
-                }
-                "}" | "]" if shift && s.tabs.len() > 1 => {
-                    let next = (s.active + 1) % s.tabs.len();
-                    select_tab(s, next);
-                    return;
-                }
-                "[" if !shift && s.tabs[s.active].panes.len() > 1 => {
-                    cycle_split(s, false);
-                    return;
-                }
-                "]" if !shift && s.tabs[s.active].panes.len() > 1 => {
-                    cycle_split(s, true);
-                    return;
-                }
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !shift && s.tabs.len() > 1 => {
-                    let n = (ch.as_bytes()[0] - b'1') as usize;
-                    let target = if n == 8 && s.tabs.len() > 1 {
-                        s.tabs.len() - 1
-                    } else {
-                        n
-                    };
-                    select_tab(s, target);
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // Switch tabs / cycle splits on Linux
-        #[cfg(not(target_os = "macos"))]
-        {
-            if (ctrl || super_key) && shift && !alt && s.tabs.len() > 1 {
-                match ch.as_str() {
-                    "{" | "[" => {
-                        let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                        select_tab(s, prev);
-                        return;
-                    }
-                    "}" | "]" => {
-                        let next = (s.active + 1) % s.tabs.len();
-                        select_tab(s, next);
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            if s.tabs[s.active].panes.len() > 1 && (((ctrl && alt) || super_key) && !shift) {
-                match ch.as_str() {
-                    "[" => {
-                        cycle_split(s, false);
-                        return;
-                    }
-                    "]" => {
-                        cycle_split(s, true);
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            let is_tab_num = !shift
-                && ((ctrl && !alt && !super_key)
-                    || (alt && !ctrl && !super_key)
-                    || (super_key && !ctrl && !alt));
-            if is_tab_num && s.tabs.len() > 1 {
-                if let b'1'..=b'9' = ch.as_bytes()[0] {
-                    let n = (ch.as_bytes()[0] - b'1') as usize;
-                    let target = if n == 8 && s.tabs.len() > 1 {
-                        s.tabs.len() - 1
-                    } else {
-                        n
-                    };
-                    select_tab(s, target);
-                    return;
-                }
-            }
-        }
-    }
-
-    // Split resize shortcuts: Cmd+Ctrl+Arrows on macOS, Super+Ctrl+Arrows or Ctrl+Alt+Shift+Arrows on Linux
-    #[cfg(target_os = "macos")]
-    let is_resize_split = super_key && ctrl && !alt && !shift;
-    #[cfg(not(target_os = "macos"))]
-    let is_resize_split = (super_key && ctrl && !alt && !shift) || (ctrl && alt && shift && !super_key);
-    if is_resize_split {
-        match &ev.logical_key {
-            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
-                resize_active_split(s, -0.05);
-                return;
-            }
-            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
-                resize_active_split(s, 0.05);
-                return;
-            }
-            _ => {}
-        }
-    }
-
-    // Directional navigation between splits (with fallback to tab cycling on Left/Right):
-    // macOS: Cmd+Arrows (Up/Down/Left/Right) and Cmd+Option+Arrows
-    // Linux: Ctrl+Alt+Arrows and Super+Arrows
-    #[cfg(target_os = "macos")]
-    if super_key && !ctrl && !shift {
-        let dir = match &ev.logical_key {
-            Key::Named(NamedKey::ArrowLeft) => Some((Direction::Left, true)),
-            Key::Named(NamedKey::ArrowRight) => Some((Direction::Right, false)),
-            Key::Named(NamedKey::ArrowUp) => Some((Direction::Up, false)),
-            Key::Named(NamedKey::ArrowDown) => Some((Direction::Down, false)),
-            _ => None,
-        };
-        if let Some((d, is_left)) = dir {
-            if navigate_split_directional(s, d) {
-                return;
-            }
-            if is_left && s.tabs.len() > 1 {
-                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                select_tab(s, prev);
-                return;
-            } else if !is_left && s.tabs.len() > 1 && matches!(d, Direction::Right) {
-                let next = (s.active + 1) % s.tabs.len();
-                select_tab(s, next);
-                return;
-            }
-            return;
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    if ((ctrl && alt) || (super_key && !ctrl)) && !shift {
-        let dir = match &ev.logical_key {
-            Key::Named(NamedKey::ArrowLeft) => Some((Direction::Left, true)),
-            Key::Named(NamedKey::ArrowRight) => Some((Direction::Right, false)),
-            Key::Named(NamedKey::ArrowUp) => Some((Direction::Up, false)),
-            Key::Named(NamedKey::ArrowDown) => Some((Direction::Down, false)),
-            _ => None,
-        };
-        if let Some((d, is_left)) = dir {
-            if navigate_split_directional(s, d) {
-                return;
-            }
-            if is_left && s.tabs.len() > 1 {
-                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                select_tab(s, prev);
-                return;
-            } else if !is_left && s.tabs.len() > 1 && matches!(d, Direction::Right) {
-                let next = (s.active + 1) % s.tabs.len();
-                select_tab(s, next);
-                return;
-            }
-            return;
-        }
-    }
-
-    // Tab navigation with Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PageUp / Ctrl+PageDown
-    if s.tabs.len() > 1 {
-        match &ev.logical_key {
-            Key::Named(NamedKey::Tab) if ctrl && !alt && !super_key => {
-                let next = if shift {
-                    (s.active + s.tabs.len() - 1) % s.tabs.len()
-                } else {
-                    (s.active + 1) % s.tabs.len()
-                };
-                select_tab(s, next);
-                return;
-            }
-            Key::Named(NamedKey::PageUp) if ctrl && !shift && !alt => {
-                let prev = (s.active + s.tabs.len() - 1) % s.tabs.len();
-                select_tab(s, prev);
-                return;
-            }
-            Key::Named(NamedKey::PageDown) if ctrl && !shift && !alt => {
-                let next = (s.active + 1) % s.tabs.len();
-                select_tab(s, next);
-                return;
-            }
-            _ => {}
-        }
-    }
-
-    // Font size shortcuts:
-    // - macOS: Cmd+= / Cmd+- / Cmd+0
-    // - Linux: Ctrl+= / Ctrl+- / Ctrl+0 (also supports Shift: Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0, and Super)
-    #[cfg(target_os = "macos")]
-    let zoom_mod = super_key && !ctrl && !alt;
-    #[cfg(not(target_os = "macos"))]
-    let zoom_mod = (ctrl && !alt && !super_key) || (super_key && !ctrl && !alt);
-    if zoom_mod {
-        if let Key::Character(ch) = &ev.logical_key {
-            match ch.as_str() {
-                "=" | "+" => return zoom(s, 1.0),
-                "-" | "_" => return zoom(s, -1.0),
-                "0" | ")" => return zoom(s, 0.0),
-                _ => {}
-            }
-        }
-    }
-    if super_key {
+    if s.history_search.is_open && handle_history_search_key(s, &ev.logical_key, m) {
         return;
     }
 
-    // Shift+PageUp / PageDown scrolls the scrollback buffer locally.
-    if shift {
-        let rows = s.tabs[s.active].active_pane().grid.lock().rows.saturating_sub(1).max(1) as isize;
-        match ev.logical_key {
-            Key::Named(NamedKey::PageUp) => {
-                s.tabs[s.active].active_pane().grid.lock().scroll_display(rows);
-                s.window.request_redraw();
-                return;
-            }
-            Key::Named(NamedKey::PageDown) => {
-                s.tabs[s.active].active_pane().grid.lock().scroll_display(-rows);
-                s.window.request_redraw();
-                return;
-            }
-            _ => {}
+    let alt_screen = s.tabs.get(s.active).is_some_and(|t| t.active_pane().grid.lock().alt_active);
+    if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
+        if run_action(s, action, event_loop, waker) {
+            return;
         }
     }
+    // Unbound Cmd/Super combinations never reach the shell.
+    if s.tabs.is_empty() || m.sup {
+        return;
+    }
 
+    let pane = s.tabs[s.active].active_pane();
     let app_cursor = {
-        let mut g = s.tabs[s.active].active_pane().grid.lock();
+        let mut g = pane.grid.lock();
         g.reset_display();
         g.app_cursor
     };
 
-    let m = 1 + (shift as u8) + if alt { 2 } else { 0 } + if ctrl { 4 } else { 0 };
-    let mut scratch = [0u8; 32];
-    let bytes: &[u8] = match &ev.logical_key {
-        Key::Named(NamedKey::Enter) => {
-            #[cfg(target_os = "macos")]
-            let is_zoom = super_key && shift && !ctrl && !alt;
-            #[cfg(not(target_os = "macos"))]
-            let is_zoom = (ctrl && shift && !alt && !super_key) || (super_key && shift && !ctrl && !alt);
-            if is_zoom {
-                toggle_split_zoom(s);
+    match &ev.logical_key {
+        // Ctrl+U at a prompt: delete back to the prompt only (vim keeps its half-page scroll).
+        Key::Character(ch) if m == (keymap::Mods { ctrl: true, ..Default::default() }) && ch.eq_ignore_ascii_case("u") => {
+            let (alt_active, del_bytes) = {
+                let g = pane.grid.lock();
+                (g.alt_active, g.calculate_delete_before_cursor())
+            };
+            if !alt_active {
+                if let Some(bytes) = del_bytes {
+                    pane.pty.write(&bytes);
+                    s.window.request_redraw();
+                }
                 return;
             }
-
+        }
+        Key::Named(NamedKey::Enter) => {
             let cmd = {
-                let g = s.tabs[s.active].active_pane().grid.lock();
+                let g = pane.grid.lock();
                 // Full-screen apps (vim, less, REPL UIs) are not shell commands.
                 if g.alt_active { String::new() } else { g.current_prompt_input() }
             };
             if !cmd.is_empty() {
                 s.history_search.add_session_command(&cmd);
             }
-            if alt { b"\x1b\r" } else { b"\r" }
         }
-        Key::Named(NamedKey::Backspace) => {
-            if alt { b"\x1b\x7f" } else if ctrl { b"\x08" } else { b"\x7f" }
-        }
-        Key::Named(NamedKey::Tab) => {
-            if shift { b"\x1b[Z" } else { b"\t" }
-        }
-        Key::Named(NamedKey::Escape) => b"\x1b",
-        Key::Named(NamedKey::Space) => {
-            if ctrl { b"\x00" } else if alt { b"\x1b " } else { b" " }
-        }
-        #[cfg(target_os = "macos")]
-        Key::Named(NamedKey::ArrowLeft) if alt && !ctrl && !shift && !super_key => b"\x1bb",
-        #[cfg(target_os = "macos")]
-        Key::Named(NamedKey::ArrowRight) if alt && !ctrl && !shift && !super_key => b"\x1bf",
-        #[cfg(not(target_os = "macos"))]
-        Key::Named(NamedKey::ArrowLeft) if !shift && !super_key && (alt ^ ctrl) => b"\x1bb",
-        #[cfg(not(target_os = "macos"))]
-        Key::Named(NamedKey::ArrowRight) if !shift && !super_key && (alt ^ ctrl) => b"\x1bf",
-        Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::Home | NamedKey::End)) => {
-            let code = match k {
-                NamedKey::ArrowUp => b'A',
-                NamedKey::ArrowDown => b'B',
-                NamedKey::ArrowRight => b'C',
-                NamedKey::ArrowLeft => b'D',
-                NamedKey::Home => b'H',
-                _ => b'F',
-            };
-            if m > 1 {
-                let n = push_csi_mod(&mut scratch, 1, m, code);
-                &scratch[..n]
-            } else {
-                scratch[0] = 0x1b;
-                scratch[1] = if app_cursor { b'O' } else { b'[' };
-                scratch[2] = code;
-                &scratch[..3]
+        _ => {}
+    }
+
+    if let Some(bytes) = keymap::encode(keymap::PLATFORM, &ev.logical_key, ev.text.as_deref(), m, app_cursor) {
+        pane.pty.write(&bytes);
+    }
+}
+
+/// Keys while the history search popup is open. Returns `false` for keys the popup
+/// does not consume (e.g. `Cmd+V`), which then go through normal shortcut handling.
+fn handle_history_search_key(s: &mut State, key: &Key, m: keymap::Mods) -> bool {
+    let visible_rows = s.renderer.history_popup_geometry(&s.history_search).map_or(10, |g| g.4);
+    let hs = &mut s.history_search;
+    match key {
+        Key::Named(NamedKey::Escape) => hs.close(),
+        Key::Named(k @ (NamedKey::Enter | NamedKey::Tab)) => {
+            let cmd = hs.selected_command().map(str::to_string);
+            hs.close();
+            if let (Some(cmd), Some(tab)) = (cmd, s.tabs.get(s.active)) {
+                // Ctrl+E Ctrl+U clears the current line before inserting the command;
+                // Enter runs it, Tab leaves it for editing.
+                let mut payload = Vec::with_capacity(cmd.len() + 3);
+                payload.extend_from_slice(b"\x05\x15");
+                payload.extend_from_slice(cmd.as_bytes());
+                if *k == NamedKey::Enter {
+                    payload.push(b'\r');
+                }
+                tab.active_pane().pty.write(&payload);
             }
         }
-        Key::Named(k @ (NamedKey::Insert | NamedKey::Delete | NamedKey::PageUp | NamedKey::PageDown)) => {
-            let num = match k {
-                NamedKey::Insert => 2,
-                NamedKey::Delete => 3,
-                NamedKey::PageUp => 5,
-                _ => 6,
-            };
-            let n = push_tilde(&mut scratch, num, m);
-            &scratch[..n]
+        Key::Named(NamedKey::Delete) => {
+            hs.delete_selected();
         }
-        Key::Named(k @ (NamedKey::F1 | NamedKey::F2 | NamedKey::F3 | NamedKey::F4)) if m == 1 => {
-            scratch[0] = 0x1b;
-            scratch[1] = b'O';
-            scratch[2] = match k {
-                NamedKey::F1 => b'P',
-                NamedKey::F2 => b'Q',
-                NamedKey::F3 => b'R',
-                _ => b'S',
-            };
-            &scratch[..3]
+        Key::Named(NamedKey::ArrowDown) => hs.select_next(visible_rows),
+        Key::Named(NamedKey::ArrowUp) => hs.select_prev(),
+        Key::Named(NamedKey::PageDown) => hs.page_down(visible_rows),
+        Key::Named(NamedKey::PageUp) => hs.page_up(visible_rows),
+        Key::Named(NamedKey::Home) => hs.select_first(),
+        Key::Named(NamedKey::End) => hs.select_last(visible_rows),
+        Key::Named(NamedKey::Backspace) => hs.backspace(),
+        Key::Character(ch) if m.ctrl => match ch.as_str() {
+            // fzf bindings: Ctrl+R toggles relevance/recency sorting, Ctrl+D deletes.
+            "r" => hs.toggle_sort(),
+            "d" => {
+                hs.delete_selected();
+            }
+            "n" | "j" => hs.select_next(visible_rows),
+            "p" | "k" => hs.select_prev(),
+            "c" | "g" => hs.close(),
+            "u" | "w" => hs.clear_query(),
+            _ => return true,
+        },
+        Key::Character(ch) if m.alt && ch.eq_ignore_ascii_case("s") => hs.toggle_sort(),
+        Key::Character(ch) if !m.sup && !m.alt => ch.chars().for_each(|c| hs.append_char(c)),
+        Key::Character(_) => return false,
+        _ => return true,
+    }
+    s.renderer.invalidate();
+    s.window.request_redraw();
+    true
+}
+
+/// Execute a shortcut. Returns `false` when it does not apply in the current state
+/// (e.g. switching tabs with a single tab), so the key falls through to the shell.
+fn run_action(
+    s: &mut State,
+    action: keymap::Action,
+    event_loop: &ActiveEventLoop,
+    waker: &Waker,
+) -> bool {
+    use keymap::Action as A;
+
+    // These work even with no open tab (macOS keeps running without windows).
+    match action {
+        A::Quit => event_loop.exit(),
+        A::Minimize => s.window.set_minimized(true),
+        A::OpenConfig => config::open_config_in_editor(),
+        A::ReloadConfig => reload_config(s),
+        A::NewTab if s.tabs.is_empty() => open_fresh_tab(s, waker),
+        A::NewTab => duplicate_active_tab(s, waker),
+        _ if s.tabs.is_empty() => {}
+        _ => return run_tab_action(s, action, event_loop, waker),
+    }
+    true
+}
+
+fn run_tab_action(
+    s: &mut State,
+    action: keymap::Action,
+    event_loop: &ActiveEventLoop,
+    waker: &Waker,
+) -> bool {
+    use keymap::Action as A;
+    let tabs = s.tabs.len();
+    let panes = s.tabs[s.active].panes.len();
+    match action {
+        A::ClearScreen => {
+            let pane = s.tabs[s.active].active_pane();
+            pane.grid.lock().clear_history();
+            pane.pty.write(b"\x0c");
+            s.window.request_redraw();
         }
-        Key::Named(k) => {
-            let num: Option<u8> = match k {
-                NamedKey::F1 => Some(11),
-                NamedKey::F2 => Some(12),
-                NamedKey::F3 => Some(13),
-                NamedKey::F4 => Some(14),
-                NamedKey::F5 => Some(15),
-                NamedKey::F6 => Some(17),
-                NamedKey::F7 => Some(18),
-                NamedKey::F8 => Some(19),
-                NamedKey::F9 => Some(20),
-                NamedKey::F10 => Some(21),
-                NamedKey::F11 => Some(23),
-                NamedKey::F12 => Some(24),
-                _ => None,
-            };
-            let Some(num) = num else { return };
-            let n = push_tilde(&mut scratch, num, m);
-            &scratch[..n]
+        A::HistorySearch => {
+            let initial = s.tabs[s.active].active_pane().grid.lock().current_prompt_input();
+            s.history_search.open((!initial.is_empty()).then_some(initial.as_str()));
+            s.renderer.invalidate();
+            s.window.request_redraw();
         }
-        Key::Character(ch) if ctrl => {
-            if ch.eq_ignore_ascii_case("u") && !alt && !super_key && !shift {
-                let (alt_active, del_bytes) = {
-                    let pane = s.tabs[s.active].active_pane();
-                    let g = pane.grid.lock();
-                    (g.alt_active, g.calculate_delete_before_cursor())
+        A::CloseTab => close_active_pane_or_tab(s, event_loop),
+        A::SplitRight => split_active_pane(s, SplitDirection::Vertical, waker),
+        A::SplitDown => split_active_pane(s, SplitDirection::Horizontal, waker),
+        A::EqualizeSplits => equalize_splits(s),
+        A::ToggleSplitZoom => toggle_split_zoom(s),
+        A::Copy => {
+            if let Some(text) = s.tabs[s.active].active_pane().grid.lock().selected_text() {
+                copy_to_clipboard(&text);
+            }
+        }
+        A::Paste => {
+            if let Some(text) = paste_from_clipboard().filter(|t| !t.is_empty()) {
+                let pane = s.tabs[s.active].active_pane();
+                let bracketed = {
+                    let mut g = pane.grid.lock();
+                    g.reset_display();
+                    g.bracketed_paste
                 };
-                if !alt_active {
-                    if let Some(bytes) = del_bytes {
-                        s.tabs[s.active].active_pane().pty.write(&bytes);
-                        s.window.request_redraw();
-                    }
-                    return;
+                pane.pty.write(&paste_payload(&text, bracketed));
+                s.window.request_redraw();
+            }
+        }
+        A::PrevTab | A::NextTab | A::SelectTab(_) if tabs < 2 => return false,
+        A::PrevTab => select_tab(s, (s.active + tabs - 1) % tabs),
+        A::NextTab => select_tab(s, (s.active + 1) % tabs),
+        A::SelectTab(n) => select_tab(s, if n == 8 { tabs - 1 } else { n }),
+        A::PrevSplit | A::NextSplit if panes < 2 => return false,
+        A::PrevSplit => cycle_split(s, false),
+        A::NextSplit => cycle_split(s, true),
+        A::Navigate(dir) => {
+            // At the left/right edge, move to the neighbouring tab instead.
+            if !navigate_split_directional(s, dir) && tabs > 1 {
+                match dir {
+                    Direction::Left => select_tab(s, (s.active + tabs - 1) % tabs),
+                    Direction::Right => select_tab(s, (s.active + 1) % tabs),
+                    _ => {}
                 }
             }
-            let b = ch.as_bytes()[0];
-            let c = match b {
-                b'a'..=b'z' => b - b'a' + 1,
-                b'A'..=b'Z' => b - b'A' + 1,
-                b'@' | b'2' | b' ' => 0,
-                b'[' | b'3' => 27,
-                b'\\' | b'4' => 28,
-                b']' | b'5' => 29,
-                b'^' | b'6' => 30,
-                b'_' | b'7' | b'/' => 31,
-                b'?' | b'8' => 127,
-                _ => return,
-            };
-            if alt {
-                scratch[0] = 0x1b;
-                scratch[1] = c;
-                &scratch[..2]
-            } else {
-                scratch[0] = c;
-                &scratch[..1]
-            }
         }
-        _ => {
-            let Some(txt) = &ev.text else { return };
-            if txt.is_empty() {
-                return;
-            }
-            if alt && txt.len() + 1 <= scratch.len() {
-                scratch[0] = 0x1b;
-                scratch[1..1 + txt.len()].copy_from_slice(txt.as_bytes());
-                &scratch[..1 + txt.len()]
-            } else {
-                txt.as_bytes()
-            }
+        A::ResizeSplit(delta) => resize_active_split(s, delta),
+        A::ZoomIn => zoom(s, 1.0),
+        A::ZoomOut => zoom(s, -1.0),
+        A::ZoomReset => zoom(s, 0.0),
+        A::ScrollPageUp | A::ScrollPageDown => {
+            let mut g = s.tabs[s.active].active_pane().grid.lock();
+            let page = g.rows.saturating_sub(1).max(1) as isize;
+            g.scroll_display(if action == A::ScrollPageUp { page } else { -page });
+            drop(g);
+            s.window.request_redraw();
         }
-    };
-    s.tabs[s.active].active_pane().pty.write(bytes);
-}
-
-fn push_csi_mod(buf: &mut [u8; 32], p1: u8, m: u8, suffix: u8) -> usize {
-    use std::io::Write;
-    let mut cur = std::io::Cursor::new(&mut buf[..]);
-    let _ = write!(cur, "\x1b[{p1};{m}{}", suffix as char);
-    cur.position() as usize
-}
-
-fn push_tilde(buf: &mut [u8; 32], num: u8, m: u8) -> usize {
-    use std::io::Write;
-    let mut cur = std::io::Cursor::new(&mut buf[..]);
-    if m > 1 {
-        let _ = write!(cur, "\x1b[{num};{m}~");
-    } else {
-        let _ = write!(cur, "\x1b[{num}~");
+        A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab => {}
     }
-    cur.position() as usize
+    true
 }
 
 fn copy_to_clipboard(text: &str) {
@@ -2581,10 +1968,8 @@ fn paste_from_clipboard() -> Option<String> {
 fn main() {
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
     let mut app = App {
-        proxy,
-        wakeup_queued: Arc::new(AtomicBool::new(false)),
+        waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)) },
         state: None,
     };
     event_loop.run_app(&mut app).expect("run app");
@@ -2655,7 +2040,7 @@ mod latency_benchmarks {
         for _ in 0..iters {
             for q in &queries {
                 let q_terms = history::parse_fzf_query(q);
-                for (_idx, cmd) in sample_commands.iter().enumerate() {
+                for cmd in sample_commands.iter() {
                     let t_lower: Vec<char> = cmd.to_lowercase().chars().collect();
                     let t_str_lower = cmd.to_lowercase();
                     let mut matched = true;

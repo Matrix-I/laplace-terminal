@@ -272,7 +272,7 @@ pub fn find_directional_neighbor(
                     let bot = (p.row + p.rows).min(active.row + active.rows);
                     if top < bot {
                         let dist = active.col - (p.col + p.cols);
-                        if best.map_or(true, |(_, d)| dist < d) {
+                        if best.is_none_or(|(_, d)| dist < d) {
                             best = Some((p.id, dist));
                         }
                     }
@@ -284,7 +284,7 @@ pub fn find_directional_neighbor(
                     let bot = (p.row + p.rows).min(active.row + active.rows);
                     if top < bot {
                         let dist = p.col - (active.col + active.cols);
-                        if best.map_or(true, |(_, d)| dist < d) {
+                        if best.is_none_or(|(_, d)| dist < d) {
                             best = Some((p.id, dist));
                         }
                     }
@@ -296,7 +296,7 @@ pub fn find_directional_neighbor(
                     let right = (p.col + p.cols).min(active.col + active.cols);
                     if left < right {
                         let dist = active.row - (p.row + p.rows);
-                        if best.map_or(true, |(_, d)| dist < d) {
+                        if best.is_none_or(|(_, d)| dist < d) {
                             best = Some((p.id, dist));
                         }
                     }
@@ -308,7 +308,7 @@ pub fn find_directional_neighbor(
                     let right = (p.col + p.cols).min(active.col + active.cols);
                     if left < right {
                         let dist = p.row - (active.row + active.rows);
-                        if best.map_or(true, |(_, d)| dist < d) {
+                        if best.is_none_or(|(_, d)| dist < d) {
                             best = Some((p.id, dist));
                         }
                     }
