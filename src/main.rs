@@ -1615,15 +1615,7 @@ fn handle_key(
                 return;
             }
             Key::Named(NamedKey::Backspace) => {
-                #[cfg(target_os = "macos")]
-                let is_clear = super_key && !ctrl && !alt;
-                #[cfg(not(target_os = "macos"))]
-                let is_clear = (super_key || (ctrl && shift)) && !alt;
-                if is_clear {
-                    s.history_search.clear_query();
-                } else {
-                    s.history_search.backspace();
-                }
+                s.history_search.backspace();
                 s.renderer.invalidate();
                 s.window.request_redraw();
                 return;
@@ -1691,52 +1683,19 @@ fn handle_key(
         }
     }
 
-    #[cfg(target_os = "macos")]
-    let is_delete_before = super_key && !ctrl && !alt && matches!(&ev.logical_key, Key::Named(NamedKey::Backspace));
-    #[cfg(not(target_os = "macos"))]
-    let is_delete_before = ((super_key && !ctrl && !alt) || (ctrl && shift && !alt && !super_key))
-        && matches!(&ev.logical_key, Key::Named(NamedKey::Backspace));
-    if is_delete_before && !s.tabs.is_empty() {
-        if let Some(tab) = s.tabs.get_mut(s.active) {
-            let del_bytes = tab.active_pane().grid.lock().calculate_delete_before_cursor();
-            if let Some(bytes) = del_bytes {
-                tab.active_pane().pty.write(&bytes);
-                s.window.request_redraw();
-            }
-        }
-        return;
-    }
-
-    #[cfg(target_os = "macos")]
-    let is_delete_after_del = super_key && !ctrl && !alt && matches!(&ev.logical_key, Key::Named(NamedKey::Delete));
-    #[cfg(not(target_os = "macos"))]
-    let is_delete_after_del = ((super_key && !ctrl && !alt) || (ctrl && shift && !alt && !super_key))
-        && matches!(&ev.logical_key, Key::Named(NamedKey::Delete));
-    if is_delete_after_del && !s.tabs.is_empty() {
-        if let Some(tab) = s.tabs.get_mut(s.active) {
-            let del_bytes = tab.active_pane().grid.lock().calculate_delete_after_cursor();
-            if let Some(bytes) = del_bytes {
-                tab.active_pane().pty.write(&bytes);
-                s.window.request_redraw();
-            }
-        }
-        return;
-    }
-
     if let Key::Character(ch) = &ev.logical_key {
-        // Delete all text after cursor: Cmd+K on macOS, Ctrl+Shift+K / Super+K on Linux
+        // Clear Screen & Scrollback buffer: Cmd+K on macOS, Ctrl+Shift+K on Linux (matches Terminal.app, iTerm2, Ghostty)
         #[cfg(target_os = "macos")]
-        let is_delete_after_k = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("k");
+        let is_clear_screen = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("k");
         #[cfg(not(target_os = "macos"))]
-        let is_delete_after_k = ((super_key && !ctrl && !alt && !shift) || (ctrl && shift && !alt && !super_key))
+        let is_clear_screen = ((super_key && !ctrl && !alt && !shift) || (ctrl && shift && !alt && !super_key))
             && ch.eq_ignore_ascii_case("k");
-        if is_delete_after_k && !s.tabs.is_empty() {
+        if is_clear_screen && !s.tabs.is_empty() {
             if let Some(tab) = s.tabs.get_mut(s.active) {
-                let del_bytes = tab.active_pane().grid.lock().calculate_delete_after_cursor();
-                if let Some(bytes) = del_bytes {
-                    tab.active_pane().pty.write(&bytes);
-                    s.window.request_redraw();
-                }
+                let pane = tab.active_pane_mut();
+                pane.grid.lock().clear_history();
+                pane.pty.write(b"\x0c");
+                s.window.request_redraw();
             }
             return;
         }
@@ -2170,7 +2129,13 @@ fn handle_key(
         Key::Named(NamedKey::Space) => {
             if ctrl { b"\x00" } else if alt { b"\x1b " } else { b" " }
         }
+        #[cfg(target_os = "macos")]
+        Key::Named(NamedKey::ArrowLeft) if alt && !ctrl && !shift && !super_key => b"\x1bb",
+        #[cfg(target_os = "macos")]
+        Key::Named(NamedKey::ArrowRight) if alt && !ctrl && !shift && !super_key => b"\x1bf",
+        #[cfg(not(target_os = "macos"))]
         Key::Named(NamedKey::ArrowLeft) if !shift && !super_key && (alt ^ ctrl) => b"\x1bb",
+        #[cfg(not(target_os = "macos"))]
         Key::Named(NamedKey::ArrowRight) if !shift && !super_key && (alt ^ ctrl) => b"\x1bf",
         Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::Home | NamedKey::End)) => {
             let code = match k {
@@ -2233,6 +2198,20 @@ fn handle_key(
             &scratch[..n]
         }
         Key::Character(ch) if ctrl => {
+            if ch.eq_ignore_ascii_case("u") && !alt && !super_key && !shift {
+                let (alt_active, del_bytes) = {
+                    let pane = s.tabs[s.active].active_pane();
+                    let g = pane.grid.lock();
+                    (g.alt_active, g.calculate_delete_before_cursor())
+                };
+                if !alt_active {
+                    if let Some(bytes) = del_bytes {
+                        s.tabs[s.active].active_pane().pty.write(&bytes);
+                        s.window.request_redraw();
+                    }
+                    return;
+                }
+            }
             let b = ch.as_bytes()[0];
             let c = match b {
                 b'a'..=b'z' => b - b'a' + 1,

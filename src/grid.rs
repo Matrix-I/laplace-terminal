@@ -471,6 +471,7 @@ impl Grid {
 
     /// Calculate bytes to delete all text on the command line after the cursor.
     /// Sends `Ctrl+K` (`\x0b`, standard kill-line).
+    #[allow(dead_code)]
     pub fn calculate_delete_after_cursor(&self) -> Option<Vec<u8>> {
         if self.alt_active {
             return Some(vec![0x0b]);
@@ -508,6 +509,13 @@ impl Grid {
             self.selection = None;
             self.all_dirty = true;
         }
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history = 0;
+        self.display_offset = 0;
+        self.selection = None;
+        self.all_dirty = true;
     }
 
     pub fn set_selection(&mut self, sel: Option<Selection>) {
