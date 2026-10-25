@@ -1615,7 +1615,15 @@ fn handle_key(
                 return;
             }
             Key::Named(NamedKey::Backspace) => {
-                s.history_search.backspace();
+                #[cfg(target_os = "macos")]
+                let is_clear = super_key && !ctrl && !alt;
+                #[cfg(not(target_os = "macos"))]
+                let is_clear = (super_key || (ctrl && shift)) && !alt;
+                if is_clear {
+                    s.history_search.clear_query();
+                } else {
+                    s.history_search.backspace();
+                }
                 s.renderer.invalidate();
                 s.window.request_redraw();
                 return;
@@ -1683,7 +1691,56 @@ fn handle_key(
         }
     }
 
+    #[cfg(target_os = "macos")]
+    let is_delete_before = super_key && !ctrl && !alt && matches!(&ev.logical_key, Key::Named(NamedKey::Backspace));
+    #[cfg(not(target_os = "macos"))]
+    let is_delete_before = ((super_key && !ctrl && !alt) || (ctrl && shift && !alt && !super_key))
+        && matches!(&ev.logical_key, Key::Named(NamedKey::Backspace));
+    if is_delete_before && !s.tabs.is_empty() {
+        if let Some(tab) = s.tabs.get_mut(s.active) {
+            let del_bytes = tab.active_pane().grid.lock().calculate_delete_before_cursor();
+            if let Some(bytes) = del_bytes {
+                tab.active_pane().pty.write(&bytes);
+                s.window.request_redraw();
+            }
+        }
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let is_delete_after_del = super_key && !ctrl && !alt && matches!(&ev.logical_key, Key::Named(NamedKey::Delete));
+    #[cfg(not(target_os = "macos"))]
+    let is_delete_after_del = ((super_key && !ctrl && !alt) || (ctrl && shift && !alt && !super_key))
+        && matches!(&ev.logical_key, Key::Named(NamedKey::Delete));
+    if is_delete_after_del && !s.tabs.is_empty() {
+        if let Some(tab) = s.tabs.get_mut(s.active) {
+            let del_bytes = tab.active_pane().grid.lock().calculate_delete_after_cursor();
+            if let Some(bytes) = del_bytes {
+                tab.active_pane().pty.write(&bytes);
+                s.window.request_redraw();
+            }
+        }
+        return;
+    }
+
     if let Key::Character(ch) = &ev.logical_key {
+        // Delete all text after cursor: Cmd+K on macOS, Ctrl+Shift+K / Super+K on Linux
+        #[cfg(target_os = "macos")]
+        let is_delete_after_k = super_key && !ctrl && !alt && ch.eq_ignore_ascii_case("k");
+        #[cfg(not(target_os = "macos"))]
+        let is_delete_after_k = ((super_key && !ctrl && !alt && !shift) || (ctrl && shift && !alt && !super_key))
+            && ch.eq_ignore_ascii_case("k");
+        if is_delete_after_k && !s.tabs.is_empty() {
+            if let Some(tab) = s.tabs.get_mut(s.active) {
+                let del_bytes = tab.active_pane().grid.lock().calculate_delete_after_cursor();
+                if let Some(bytes) = del_bytes {
+                    tab.active_pane().pty.write(&bytes);
+                    s.window.request_redraw();
+                }
+            }
+            return;
+        }
+
         // Built-in History Search:
         // - Ctrl+R (at shell prompt when !alt_active)
         // - macOS: Cmd+R

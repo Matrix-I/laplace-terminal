@@ -440,6 +440,52 @@ impl Grid {
         }
     }
 
+    /// Calculate bytes to delete all text on the command line before the cursor.
+    /// If at a shell prompt, returns the exact number of backspaces needed to clear
+    /// from the prompt end up to the cursor without affecting the prompt.
+    /// In alternate screen mode, returns `Ctrl+U` (`\x15`).
+    pub fn calculate_delete_before_cursor(&self) -> Option<Vec<u8>> {
+        if self.alt_active {
+            return Some(vec![0x15]); // Ctrl+U
+        }
+        if self.cur.row >= self.rows || self.cols == 0 {
+            return None;
+        }
+        let (cmd_start, _) = self.prompt_command_range();
+        let cur_col = self.cur.col.min(self.cols);
+        if cur_col <= cmd_start {
+            return None;
+        }
+        let r = self.display_row(self.cur.row);
+        let mut count = 0;
+        for c in &r[cmd_start..cur_col] {
+            if c.codepoint != 0 {
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some(vec![0x7f; count])
+    }
+
+    /// Calculate bytes to delete all text on the command line after the cursor.
+    /// Sends `Ctrl+K` (`\x0b`, standard kill-line).
+    pub fn calculate_delete_after_cursor(&self) -> Option<Vec<u8>> {
+        if self.alt_active {
+            return Some(vec![0x0b]);
+        }
+        if self.cur.row >= self.rows || self.cols == 0 {
+            return Some(vec![0x0b]);
+        }
+        let (_, cmd_end) = self.prompt_command_range();
+        let cur_col = self.cur.col.min(self.cols);
+        if cur_col >= cmd_end {
+            return None;
+        }
+        Some(vec![0x0b])
+    }
+
     /// Scroll the viewport through history (positive = towards older lines).
     pub fn scroll_display(&mut self, delta: isize) {
         if self.alt_active {
@@ -1702,5 +1748,37 @@ mod tests {
         // Click at dummy cell 3 on 🦀: snaps to col 2 and also moves 6 chars left
         let dummy_click = g_emoji.calculate_cursor_movement_to(0, 3).expect("dummy snap");
         assert_eq!(dummy_click, b"\x1b[D".repeat(6));
+    }
+
+    #[test]
+    fn delete_before_and_after_cursor() {
+        let mut g = Grid::new(80, 5);
+        feed(&mut g, "$ cargo build");
+        // Prompt ends at 2, cursor is at 13
+        assert_eq!(g.cur.col, 13);
+
+        // At end of line: delete before cursor deletes 11 characters ("cargo build")
+        assert_eq!(g.calculate_delete_before_cursor(), Some(vec![0x7f; 11]));
+        // At end of line: nothing to delete after cursor
+        assert_eq!(g.calculate_delete_after_cursor(), None);
+
+        // Move cursor to middle (col 7, after "cargo ")
+        g.cur.col = 7;
+        // Deletes 5 characters ("cargo ") before cursor
+        assert_eq!(g.calculate_delete_before_cursor(), Some(vec![0x7f; 5]));
+        // Deletes text after cursor ("build") via Ctrl+K
+        assert_eq!(g.calculate_delete_after_cursor(), Some(vec![0x0b]));
+
+        // Move cursor to start of command (col 2)
+        g.cur.col = 2;
+        // Nothing before cursor (prompt is protected)
+        assert_eq!(g.calculate_delete_before_cursor(), None);
+        // Deletes text after cursor via Ctrl+K
+        assert_eq!(g.calculate_delete_after_cursor(), Some(vec![0x0b]));
+
+        // In alt screen mode
+        g.alt_active = true;
+        assert_eq!(g.calculate_delete_before_cursor(), Some(vec![0x15])); // Ctrl+U
+        assert_eq!(g.calculate_delete_after_cursor(), Some(vec![0x0b]));  // Ctrl+K
     }
 }
