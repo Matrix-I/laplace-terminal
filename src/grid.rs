@@ -11,6 +11,8 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 use vte::{Params, Perform};
 
+use crate::search::SearchText;
+
 /// Number of scrollback lines kept above the visible screen.
 pub const SCROLLBACK: usize = 5000;
 
@@ -131,6 +133,34 @@ pub struct Selection {
     pub end: (usize, usize),   // (row, col)
 }
 
+/// Search matches on one visible row (see `Grid::search_hits`).
+pub struct SearchHits<'a> {
+    line: usize,
+    /// Index of the focused match within `hits`, if it is on this row.
+    current: Option<usize>,
+    hits: &'a [Selection],
+}
+
+/// How a cell is highlighted by find-in-terminal.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SearchHit {
+    None,
+    Match,
+    Current,
+}
+
+impl SearchHits<'_> {
+    #[inline]
+    pub fn at(&self, col: usize) -> SearchHit {
+        let pos = (self.line, col);
+        match self.hits.iter().position(|m| m.start <= pos && pos <= m.end) {
+            None => SearchHit::None,
+            Some(i) if Some(i) == self.current => SearchHit::Current,
+            Some(_) => SearchHit::Match,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hyperlink {
     pub row: usize,
@@ -217,6 +247,10 @@ pub struct Grid {
 
     /// Active mouse text selection (rows are absolute line numbers).
     selection: Option<Selection>,
+    /// Find-in-terminal matches (absolute lines, top-to-bottom, non-overlapping).
+    search_matches: Vec<Selection>,
+    /// Index of the focused match in `search_matches`.
+    search_current: Option<usize>,
 
     /// Per visible row dirty flags, plus a "everything changed" shortcut.
     pub dirty: Vec<bool>,
@@ -271,6 +305,8 @@ impl Grid {
             clipboard_request: None,
             prompt_input_mark: None,
             selection: None,
+            search_matches: Vec::new(),
+            search_current: None,
             dirty: vec![true; rows],
             all_dirty: true,
             response: Vec::with_capacity(256),
@@ -625,6 +661,7 @@ impl Grid {
         self.history = 0;
         self.display_offset = 0;
         self.selection = None;
+        self.clear_search();
         self.all_dirty = true;
     }
 
@@ -933,6 +970,103 @@ impl Grid {
     }
 
     // ------------------------------------------------------------------
+    // Find in terminal
+    // ------------------------------------------------------------------
+
+    /// Snapshot of the scrollback and screen for `SearchText::find`, so matching
+    /// runs without holding the grid lock.
+    pub fn search_text(&self) -> SearchText {
+        let first = if self.alt_active { self.lines_pushed } else { self.lines_pushed - self.history };
+        let last = self.lines_pushed + self.rows;
+        let mut text = String::new();
+        let mut rows = Vec::with_capacity(last - first);
+        for l in first..last {
+            let Some(cells) = self.line_cells(l) else { continue };
+            let row_start = text.len();
+            rows.push((row_start, l));
+            let mut skip_next = false;
+            for cell in cells {
+                if std::mem::take(&mut skip_next) {
+                    continue;
+                }
+                let ch = char::from_u32(cell.codepoint).filter(|&c| c != '\0').unwrap_or(' ');
+                skip_next = char_width(ch) == 2;
+                text.push(ch);
+            }
+            if !self.line_wrapped(l) {
+                text.truncate(text.trim_end_matches(' ').len().max(row_start));
+                text.push('\n');
+            }
+        }
+        SearchText { text, rows }
+    }
+
+    /// Replace the search matches and focus the one closest to the bottom of the
+    /// viewport (searching upwards from what the user is looking at).
+    pub fn set_search_matches(&mut self, matches: Vec<Selection>) {
+        let bottom = self.abs_line(self.rows - 1);
+        self.search_current = match matches.partition_point(|m| m.start.0 <= bottom) {
+            0 if matches.is_empty() => None,
+            0 => Some(0),
+            n => Some(n - 1),
+        };
+        self.search_matches = matches;
+        self.all_dirty = true;
+        self.reveal_search_current();
+    }
+
+    pub fn clear_search(&mut self) {
+        if !self.search_matches.is_empty() {
+            self.search_matches = Vec::new();
+            self.all_dirty = true;
+        }
+        self.search_current = None;
+    }
+
+    /// Focus the previous (`up`, older) or next match, wrapping around.
+    pub fn search_step(&mut self, up: bool) {
+        let n = self.search_matches.len();
+        let Some(cur) = self.search_current.filter(|_| n > 0) else { return };
+        self.search_current = Some(if up { (cur + n - 1) % n } else { (cur + 1) % n });
+        self.all_dirty = true;
+        self.reveal_search_current();
+    }
+
+    /// `(focused index, match count)`.
+    pub fn search_status(&self) -> (Option<usize>, usize) {
+        (self.search_current, self.search_matches.len())
+    }
+
+    /// Scroll the viewport so the focused match is visible (centered when it was not).
+    fn reveal_search_current(&mut self) {
+        let Some(m) = self.search_current.and_then(|i| self.search_matches.get(i)) else { return };
+        if self.alt_active {
+            return;
+        }
+        let line = m.start.0;
+        let top = self.lines_pushed - self.display_offset;
+        if line < top || line >= top + self.rows {
+            let offset = (self.lines_pushed + self.rows / 2).saturating_sub(line).min(self.history);
+            if offset != self.display_offset {
+                self.display_offset = offset;
+                self.all_dirty = true;
+            }
+        }
+    }
+
+    /// Matches intersecting visible row `row`, for per-cell highlighting.
+    pub fn search_hits(&self, row: usize) -> SearchHits<'_> {
+        let line = self.abs_line(row);
+        let lo = self.search_matches.partition_point(|m| m.end.0 < line);
+        let hi = self.search_matches.partition_point(|m| m.start.0 <= line).max(lo);
+        SearchHits {
+            line,
+            current: self.search_current.and_then(|c| c.checked_sub(lo)),
+            hits: &self.search_matches[lo..hi],
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Primitive edits (all in place, no allocation)
     // ------------------------------------------------------------------
 
@@ -1209,6 +1343,8 @@ impl Grid {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        // Reflow renumbers lines; the caller re-runs an open search.
+        self.clear_search();
 
         // 1. Main screen + scrollback -> logical lines (soft wraps joined), tracking
         //    the main cursor as (line, offset).
@@ -2127,6 +2263,34 @@ mod tests {
         feed(&mut g, "abcdefg\r\nxy");
         g.set_selection(Some(Selection { start: (0, 0), end: (2, 3) }));
         assert_eq!(g.selected_text().as_deref(), Some("abcdefg\nxy"));
+    }
+
+    #[test]
+    fn search_focuses_nearest_match_and_scrolls_to_it() {
+        let mut g = Grid::new(10, 3);
+        for i in 0..10 {
+            feed(&mut g, &format!("line{i}\r\n"));
+        }
+        let re = regex::Regex::new(r"line[13]").unwrap();
+        let matches = g.search_text().find(&re);
+        assert_eq!(matches.len(), 2);
+        g.set_search_matches(matches);
+        // Bottom-most match is focused first and scrolled into view.
+        assert_eq!(g.search_status(), (Some(1), 2));
+        assert!((0..g.rows).any(|r| line(&g, r) == "line3"));
+        let r = (0..g.rows).find(|&r| line(&g, r) == "line3").unwrap();
+        assert_eq!(g.search_hits(r).at(0), SearchHit::Current);
+        assert_eq!(g.search_hits(r).at(5), SearchHit::None);
+
+        g.search_step(true);
+        assert_eq!(g.search_status(), (Some(0), 2));
+        let r = (0..g.rows).find(|&r| line(&g, r) == "line1").unwrap();
+        assert_eq!(g.search_hits(r).at(4), SearchHit::Current);
+        g.search_step(true);
+        assert_eq!(g.search_status(), (Some(1), 2), "wraps around");
+
+        g.clear_search();
+        assert_eq!(g.search_status(), (None, 0));
     }
 
     #[test]

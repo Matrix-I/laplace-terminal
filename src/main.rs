@@ -11,6 +11,7 @@ mod macos;
 mod mouse;
 mod pty;
 mod renderer;
+mod search;
 mod split;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,7 @@ use crate::grid::{Grid, Hyperlink, Selection};
 use crate::history::HistorySearch;
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
+use crate::search::SearchBar;
 use crate::split::{Direction, PaneRect, Rect, SplitDirection, SplitNode};
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +158,8 @@ struct State {
     cursor_blink_epoch: std::time::Instant,
     focused: bool,
     history_search: HistorySearch,
+    /// Find-in-terminal box (`Cmd+F` / `Ctrl+Shift+F`).
+    search: SearchBar,
     first_frame: bool,
     /// IME composition in progress (Telex, Pinyin, ...); keys belong to the IME while non-empty.
     ime_preedit: String,
@@ -301,6 +305,7 @@ impl ApplicationHandler<AppEvent> for App {
             cursor_blink_epoch: std::time::Instant::now(),
             focused: true,
             history_search: HistorySearch::new(),
+            search: SearchBar::new(),
             first_frame: true,
             ime_preedit: String::new(),
             ime_cursor_cell: None,
@@ -962,6 +967,13 @@ fn render_active(s: &mut State) {
     if s.tabs.is_empty() {
         return;
     }
+    if s.search.is_open {
+        // Follow focus to another pane or tab; mirror the grid's match status.
+        if s.search.pane_id != Some(s.tabs[s.active].active_pane_id) {
+            refresh_search(s);
+        }
+        (s.search.current, s.search.total) = s.tabs[s.active].active_pane().grid.lock().search_status();
+    }
     // Synchronized output (DECSET 2026): wait for the application to finish its
     // frame, but never longer than 150ms.
     let syncing = s.tabs[s.active].panes.iter().any(|p| {
@@ -1009,6 +1021,7 @@ fn render_active(s: &mut State) {
         hovered_link,
         blink_on,
         Some(&s.history_search),
+        &s.search,
         &s.ime_preedit,
     );
 
@@ -1192,6 +1205,9 @@ fn handle_ime(s: &mut State, ime: Ime) {
                     s.history_search.append_char(c);
                 }
                 s.renderer.invalidate();
+            } else if s.search.is_open {
+                text.chars().for_each(|c| s.search.append_char(c));
+                refresh_search(s);
             } else {
                 let pane = s.tabs[s.active].active_pane();
                 pane.grid.lock().reset_display();
@@ -1636,6 +1652,10 @@ fn sync_size(s: &mut State) {
             }
         }
     }
+    // Reflow cleared the matches.
+    if s.search.is_open {
+        refresh_search(s);
+    }
 }
 
 fn zoom(s: &mut State, delta_pt: f32) {
@@ -1681,6 +1701,16 @@ fn handle_key(
     }
 
     let alt_screen = s.tabs.get(s.active).is_some_and(|t| t.active_pane().grid.lock().alt_active);
+    if s.search.is_open {
+        // Keys belong to the search box; shortcuts it does not consume still work,
+        // but nothing reaches the shell.
+        if !handle_search_key(s, &ev.logical_key, m) {
+            if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
+                run_action(s, action, event_loop, waker);
+            }
+        }
+        return;
+    }
     if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
         if run_action(s, action, event_loop, waker) {
             return;
@@ -1785,6 +1815,106 @@ fn handle_history_search_key(s: &mut State, key: &Key, m: keymap::Mods) -> bool 
     true
 }
 
+/// Keys while the find box is open. Returns `false` for keys it does not consume
+/// (e.g. `Cmd+V`, `Ctrl+Shift+V`, `Cmd+1`), which go through shortcut handling.
+fn handle_search_key(s: &mut State, key: &Key, m: keymap::Mods) -> bool {
+    let plain_ctrl = m.ctrl && !m.shift && !m.alt && !m.sup;
+    match key {
+        Key::Named(NamedKey::Escape) => close_search(s),
+        // Enter searches upwards (older output), Shift+Enter downwards.
+        Key::Named(NamedKey::Enter) => search_step(s, !m.shift),
+        Key::Named(NamedKey::ArrowUp) => search_step(s, true),
+        Key::Named(NamedKey::ArrowDown) => search_step(s, false),
+        Key::Named(NamedKey::Backspace) => {
+            if m.ctrl || m.alt || m.sup {
+                s.search.clear_query();
+            } else {
+                s.search.backspace();
+            }
+            refresh_search(s);
+        }
+        Key::Named(NamedKey::Space) if !m.ctrl && !m.sup => {
+            s.search.append_char(' ');
+            refresh_search(s);
+        }
+        // Cmd+G / Cmd+Shift+G (Super on Linux): find next / previous.
+        Key::Character(ch) if m.sup && !m.ctrl && !m.alt && ch.eq_ignore_ascii_case("g") => search_step(s, !m.shift),
+        Key::Character(ch) if plain_ctrl || (m.alt && !m.ctrl && !m.sup && ch.eq_ignore_ascii_case("r")) => {
+            match ch.to_lowercase().as_str() {
+                "r" => {
+                    s.search.toggle_regex();
+                    refresh_search(s);
+                }
+                "u" | "w" => {
+                    s.search.clear_query();
+                    refresh_search(s);
+                }
+                "c" | "g" => close_search(s),
+                "p" => search_step(s, true),
+                "n" => search_step(s, false),
+                _ => {}
+            }
+        }
+        Key::Character(ch) if !m.sup && !m.ctrl => {
+            ch.chars().for_each(|c| s.search.append_char(c));
+            refresh_search(s);
+        }
+        Key::Character(_) => return false,
+        _ => {}
+    }
+    true
+}
+
+/// Re-run the find query on the active pane, moving the matches off a pane that
+/// lost focus.
+fn refresh_search(s: &mut State) {
+    let Some(tab) = s.tabs.get(s.active) else { return };
+    let pane = tab.active_pane();
+    if let Some(old) = s.search.pane_id.filter(|&id| id != pane.id) {
+        if let Some(p) = s.tabs.iter().flat_map(|t| &t.panes).find(|p| p.id == old) {
+            p.grid.lock().clear_search();
+        }
+    }
+    s.search.pane_id = Some(pane.id);
+    // Copy the text under the lock, match outside it.
+    let matches = match s.search.compile() {
+        Some(re) => {
+            let text = pane.grid.lock().search_text();
+            text.find(&re)
+        }
+        None => Vec::new(),
+    };
+    {
+        let mut g = pane.grid.lock();
+        if matches.is_empty() {
+            g.clear_search();
+        } else {
+            g.set_search_matches(matches);
+        }
+        (s.search.current, s.search.total) = g.search_status();
+    }
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
+fn search_step(s: &mut State, up: bool) {
+    if let Some(tab) = s.tabs.get(s.active) {
+        tab.active_pane().grid.lock().search_step(up);
+        s.window.request_redraw();
+    }
+}
+
+fn close_search(s: &mut State) {
+    if let Some(id) = s.search.pane_id {
+        if let Some(p) = s.tabs.iter().flat_map(|t| &t.panes).find(|p| p.id == id) {
+            p.grid.lock().clear_search();
+        }
+    }
+    s.search.close();
+    s.renderer.invalidate();
+    s.window.request_redraw();
+}
+
 /// Execute a shortcut. Returns `false` when it does not apply in the current state
 /// (e.g. switching tabs with a single tab), so the key falls through to the shell.
 fn run_action(
@@ -1825,7 +1955,15 @@ fn run_tab_action(
             pane.pty.write(b"\x0c");
             s.window.request_redraw();
         }
+        A::Find => {
+            s.history_search.close();
+            s.search.open();
+            refresh_search(s);
+        }
         A::HistorySearch => {
+            if s.search.is_open {
+                close_search(s);
+            }
             let initial = s.tabs[s.active].active_pane().grid.lock().current_prompt_input();
             s.history_search.open((!initial.is_empty()).then_some(initial.as_str()));
             s.renderer.invalidate();
@@ -1839,6 +1977,12 @@ fn run_tab_action(
         A::Copy => {
             if let Some(text) = s.tabs[s.active].active_pane().grid.lock().selected_text() {
                 copy_to_clipboard(&text);
+            }
+        }
+        A::Paste if s.search.is_open => {
+            if let Some(text) = paste_from_clipboard() {
+                s.search.append_str(&text);
+                refresh_search(s);
             }
         }
         A::Paste => {

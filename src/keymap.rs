@@ -38,6 +38,7 @@ impl Mods {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Action {
     ClearScreen,
+    Find,
     HistorySearch,
     Quit,
     Minimize,
@@ -95,6 +96,8 @@ fn resolve_char(platform: Platform, ch: &str, m: Mods, alt_screen: bool) -> Opti
 
     let action = match ch {
         "k" if terminal_mod => Action::ClearScreen,
+        // Bare Ctrl+F is readline forward-char, so Linux uses Ctrl+Shift+F / Super+F.
+        "f" if terminal_mod => Action::Find,
         "r" if (m.only(true, false, false, false) && !alt_screen)
             || m.only(false, false, false, true)
             || (!mac && m.only(true, false, true, false)) =>
@@ -340,6 +343,7 @@ mod tests {
             ("q", Action::Quit),
             ("m", Action::Minimize),
             ("k", Action::ClearScreen),
+            ("f", Action::Find),
         ] {
             assert_eq!(mac(&ch(c), CMD), Some(action), "Cmd+{c}");
             assert_eq!(linux(&ch(c), CTRL_SHIFT), Some(action), "Ctrl+Shift+{c}");

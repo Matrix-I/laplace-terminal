@@ -9,8 +9,9 @@ use parking_lot::Mutex;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet, GlyphStyle};
-use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink, BG_UNDERLINE, FG_BOLD, FG_ITALIC};
+use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink, SearchHit, BG_UNDERLINE, FG_BOLD, FG_ITALIC};
 use crate::history::HistorySearch;
+use crate::search::SearchBar;
 use crate::split::PaneRect;
 
 pub struct RenderPane<'a> {
@@ -401,6 +402,7 @@ impl Renderer {
         Some((row.min(rows - 1), col.min(cols - 1)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_panes(
         &mut self,
         panes: &[RenderPane],
@@ -408,6 +410,7 @@ impl Renderer {
         hovered_link: Option<(u64, &Hyperlink)>,
         cursor_blink_on: bool,
         history_search: Option<&HistorySearch>,
+        search: &SearchBar,
         preedit: &str,
     ) {
         if panes.is_empty() {
@@ -425,7 +428,8 @@ impl Renderer {
             self.last_hovered_link = hovered_link.map(|(id, l)| (id, l.clone()));
         }
 
-        let is_search_open = history_search.is_some_and(|h| h.is_open);
+        // Overlays are redrawn every frame on top of the cells.
+        let is_search_open = history_search.is_some_and(|h| h.is_open) || search.is_open;
         let (cols, term_rows) = self.grid_size_for_tabs(tab_bar.is_some());
         let total_rows = term_rows + top_rows;
         let n = cols * total_rows;
@@ -617,6 +621,10 @@ impl Renderer {
             hi = hi.max(cy);
         }
 
+        if search.is_open {
+            self.build_search_box(cols, top_rows, total_rows, search, &mut lo, &mut hi);
+        }
+
         if let Some(search) = history_search {
             if search.is_open {
                 self.build_history_popup(cols, total_rows, search, &mut lo, &mut hi);
@@ -717,7 +725,12 @@ impl Renderer {
     ) {
         const SEL_BG: u32 = 0x3D59_A180;
         const SEL_FG: u32 = 0xFFFF_FFFF;
+        const MATCH_BG: u32 = 0x5C4D_2080; // Dim amber for every find match
+        const MATCH_FG: u32 = 0xF9E2_AFFF;
+        const CURRENT_BG: u32 = 0xF9A8_2580; // Bright orange for the focused match
+        const CURRENT_FG: u32 = 0x1E1E_2EFF;
         let row = g.display_row(src_row);
+        let hits = g.search_hits(src_row);
         let start = dst_row * window_cols + dst_col;
         let out = &mut self.instances[start..start + p_cols];
         let is_link_row = hovered_link.is_some_and(|l| l.row == src_row);
@@ -776,12 +789,16 @@ impl Renderer {
             }
             let glyph_with_div = (slot as u32) | (div_flags << 16);
 
+            let hit = hits.at(col);
             if g.is_selected(src_row, col) {
                 *dst = Instance {
                     glyph: glyph_with_div,
                     fg: SEL_FG,
                     bg: (SEL_BG | (cell.bg & 1)) | underline_flag,
                 };
+            } else if hit != SearchHit::None {
+                let (fg, bg) = if hit == SearchHit::Current { (CURRENT_FG, CURRENT_BG) } else { (MATCH_FG, MATCH_BG) };
+                *dst = Instance { glyph: glyph_with_div, fg, bg: bg | (cell.bg & 1) | underline_flag };
             } else {
                 *dst = Instance {
                     glyph: glyph_with_div,
@@ -859,6 +876,125 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// Find box in the top-right corner, below the tab bar: `(x0, y0, width)`, 3 rows tall.
+    fn search_box_geometry(cols: usize, top_rows: usize, total_rows: usize) -> Option<(usize, usize, usize)> {
+        let w = 46.min(cols.saturating_sub(2));
+        (w >= 24 && total_rows >= top_rows + 4).then(|| (cols - w - 1, top_rows, w))
+    }
+
+    fn build_search_box(
+        &mut self,
+        cols: usize,
+        top_rows: usize,
+        total_rows: usize,
+        search: &SearchBar,
+        lo: &mut usize,
+        hi: &mut usize,
+    ) {
+        let Some((x0, y0, w)) = Self::search_box_geometry(cols, top_rows, total_rows) else {
+            return;
+        };
+        const BOX_BG: u32 = 0x1819_2480;
+        const BORDER_FG: u32 = 0x585B_70FF;
+        const TITLE_FG: u32 = 0x89DC_EBFF;
+        const PROMPT_FG: u32 = 0xA6E3_A1FF;
+        const QUERY_FG: u32 = 0xF2F2_F7FF;
+        const DIM_FG: u32 = 0x6C70_86FF;
+        const CURSOR_FG: u32 = 0xCBA6_F7FF;
+        const COUNT_FG: u32 = 0xA6AD_C8FF;
+        const ERROR_FG: u32 = 0xF38B_A8FF;
+        const MODE_ON_FG: u32 = 0xCBA6_F7FF;
+
+        let queue = &self.queue;
+        let atlas = &mut self.atlas;
+        let instances = &mut self.instances;
+        // Draws `ch` at a box-relative cell (both halves of a wide glyph).
+        let mut put = |row: usize, col: usize, ch: char, fg: u32| {
+            let width = char_width(ch).max(1);
+            let (left, right) = atlas.glyph_slots(queue, ch as u32, width, GlyphStyle::default());
+            let i = (y0 + row) * cols + x0 + col;
+            instances[i] = Instance { glyph: left as u32, fg, bg: BOX_BG };
+            if width == 2 {
+                instances[i + 1] = Instance { glyph: right as u32, fg, bg: BOX_BG };
+            }
+        };
+
+        // Frame: ╭─ Find ───╮ / │ … │ / ╰─ ^R regex ─╯
+        for c in 0..w {
+            let (top, mid, bot) = match c {
+                0 => ('╭', '│', '╰'),
+                _ if c == w - 1 => ('╮', '│', '╯'),
+                _ => ('─', ' ', '─'),
+            };
+            put(0, c, top, BORDER_FG);
+            put(1, c, mid, BORDER_FG);
+            put(2, c, bot, BORDER_FG);
+        }
+        for (i, ch) in " Find ".chars().enumerate() {
+            put(0, 2 + i, ch, TITLE_FG);
+        }
+        let hint = " ↵ ↑  ⇧↵ ↓  ^R regex  esc ";
+        let hint_len = hint.chars().count();
+        if hint_len + 3 < w {
+            for (i, ch) in hint.chars().enumerate() {
+                put(2, w - 2 - hint_len + i, ch, DIM_FG);
+            }
+        }
+
+        // Right side of the input row: match counter and the `.*` regex badge.
+        let (status, status_fg) = if search.invalid {
+            ("invalid regex".to_string(), ERROR_FG)
+        } else if search.query.is_empty() {
+            (String::new(), COUNT_FG)
+        } else if search.total == 0 {
+            ("no matches".to_string(), ERROR_FG)
+        } else {
+            let cur = search.current.map_or(0, |c| c + 1);
+            let more = if search.total >= crate::search::MAX_MATCHES { "+" } else { "" };
+            (format!("{cur}/{}{more}", search.total), COUNT_FG)
+        };
+        put(1, w - 4, '.', if search.regex { MODE_ON_FG } else { DIM_FG });
+        put(1, w - 3, '*', if search.regex { MODE_ON_FG } else { DIM_FG });
+        let status_len = status.chars().count();
+        let status_x = w - 5 - status_len;
+        for (i, ch) in status.chars().enumerate() {
+            put(1, status_x + i, ch, status_fg);
+        }
+
+        // Query, showing its tail when it does not fit, followed by the cursor.
+        put(1, 2, '❯', PROMPT_FG);
+        let room = status_x.saturating_sub(6);
+        let chars: Vec<char> = search.query.chars().collect();
+        let mut col = 4;
+        if chars.is_empty() {
+            let placeholder = if search.regex { "Search (regex)" } else { "Search (literal)" };
+            for (i, ch) in placeholder.chars().take(room).enumerate() {
+                put(1, 5 + i, ch, DIM_FG);
+            }
+        } else {
+            let total: usize = chars.iter().map(|&c| char_width(c).max(1)).sum();
+            // Keep the tail visible; reserve a cell for the leading ellipsis.
+            let budget = if total > room { room.saturating_sub(1) } else { room };
+            let (mut start, mut shown) = (chars.len(), 0);
+            while start > 0 && shown + char_width(chars[start - 1]).max(1) <= budget {
+                start -= 1;
+                shown += char_width(chars[start]).max(1);
+            }
+            if start > 0 {
+                put(1, col, '…', DIM_FG);
+                col += 1;
+            }
+            for &ch in &chars[start..] {
+                put(1, col, ch, QUERY_FG);
+                col += char_width(ch).max(1);
+            }
+        }
+        put(1, col, '▌', CURSOR_FG);
+
+        *lo = (*lo).min(y0);
+        *hi = (*hi).max(y0 + 2);
     }
 
     /// Compute position and dimensions of the history search popup `(x0, y0, width, height, visible_rows)`.

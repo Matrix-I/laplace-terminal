@@ -39,6 +39,7 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **Hover URL Underline** | `Cmd + Mouse Move` | `Ctrl + Mouse Move` *(or `Super + Mouse Move`)* | Shows pointer cursor and URL preview pill. |
 | **Bypass Mouse Reporting** | `Shift + Click / Drag` | `Shift + Click / Drag` | Local selection while an app tracks the mouse; `Cmd`/`Super + Click` still opens links. |
 | **CLI History Search** | `Ctrl + R` *(or `Cmd + R`)* | `Ctrl + R` *(or `Super + R` / `Ctrl + Shift + R`)* | Zero-latency fuzzy history search; preserves vim redo in alternate screen. |
+| **Find in Terminal** | `Cmd + F` | `Ctrl + Shift + F` *(or `Super + F`)* | Regex search box in the top-right corner (smart case, `Ctrl+R` toggles literal). `Enter`/`↑`/`Cmd+G`: older match, `Shift+Enter`/`↓`/`Cmd+Shift+G`: newer. Bare `Ctrl+F` stays readline forward-char. |
 | **Split Pane Right (Vertical)** | `Cmd + D` | `Ctrl + Shift + D` *(or `Super + D`)* | Splits active pane vertically with hairline divider. |
 | **Split Pane Down (Horizontal)** | `Cmd + Shift + D` | `Ctrl + Shift + E` / `Super + Shift + D` / `Ctrl + Alt + D` | Splits active pane horizontally. |
 | **Clear Screen & Scrollback** | `Cmd + K` | `Ctrl + Shift + K` | Clears scrollback history buffer and redraws prompt at top (matches iTerm2/Terminal.app/Ghostty). |
@@ -79,6 +80,7 @@ When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` 
 | `src/shader.wgsl` | Single instanced draw call for all cells |
 | `src/split.rs` | Split-pane layout tree |
 | `src/history.rs` | Shell history search (fzf-style matching) |
+| `src/search.rs` | Find-in-terminal box state and regex matching over a scrollback snapshot |
 | `src/config.rs` | Ghostty-compatible config parsing and themes |
 | `src/macos.rs` | Objective-C FFI (`msg_send!`) for window/vibrancy/dock integration; no-op stubs elsewhere |
 
