@@ -38,6 +38,7 @@ impl Mods {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Action {
     ClearScreen,
+    SelectAll,
     Find,
     HistorySearch,
     Quit,
@@ -96,6 +97,8 @@ fn resolve_char(platform: Platform, ch: &str, m: Mods, alt_screen: bool) -> Opti
 
     let action = match ch {
         "k" if terminal_mod => Action::ClearScreen,
+        // Bare Ctrl+A is readline beginning-of-line, so Linux uses Ctrl+Shift+A / Super+A.
+        "a" if terminal_mod => Action::SelectAll,
         // Bare Ctrl+F is readline forward-char, so Linux uses Ctrl+Shift+F / Super+F.
         "f" if terminal_mod => Action::Find,
         "r" if (m.only(true, false, false, false) && !alt_screen)
@@ -187,6 +190,11 @@ fn resolve_named(platform: Platform, key: NamedKey, m: Mods) -> Option<Action> {
         NamedKey::PageDown if m.shift && !m.sup => Some(Action::ScrollPageDown),
         _ => None,
     }
+}
+
+/// Shift, Ctrl, Alt/Option or Cmd/Super pressed on its own.
+pub fn is_modifier_key(key: &Key) -> bool {
+    matches!(key, Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super | NamedKey::Meta))
 }
 
 /// Bytes the shell expects for a key press that is not a shortcut. `text` is the
@@ -660,6 +668,7 @@ mod tests {
             ("m", Action::Minimize),
             ("k", Action::ClearScreen),
             ("f", Action::Find),
+            ("a", Action::SelectAll),
         ] {
             assert_eq!(mac(&ch(c), CMD), Some(action), "Cmd+{c}");
             assert_eq!(linux(&ch(c), CTRL_SHIFT), Some(action), "Ctrl+Shift+{c}");
@@ -738,6 +747,15 @@ mod tests {
         assert_eq!(mac(&enter, CMD_SHIFT), Some(Action::ToggleSplitZoom));
         assert_eq!(linux(&enter, CTRL_SHIFT), Some(Action::ToggleSplitZoom));
         assert_eq!(mac(&enter, NONE), None);
+    }
+
+    #[test]
+    fn modifier_keys_alone() {
+        for k in [NamedKey::Shift, NamedKey::Control, NamedKey::Alt, NamedKey::Super, NamedKey::Meta] {
+            assert!(is_modifier_key(&Key::Named(k)), "{k:?}");
+        }
+        assert!(!is_modifier_key(&Key::Named(NamedKey::Enter)));
+        assert!(!is_modifier_key(&ch("c")));
     }
 
     #[test]

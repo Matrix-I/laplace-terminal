@@ -37,6 +37,8 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **Reset Zoom** | `Cmd + 0` | `Ctrl + 0` *(with or without Shift, or Super)* | Resets font size to configured default. |
 | **Open URL / Path Click** | `Cmd + Click` | `Ctrl + Click` *(or `Super + Click`)* | Opens target with `open` (macOS), `xdg-open` (Linux). |
 | **Hover URL Underline** | `Cmd + Mouse Move` | `Ctrl + Mouse Move` *(or `Super + Mouse Move`)* | Shows pointer cursor and URL preview pill. |
+| **Select All** | `Cmd + A` | `Ctrl + Shift + A` *(or `Super + A`)* | Selects all scrollback and screen text (then copy with `Cmd+C` / `Ctrl+Shift+C`). Bare `Ctrl+A` is readline beginning-of-line. |
+| **Extend Selection** | `Shift + Click / Drag` | `Shift + Click / Drag` | Moves the nearest end of the current selection to the mouse (the far end stays anchored) and copies it; without a selection it starts a new one. |
 | **Bypass Mouse Reporting** | `Shift + Click / Drag` | `Shift + Click / Drag` | Local selection while an app tracks the mouse; `Cmd`/`Super + Click` still opens links. |
 | **CLI History Search** | `Ctrl + R` *(or `Cmd + R`)* | `Ctrl + R` *(or `Super + R` / `Ctrl + Shift + R`)* | Zero-latency fuzzy history search; preserves vim redo in alternate screen. |
 | **Find in Terminal** | `Cmd + F` | `Ctrl + Shift + F` *(or `Super + F`)* | Regex search box in the top-right corner (smart case, `Ctrl+R` toggles literal). `Enter`/`↑`/`Cmd+G`: older match, `Shift+Enter`/`↓`/`Cmd+Shift+G`: newer. Bare `Ctrl+F` stays readline forward-char. |

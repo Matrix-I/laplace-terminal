@@ -785,6 +785,47 @@ impl Grid {
         }
     }
 
+    /// Select everything in scrollback and on screen, from the first to the last
+    /// line with text (`Cmd+A`).
+    pub fn select_all(&mut self) {
+        let first = if self.alt_active { self.lines_pushed } else { self.lines_pushed - self.history };
+        let has_text = |l: &usize| self.line_cells(*l).is_some_and(|r| r.iter().any(|c| !Self::is_blank(c.codepoint)));
+        let lines = first..self.lines_pushed + self.rows;
+        let sel = lines.clone().find(has_text).zip(lines.rev().find(has_text)).map(|(top, bottom)| Selection {
+            start: (top, 0),
+            end: (bottom, self.cols - 1),
+        });
+        if self.selection != sel {
+            self.selection = sel;
+            self.all_dirty = true;
+        }
+    }
+
+    /// Shift+Click: move the selection end nearest to visible `(row, col)` there,
+    /// keeping the other end as the anchor. Returns `false` without a selection.
+    pub fn extend_selection(&mut self, row: usize, col: usize) -> bool {
+        let Some(sel) = self.selection else {
+            return false;
+        };
+        let pos = (self.abs_line(row), col);
+        let (a, b) = sel.ordered();
+        let offset = |p: (usize, usize)| p.0 * self.cols + p.1;
+        let anchor = if offset(pos).abs_diff(offset(a)) <= offset(pos).abs_diff(offset(b)) { b } else { a };
+        self.selection = Some(Selection { start: anchor, end: pos });
+        self.all_dirty = true;
+        true
+    }
+
+    /// Dragging after Shift+Click: move the selection end, keeping its anchor
+    /// (which may be in scrollback, off screen).
+    pub fn set_selection_end(&mut self, row: usize, col: usize) {
+        let end = (self.abs_line(row), col);
+        if let Some(sel) = self.selection.as_mut().filter(|s| s.end != end) {
+            sel.end = end;
+            self.all_dirty = true;
+        }
+    }
+
     #[inline]
     pub fn is_selected(&self, row: usize, col: usize) -> bool {
         let Some(sel) = self.selection else {
@@ -2583,6 +2624,35 @@ mod tests {
         assert_eq!(g.kitty_keyboard_flags(), 0, "oldest entries were dropped");
         feed(&mut g, "\x1b[u");
         assert_eq!((g.cur.row, g.cur.col), (1, 2));
+    }
+
+    #[test]
+    fn select_all_spans_scrollback_and_skips_blank_edges() {
+        let mut g = Grid::new(6, 3);
+        feed(&mut g, "\r\none\r\ntwo\r\nthree\r\nfour");
+        g.select_all();
+        assert_eq!(g.selected_text().as_deref(), Some("one\ntwo\nthree\nfour"));
+        g.clear_history();
+        feed(&mut g, "\x1b[2J\x1b[H");
+        g.select_all();
+        assert_eq!(g.selected_text(), None, "nothing to select on an empty screen");
+    }
+
+    #[test]
+    fn shift_click_extends_from_the_far_end() {
+        let mut g = Grid::new(10, 3);
+        feed(&mut g, "abcdefghij\r\nklmnopqrst\r\nuvwxyz");
+        assert!(!g.extend_selection(0, 0), "no selection to extend");
+        g.set_selection(Some(Selection { start: (1, 2), end: (1, 4) }));
+        // After the selection: the start stays.
+        assert!(g.extend_selection(2, 1));
+        assert_eq!(g.selected_text().as_deref(), Some("mnopqrst\nuv"));
+        // Before it: the far end (now 2,1) stays the anchor.
+        assert!(g.extend_selection(0, 8));
+        assert_eq!(g.selected_text().as_deref(), Some("ij\nklmnopqrst\nuv"));
+        // Dragging on keeps that anchor.
+        g.set_selection_end(1, 0);
+        assert_eq!(g.selected_text().as_deref(), Some("klmnopqrst\nuv"));
     }
 
     #[test]

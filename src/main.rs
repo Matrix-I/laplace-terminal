@@ -155,6 +155,8 @@ struct State {
     /// The press that started this click sequence landed on an already selected
     /// block, so the double-click widens the selection to the line.
     click_on_selected_block: bool,
+    /// The current drag started with Shift+Click and moves only the selection end.
+    extend_drag: bool,
     hovered_link: Option<HoveredPaneLink>,
     config: config::Config,
     config_mtime: Option<std::time::SystemTime>,
@@ -306,6 +308,7 @@ impl ApplicationHandler<AppEvent> for App {
             active_click_pane_id: None,
             click_count: 0,
             click_on_selected_block: false,
+            extend_drag: false,
             hovered_link: None,
             config: cfg,
             config_mtime,
@@ -459,7 +462,12 @@ impl ApplicationHandler<AppEvent> for App {
                                 let pane_row = cell_row.saturating_sub(target.row).min(target.rows.saturating_sub(1));
                                 let pane_col = cell_col.saturating_sub(target.col).min(target.cols.saturating_sub(1));
                                 let end = (pane_row, pane_col);
-                                if end != start || s.drag_moved {
+                                if s.extend_drag {
+                                    if let Some(pane) = tab.pane(pane_id) {
+                                        pane.grid.lock().set_selection_end(pane_row, pane_col);
+                                        s.window.request_redraw();
+                                    }
+                                } else if end != start || s.drag_moved {
                                     s.drag_moved = true;
                                     if let Some(pane) = tab.pane(pane_id) {
                                         pane.grid.lock().set_selection(Some(Selection { start, end }));
@@ -590,10 +598,20 @@ impl ApplicationHandler<AppEvent> for App {
                                 }
                                 s.active_click_pane_id = Some(clicked_id);
 
+                                // Shift+Click extends the pane's selection to the mouse;
+                                // dragging on keeps moving its end.
+                                let extended = s.mods.shift_key()
+                                    && tab.pane(clicked_id).is_some_and(|p| p.grid.lock().extend_selection(pane_row, pane_col));
+                                s.extend_drag = extended;
+                                if extended {
+                                    s.selecting = true;
+                                    s.drag_moved = true;
+                                    s.window.request_redraw();
+                                }
+
                                 let now = std::time::Instant::now();
-                                let multi_click = s
-                                    .last_click_time
-                                    .is_some_and(|t| now.duration_since(t).as_millis() <= 450)
+                                let multi_click = !extended
+                                    && s.last_click_time.is_some_and(|t| now.duration_since(t).as_millis() <= 450)
                                     && s.last_click_cell.is_some_and(|(lr, _)| lr == pane_row);
 
                                 s.click_count = if multi_click {
@@ -601,10 +619,11 @@ impl ApplicationHandler<AppEvent> for App {
                                 } else {
                                     1
                                 };
-                                s.last_click_time = Some(now);
+                                // A Shift+Click never starts a double-click.
+                                s.last_click_time = (!extended).then_some(now);
                                 s.last_click_cell = Some((pane_row, pane_col));
 
-                                if let Some(pane) = tab.pane(clicked_id) {
+                                if let Some(pane) = tab.pane(clicked_id).filter(|_| !extended) {
                                     match s.click_count {
                                         // Double-click selects a block of text; again on a
                                         // selected block, the whole line.
@@ -1707,10 +1726,7 @@ fn handle_key(
         return;
     }
 
-    let is_modifier = matches!(
-        &ev.logical_key,
-        Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super | NamedKey::Meta)
-    );
+    let is_modifier = keymap::is_modifier_key(&ev.logical_key);
     if !is_modifier && s.config.mouse_hide_while_typing && !s.mouse_hidden {
         s.window.set_cursor_visible(false);
         s.mouse_hidden = true;
@@ -1749,7 +1765,11 @@ fn handle_key(
     let pane = s.tabs[s.active].active_pane();
     let (app_cursor, kitty_flags) = {
         let mut g = pane.grid.lock();
-        g.reset_display();
+        // A lone modifier (Cmd before C, Shift before a click) keeps the selection
+        // and the scrollback position; only real keys snap back to the prompt.
+        if !is_modifier {
+            g.reset_display();
+        }
         (g.app_cursor, g.kitty_keyboard_flags())
     };
 
@@ -2055,6 +2075,10 @@ fn run_tab_action(
         A::SplitDown => split_active_pane(s, SplitDirection::Horizontal, waker),
         A::EqualizeSplits => equalize_splits(s),
         A::ToggleSplitZoom => toggle_split_zoom(s),
+        A::SelectAll => {
+            s.tabs[s.active].active_pane().grid.lock().select_all();
+            s.window.request_redraw();
+        }
         A::Copy => {
             if let Some(text) = s.tabs[s.active].active_pane().grid.lock().selected_text() {
                 copy_to_clipboard(&text);
