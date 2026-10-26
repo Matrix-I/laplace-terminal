@@ -55,6 +55,8 @@ pub struct ShellFeatures {
     pub title: bool,
 }
 
+pub use crate::update::{AutoUpdateChannel, AutoUpdateMode};
+
 pub const DEFAULT_PALETTE: [u32; 16] = [
     0x121316, 0xF38BA8, 0xA6E3A1, 0xF5A97F, 0x00BFE3, 0xCBA6F7, 0x89DCEB, 0xD9E0EE,
     0x585B70, 0xF38BA8, 0xA6E3A1, 0xF9E2AF, 0x74C7EC, 0xF5C2E7, 0x94E2D5, 0xFFFFFF,
@@ -93,6 +95,8 @@ pub struct Config {
     pub cursor_style_blink: Option<bool>,
     pub shell_integration: ShellIntegration,
     pub shell_integration_features: ShellFeatures,
+    pub auto_update: AutoUpdateMode,
+    pub auto_update_channel: AutoUpdateChannel,
 }
 
 pub const DEFAULT_FONT_PT: f32 = 14.0;
@@ -123,6 +127,8 @@ impl Default for Config {
             cursor_style_blink: None,
             shell_integration: ShellIntegration::Detect,
             shell_integration_features: ShellFeatures { cursor: true, sudo: false, title: true },
+            auto_update: AutoUpdateMode::default(),
+            auto_update_channel: AutoUpdateChannel::default(),
         }
     }
 }
@@ -373,6 +379,29 @@ impl Config {
                     self.palette[idx] = col;
                 }
             }
+            "auto-update" => {
+                if empty {
+                    self.auto_update = AutoUpdateMode::default();
+                } else {
+                    match value.to_ascii_lowercase().as_str() {
+                        "check" => self.auto_update = AutoUpdateMode::Check,
+                        "download" => self.auto_update = AutoUpdateMode::Download,
+                        "off" => self.auto_update = AutoUpdateMode::Off,
+                        _ => return Err(format!("invalid auto-update `{value}`, expected check, download, or off")),
+                    }
+                }
+            }
+            "auto-update-channel" => {
+                if empty {
+                    self.auto_update_channel = AutoUpdateChannel::default();
+                } else {
+                    match value.to_ascii_lowercase().as_str() {
+                        "stable" => self.auto_update_channel = AutoUpdateChannel::Stable,
+                        "tip" => self.auto_update_channel = AutoUpdateChannel::Tip,
+                        _ => return Err(format!("invalid auto-update-channel `{value}`, expected stable or tip")),
+                    }
+                }
+            }
             "font-thicken"
             | "minimum-contrast"
             | "link-url"
@@ -380,7 +409,6 @@ impl Config {
             | "adjust-cursor-thickness"
             | "window-inherit-working-directory"
             | "unfocused-split-opacity"
-            | "auto-update"
             | "confirm-close-surface"
             | "alpha-blending"
             | "cursor-color" => {
@@ -843,5 +871,21 @@ copy-on-select = clipboard
         assert_eq!(c.window_colorspace, ColorSpace::DisplayP3);
         assert_eq!(c.font_family, vec!["SFMono Nerd Font"]);
         assert_eq!(c.font_size, 15.0);
+    }
+
+    #[test]
+    fn auto_update_options() {
+        let (cfg, errors) = Config::parse("auto-update = download\nauto-update-channel = tip\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.auto_update, AutoUpdateMode::Download);
+        assert_eq!(cfg.auto_update_channel, AutoUpdateChannel::Tip);
+
+        let (cfg, errors) = Config::parse("auto-update = off\nauto-update-channel = stable\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.auto_update, AutoUpdateMode::Off);
+        assert_eq!(cfg.auto_update_channel, AutoUpdateChannel::Stable);
+
+        assert_eq!(Config::default().auto_update, AutoUpdateMode::Check);
+        assert_eq!(Config::default().auto_update_channel, AutoUpdateChannel::Stable);
     }
 }

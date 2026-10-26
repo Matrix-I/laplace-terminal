@@ -13,6 +13,7 @@ mod pty;
 mod renderer;
 mod search;
 mod split;
+mod update;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,11 +34,29 @@ use crate::renderer::{Renderer, TabBarAction};
 use crate::search::SearchBar;
 use crate::split::{Direction, PaneRect, Rect, SplitDirection, SplitNode};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum AppEvent {
     WakeUp,
     ChildExit(u64),
     Reopen,
+    UpdateCheckResult(Result<update::ReleaseInfo, String>),
+    UpdateInstallResult(Result<update::Version, String>),
+}
+
+pub(crate) fn show_notification(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('\\', "\\\\").replace('"', "\\\""),
+            title.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = std::process::Command::new("notify-send").args([title, body]).spawn();
+    }
 }
 
 struct Pane {
@@ -330,6 +349,10 @@ impl ApplicationHandler<AppEvent> for App {
         #[cfg(target_os = "macos")]
         macos::register_reopen_handler(self.waker.proxy.clone());
 
+        if let Some(s) = &self.state {
+            update::check_on_startup(s.config.auto_update, s.config.auto_update_channel);
+        }
+
         macos::release_free_memory();
     }
 
@@ -417,6 +440,63 @@ impl ApplicationHandler<AppEvent> for App {
                         macos::activate_app();
                         s.renderer.invalidate();
                         s.window.request_redraw();
+                    }
+                }
+            }
+            AppEvent::UpdateCheckResult(result) => {
+                macos::close_progress_dialog();
+                update::mark_checked();
+                match result {
+                    Err(err) => {
+                        macos::alert("Update Check Failed", &format!("Unable to check for updates:\n{err}"));
+                    }
+                    Ok(release) => {
+                        let current = update::Version::current();
+                        if release.version <= current {
+                            macos::alert(
+                                "Laplace",
+                                &format!("You're up to date!\n\nLaplace v{current} is currently the newest version available."),
+                            );
+                        } else {
+                            let title = "Update Available";
+                            let message = format!(
+                                "Laplace v{} is available (you have v{}).\n\nWould you like to download and install this update now?",
+                                release.version, current
+                            );
+                            let choice = macos::alert_choice(title, &message, &["Update Now", "View Release", "Cancel"]);
+                            match choice {
+                                0 => {
+                                    macos::show_progress_dialog(
+                                        "Updating Laplace…",
+                                        &format!("Downloading and installing Laplace v{}…", release.version),
+                                    );
+                                    update::start_install_update(release, self.waker.proxy.clone());
+                                }
+                                1 => {
+                                    #[cfg(target_os = "macos")]
+                                    let _ = std::process::Command::new("open").arg(&release.html_url).spawn();
+                                    #[cfg(not(target_os = "macos"))]
+                                    let _ = std::process::Command::new("xdg-open").arg(&release.html_url).spawn();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            AppEvent::UpdateInstallResult(result) => {
+                macos::close_progress_dialog();
+                match result {
+                    Ok(new_ver) => {
+                        macos::alert(
+                            "Update Complete",
+                            &format!(
+                                "Laplace has been successfully updated to v{new_ver}!\n\nPlease restart Laplace to apply changes."
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        macos::alert("Update Failed", &format!("Failed to install update:\n{err}"));
                     }
                 }
             }
@@ -2034,6 +2114,10 @@ fn run_action(
         A::ReloadConfig => reload_config(s),
         A::NewTab if s.tabs.is_empty() => open_fresh_tab(s, waker),
         A::NewTab => duplicate_active_tab(s, waker),
+        A::CheckUpdate => {
+            macos::show_progress_dialog("Checking for Updates…", "Checking for new releases of Laplace…");
+            update::start_interactive_check(waker.proxy.clone());
+        }
         _ if s.tabs.is_empty() => {}
         _ => return run_tab_action(s, action, event_loop, waker),
     }
@@ -2130,7 +2214,7 @@ fn run_tab_action(
             drop(g);
             s.window.request_redraw();
         }
-        A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab => {}
+        A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab | A::CheckUpdate => {}
     }
     true
 }
@@ -2215,6 +2299,17 @@ fn paste_from_clipboard() -> Option<String> {
 }
 
 fn main() {
+    // `laplace +check-update` or `--check-update`.
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+check-update" || a == "--check-update") {
+        update::cli_check_update();
+        return;
+    }
+    // `laplace +update` or `--update`.
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+update" || a == "--update") {
+        let force = std::env::args().any(|a| a == "--force" || a == "-f");
+        update::cli_update(force);
+        return;
+    }
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {

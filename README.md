@@ -159,7 +159,20 @@ mouse-scroll-discrete = 3.0
 # Shell Integration
 shell-integration = "detect"     # "detect", "zsh", "bash", "none"
 shell-integration-features = "cursor,title"
+
+# Auto Update
+auto-update = "check"           # "check" (default), "download", or "off"
+auto-update-channel = "stable"  # "stable" (default) or "tip"
 ```
+
+## 🔄 Auto-Update & CLI Commands
+
+Laplace includes a built-in, zero-dependency self-updater that checks for releases on GitHub, validates SHA-256 checksums from `SHA256SUMS.txt`, and safely updates `Laplace.app` (with ad-hoc codesigning) or standalone binaries in-place.
+
+- **macOS Menu Bar**: Choose **Laplace ▸ Check for Updates…** to check and install updates interactively with native Cocoa alerts.
+- **CLI Commands**:
+  - `laplace +check-update` (or `--check-update`): Check if a new version is available without installing.
+  - `laplace +update` (or `--update`): Download and install the newest release directly in your terminal (use `--force` to reinstall current version).
 
 ---
 

@@ -85,6 +85,7 @@ When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` 
 | `src/search.rs` | Find-in-terminal box state and regex matching over a scrollback snapshot |
 | `src/config.rs` | Ghostty-compatible config parsing and themes |
 | `src/macos.rs` | Objective-C FFI (`msg_send!`) for window/vibrancy/dock integration; no-op stubs elsewhere |
+| `src/update.rs` | Auto-update checking, SHA-256 verification, asset download, self-replacement |
 
 ## Core Invariants
 

@@ -67,6 +67,8 @@ pub enum Action {
     ZoomReset,
     ScrollPageUp,
     ScrollPageDown,
+    #[allow(dead_code)]
+    CheckUpdate,
 }
 
 /// Resolve a key press to a shortcut. `alt_screen` is true while a full-screen

@@ -45,6 +45,7 @@ by priority inside each group. Tick an item when it lands on `main`.
 - [ ] Bundle the iTerm2-Color-Schemes theme set (~300 themes; Laplace ships ~8)
 - [ ] `theme = light:X,dark:Y` following the system appearance
 - [ ] `window-padding-x` / `window-padding-y` / `window-padding-balance`
+- [x] `auto-update` (`check` / `download` / `off`), `auto-update-channel` (`stable` / `tip`), menu item & CLI updater
 
 ## Windows & OS integration
 
