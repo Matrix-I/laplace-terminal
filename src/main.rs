@@ -22,7 +22,8 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::grid::{Grid, Hyperlink, Selection};
@@ -158,6 +159,9 @@ struct State {
     config: config::Config,
     config_mtime: Option<std::time::SystemTime>,
     mouse_hidden: bool,
+    /// Keys whose press Laplace handled itself (shortcuts, search box), so their
+    /// release is not reported to a Kitty-protocol application either.
+    consumed_keys: Vec<PhysicalKey>,
     cursor_blink_epoch: std::time::Instant,
     focused: bool,
     history_search: HistorySearch,
@@ -306,6 +310,7 @@ impl ApplicationHandler<AppEvent> for App {
             config: cfg,
             config_mtime,
             mouse_hidden: false,
+            consumed_keys: Vec::new(),
             cursor_blink_epoch: std::time::Instant::now(),
             focused: true,
             history_search: HistorySearch::new(),
@@ -1691,15 +1696,16 @@ fn handle_key(
     event_loop: &ActiveEventLoop,
     waker: &Waker,
 ) {
-    if ev.state != ElementState::Pressed {
-        return;
-    }
     let m = keymap::Mods {
         ctrl: s.mods.control_key(),
         alt: s.mods.alt_key(),
         shift: s.mods.shift_key(),
         sup: s.mods.super_key(),
     };
+    if ev.state != ElementState::Pressed {
+        handle_key_release(s, ev, m);
+        return;
+    }
 
     let is_modifier = matches!(
         &ev.logical_key,
@@ -1712,6 +1718,7 @@ fn handle_key(
     s.cursor_blink_epoch = std::time::Instant::now();
 
     if s.history_search.is_open && handle_history_search_key(s, &ev.logical_key, m) {
+        consume_key(s, ev);
         return;
     }
 
@@ -1719,6 +1726,7 @@ fn handle_key(
     if s.search.is_open {
         // Keys belong to the search box; shortcuts it does not consume still work,
         // but nothing reaches the shell.
+        consume_key(s, ev);
         if !handle_search_key(s, &ev.logical_key, m) {
             if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
                 run_action(s, action, event_loop, waker);
@@ -1728,19 +1736,21 @@ fn handle_key(
     }
     if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
         if run_action(s, action, event_loop, waker) {
+            consume_key(s, ev);
             return;
         }
     }
     // Unbound Cmd/Super combinations never reach the shell.
-    if s.tabs.is_empty() || m.sup {
+    if s.tabs.is_empty() || (m.sup && !is_modifier) {
+        consume_key(s, ev);
         return;
     }
 
     let pane = s.tabs[s.active].active_pane();
-    let app_cursor = {
+    let (app_cursor, kitty_flags) = {
         let mut g = pane.grid.lock();
         g.reset_display();
-        g.app_cursor
+        (g.app_cursor, g.kitty_keyboard_flags())
     };
 
     match &ev.logical_key {
@@ -1771,8 +1781,64 @@ fn handle_key(
         _ => {}
     }
 
-    if let Some(bytes) = keymap::encode(keymap::PLATFORM, &ev.logical_key, ev.text.as_deref(), m, app_cursor) {
+    let bytes = if kitty_flags != 0 {
+        let kind = if ev.repeat { keymap::KeyKind::Repeat } else { keymap::KeyKind::Press };
+        let unshifted = ev.key_without_modifiers();
+        keymap::encode_kitty(keymap::PLATFORM, &kitty_key(ev, &unshifted, kind), m, kitty_flags, app_cursor)
+    } else {
+        keymap::encode(keymap::PLATFORM, &ev.logical_key, ev.text.as_deref(), m, app_cursor)
+    };
+    if let Some(bytes) = bytes {
         pane.pty.write(&bytes);
+    }
+}
+
+/// Remember that Laplace handled this key press itself.
+fn consume_key(s: &mut State, ev: &KeyEvent) {
+    if !s.consumed_keys.contains(&ev.physical_key) {
+        // A release can be lost (e.g. focus moved away mid-press); never grow unbounded.
+        if s.consumed_keys.len() >= 16 {
+            s.consumed_keys.clear();
+        }
+        s.consumed_keys.push(ev.physical_key);
+    }
+}
+
+/// Key releases only matter to applications that asked for Kitty event reporting.
+fn handle_key_release(s: &mut State, ev: &KeyEvent, m: keymap::Mods) {
+    if let Some(i) = s.consumed_keys.iter().position(|k| *k == ev.physical_key) {
+        s.consumed_keys.swap_remove(i);
+        return;
+    }
+    if s.tabs.is_empty() || s.search.is_open || s.history_search.is_open {
+        return;
+    }
+    let pane = s.tabs[s.active].active_pane();
+    let (app_cursor, kitty_flags) = {
+        let g = pane.grid.lock();
+        (g.app_cursor, g.kitty_keyboard_flags())
+    };
+    if kitty_flags & keymap::KITTY_REPORT_EVENTS == 0 {
+        return;
+    }
+    let unshifted = ev.key_without_modifiers();
+    let key = kitty_key(ev, &unshifted, keymap::KeyKind::Release);
+    if let Some(bytes) = keymap::encode_kitty(keymap::PLATFORM, &key, m, kitty_flags, app_cursor) {
+        pane.pty.write(&bytes);
+    }
+}
+
+fn kitty_key<'a>(ev: &'a KeyEvent, unshifted: &'a Key, kind: keymap::KeyKind) -> keymap::KittyKey<'a> {
+    keymap::KittyKey {
+        key: &ev.logical_key,
+        unshifted,
+        physical: match ev.physical_key {
+            PhysicalKey::Code(code) => Some(code),
+            PhysicalKey::Unidentified(_) => None,
+        },
+        location: ev.location,
+        text: ev.text.as_deref(),
+        kind,
     }
 }
 

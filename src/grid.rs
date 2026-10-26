@@ -165,6 +165,52 @@ struct Cursor {
     origin_mode: bool,
 }
 
+/// Kitty keyboard protocol flags for one screen: the active flags plus the
+/// entries saved below them by `CSI > flags u` (at most 8, oldest dropped first).
+#[derive(Copy, Clone, Debug, Default)]
+struct KittyKeyboard {
+    flags: u8,
+    saved: [u8; 8],
+    len: usize,
+}
+
+impl KittyKeyboard {
+    /// The five progressive-enhancement bits the protocol defines.
+    const MASK: u8 = 0b1_1111;
+
+    fn push(&mut self, flags: u8) {
+        if self.len == self.saved.len() {
+            self.saved.copy_within(1.., 0);
+            self.len -= 1;
+        }
+        self.saved[self.len] = self.flags;
+        self.len += 1;
+        self.flags = flags & Self::MASK;
+    }
+
+    fn pop(&mut self, n: usize) {
+        for _ in 0..n {
+            if self.len == 0 {
+                self.flags = 0;
+                return;
+            }
+            self.len -= 1;
+            self.flags = self.saved[self.len];
+        }
+    }
+
+    /// `CSI = flags ; mode u`: 1 replaces, 2 sets bits, 3 clears bits.
+    fn set(&mut self, flags: u8, mode: usize) {
+        let flags = flags & Self::MASK;
+        match mode {
+            1 => self.flags = flags,
+            2 => self.flags |= flags,
+            3 => self.flags &= !flags,
+            _ => {}
+        }
+    }
+}
+
 /// Mouse reporting requested by the application (DECSET 9 / 1000 / 1002 / 1003).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum MouseTracking {
@@ -287,6 +333,8 @@ pub struct Grid {
     pub focus_events: bool,
     /// Translate the mouse wheel into arrow keys on the alternate screen (DECSET 1007).
     pub alt_scroll: bool,
+    /// Kitty keyboard protocol state for the main and the alternate screen.
+    kitty_keyboard: [KittyKeyboard; 2],
 
     /// Window/tab title set via OSC 0 / OSC 2 (e.g. `user@host:~/dir` or running command).
     pub title: String,
@@ -357,6 +405,7 @@ impl Grid {
             mouse_sgr: false,
             focus_events: false,
             alt_scroll: true,
+            kitty_keyboard: [KittyKeyboard::default(); 2],
             title: String::new(),
             title_changed: false,
             reported_cwd: None,
@@ -1441,6 +1490,7 @@ impl Grid {
         self.mouse_sgr = false;
         self.focus_events = false;
         self.alt_scroll = true;
+        self.kitty_keyboard = [KittyKeyboard::default(); 2];
         self.tab_stops = default_tab_stops(self.cols);
         self.selection = None;
         self.clear_rows(0, self.rows);
@@ -1638,6 +1688,11 @@ impl Grid {
                 _ => {}
             }
         }
+    }
+
+    /// Active Kitty keyboard protocol flags (`keymap::KITTY_*`) of the current screen.
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.kitty_keyboard[self.alt_active as usize].flags
     }
 
     // ------------------------------------------------------------------
@@ -2110,9 +2165,23 @@ impl Perform for Grid {
                 }
             }
             's' if !private => self.saved = self.cur,
-            'u' if !private => {
+            'u' if intermediates.is_empty() => {
                 self.cur = self.saved;
                 self.clamp_cursor();
+            }
+            // Kitty keyboard protocol: query, push, pop and set the flags.
+            'u' => {
+                let kb = &mut self.kitty_keyboard[self.alt_active as usize];
+                match intermediates {
+                    b"?" => {
+                        let flags = kb.flags;
+                        let _ = write!(self.response, "\x1b[?{flags}u");
+                    }
+                    b">" => kb.push(raw(0) as u8),
+                    b"<" => kb.pop(arg(0, 1)),
+                    b"=" => kb.set(raw(0) as u8, arg(1, 1)),
+                    _ => {}
+                }
             }
             'h' | 'l' if !private => {
                 let on = action == 'h';
@@ -2471,6 +2540,49 @@ mod tests {
         let link = g.find_hyperlink_at(0, 0, None).expect("latest link");
         assert_eq!(link.url, "https://e.test/599");
         assert!(g.extras.len() <= 256);
+    }
+
+    #[test]
+    fn kitty_keyboard_stack_per_screen() {
+        let mut g = Grid::new(10, 3);
+        feed(&mut g, "\x1b[?u");
+        assert_eq!(std::mem::take(&mut g.response), b"\x1b[?0u");
+        feed(&mut g, "\x1b[>1u\x1b[>11u");
+        assert_eq!(g.kitty_keyboard_flags(), 11);
+        feed(&mut g, "\x1b[=4;2u");
+        assert_eq!(g.kitty_keyboard_flags(), 15);
+        feed(&mut g, "\x1b[=1;3u\x1b[?u");
+        assert_eq!(std::mem::take(&mut g.response), b"\x1b[?14u");
+        feed(&mut g, "\x1b[<u");
+        assert_eq!(g.kitty_keyboard_flags(), 1);
+
+        // The alternate screen has its own stack.
+        feed(&mut g, "\x1b[?1049h");
+        assert_eq!(g.kitty_keyboard_flags(), 0);
+        feed(&mut g, "\x1b[>31u");
+        assert_eq!(g.kitty_keyboard_flags(), 31);
+        feed(&mut g, "\x1b[?1049l");
+        assert_eq!(g.kitty_keyboard_flags(), 1);
+
+        // Popping more than was pushed leaves the flags at zero.
+        feed(&mut g, "\x1b[<5u");
+        assert_eq!(g.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_stack_is_bounded_and_does_not_restore_the_cursor() {
+        let mut g = Grid::new(10, 3);
+        feed(&mut g, "\x1b[2;3H\x1b[s\x1b[1;1H");
+        for i in 1..=12 {
+            feed(&mut g, &format!("\x1b[>{i}u"));
+        }
+        assert_eq!((g.cur.row, g.cur.col), (0, 0), "CSI > u is not DECRC");
+        feed(&mut g, "\x1b[<8u");
+        assert_eq!(g.kitty_keyboard_flags(), 4);
+        feed(&mut g, "\x1b[<u");
+        assert_eq!(g.kitty_keyboard_flags(), 0, "oldest entries were dropped");
+        feed(&mut g, "\x1b[u");
+        assert_eq!((g.cur.row, g.cur.col), (1, 2));
     }
 
     #[test]

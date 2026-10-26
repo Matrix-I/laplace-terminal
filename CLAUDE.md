@@ -71,7 +71,7 @@ When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` 
 | Module | Responsibility |
 | :--- | :--- |
 | `src/main.rs` | winit event loop, tabs/panes state, shortcut execution, mouse & IME handling, clipboard |
-| `src/keymap.rs` | Pure shortcut resolution and key-to-byte encoding for macOS and Linux (unit-tested) |
+| `src/keymap.rs` | Pure shortcut resolution and key-to-byte encoding for macOS and Linux, legacy and Kitty keyboard protocol (unit-tested) |
 | `src/mouse.rs` | Mouse reporting encoding (X10 / SGR) for applications that track the mouse |
 | `src/pty.rs` | `openpty` + `fork`/`execve`, PTY reader thread (parses into the grid) |
 | `src/grid.rs` | 12-byte `Cell`, scrollback ring buffer, `vte::Perform` implementation |

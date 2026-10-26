@@ -3,7 +3,7 @@
 //! compiled so the macOS/Linux shortcut matrix in CLAUDE.md is unit-tested on
 //! any host.
 
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, KeyLocation, NamedKey};
 
 use crate::split::Direction;
 
@@ -298,6 +298,322 @@ pub fn encode(platform: Platform, key: &Key, text: Option<&str>, m: Mods, app_cu
     Some(bytes)
 }
 
+// ----------------------------------------------------------------------
+// Kitty keyboard protocol
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+// ----------------------------------------------------------------------
+
+/// Report `Esc`, `Alt`/`Ctrl` combinations and modified `Enter`/`Tab`/`Backspace` as `CSI u`.
+pub const KITTY_DISAMBIGUATE: u8 = 1;
+/// Report key repeat and release events.
+pub const KITTY_REPORT_EVENTS: u8 = 2;
+/// Report the shifted key and the US-layout base key alongside the key code.
+pub const KITTY_REPORT_ALTERNATES: u8 = 4;
+/// Report every key, including plain text and modifier keys, as an escape code.
+pub const KITTY_REPORT_ALL: u8 = 8;
+/// With `KITTY_REPORT_ALL`, include the text a key produces.
+pub const KITTY_REPORT_TEXT: u8 = 16;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum KeyKind {
+    Press,
+    Repeat,
+    Release,
+}
+
+/// A key event in the terms the Kitty protocol reports it.
+#[derive(Copy, Clone, Debug)]
+pub struct KittyKey<'a> {
+    /// Logical key with the layout and modifiers applied (`A` for Shift+a).
+    pub key: &'a Key,
+    /// Logical key ignoring modifiers (`a` for Shift+a, also with Ctrl or Option).
+    pub unshifted: &'a Key,
+    /// Physical key position, for the US-layout base key and left/right modifiers.
+    pub physical: Option<KeyCode>,
+    pub location: KeyLocation,
+    pub text: Option<&'a str>,
+    pub kind: KeyKind,
+}
+
+/// How a key is spelled in a Kitty escape: `CSI number ... final`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum KittyCode {
+    /// `CSI code ; mods u`
+    U(u32),
+    /// `CSI number ; mods ~`
+    Tilde(u32),
+    /// `CSI 1 ; mods <letter>` (arrows, Home, End, F1, F2, F4).
+    Letter(u8),
+}
+
+/// Encode a key for an application that enabled the Kitty keyboard protocol
+/// (`flags` != 0). Keys the active flags leave alone use the legacy encoding.
+pub fn encode_kitty(platform: Platform, k: &KittyKey, mut m: Mods, flags: u8, app_cursor: bool) -> Option<Vec<u8>> {
+    let report_all = flags & KITTY_REPORT_ALL != 0;
+    let report_events = flags & KITTY_REPORT_EVENTS != 0;
+    let kind = match k.kind {
+        KeyKind::Release if !report_events => return None,
+        KeyKind::Repeat if !report_events => KeyKind::Press,
+        kind => kind,
+    };
+    let Some(code) = kitty_code(k) else {
+        // Dead keys and other keys the protocol has no number for keep their legacy bytes.
+        return if kind == KeyKind::Release { None } else { encode(platform, k.key, k.text, m, app_cursor) };
+    };
+
+    // A modifier key reports its own bit while held, not after release.
+    if let Key::Named(named) = k.key {
+        let held = kind != KeyKind::Release;
+        match named {
+            NamedKey::Shift => m.shift = held,
+            NamedKey::Control => m.ctrl = held,
+            NamedKey::Alt => m.alt = held,
+            NamedKey::Super | NamedKey::Meta => m.sup = held,
+            _ => {}
+        }
+    }
+    let is_modifier = matches!(code, KittyCode::U(57358..=57360 | 57441..=57452));
+    // Keypad Enter is a key of its own (`CSI 57414 u`), not the legacy `\r`.
+    let legacy_editing = matches!(k.key, Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace))
+        && k.location != KeyLocation::Numpad;
+    let text = k.text.filter(|t| !t.is_empty() && t.chars().all(|c| c >= ' ' && c != '\x7f'));
+
+    if !report_all {
+        if is_modifier || (kind == KeyKind::Release && legacy_editing) {
+            return None;
+        }
+        if kind != KeyKind::Release {
+            // Text typed without Ctrl/Alt/Super is sent as is, like a legacy terminal.
+            if let Some(t) = text.filter(|_| !m.ctrl && !m.alt && !m.sup && !legacy_editing) {
+                return Some(t.as_bytes().to_vec());
+            }
+            let plain = m == Mods::default();
+            let functional_plain = plain && !matches!(code, KittyCode::U(_)) && kind == KeyKind::Press;
+            if flags & KITTY_DISAMBIGUATE == 0 || (plain && legacy_editing) || functional_plain {
+                return encode(platform, k.key, k.text, m, app_cursor);
+            }
+        }
+    }
+
+    let mods = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8 + 8 * m.sup as u8;
+    let event = match kind {
+        KeyKind::Press => None,
+        KeyKind::Repeat => Some(2),
+        KeyKind::Release => Some(3),
+    };
+    let text_field = text.filter(|_| report_all && flags & KITTY_REPORT_TEXT != 0 && kind != KeyKind::Release);
+
+    let mut out = String::with_capacity(16);
+    out.push_str("\x1b[");
+    let final_byte = match code {
+        KittyCode::U(c) => {
+            out.push_str(&c.to_string());
+            if flags & KITTY_REPORT_ALTERNATES != 0 {
+                push_alternates(&mut out, k, m, c);
+            }
+            'u'
+        }
+        KittyCode::Tilde(n) => {
+            out.push_str(&n.to_string());
+            '~'
+        }
+        KittyCode::Letter(l) => l as char,
+    };
+    if mods > 1 || event.is_some() || text_field.is_some() {
+        if matches!(code, KittyCode::Letter(_)) {
+            out.push('1');
+        }
+        out.push(';');
+        // Text alone leaves the modifier field empty: `CSI 97;;97u`.
+        if mods > 1 || event.is_some() {
+            out.push_str(&mods.to_string());
+        }
+        if let Some(e) = event {
+            out.push(':');
+            out.push_str(&e.to_string());
+        }
+    }
+    if let Some(t) = text_field {
+        out.push(';');
+        for (i, c) in t.chars().enumerate() {
+            if i > 0 {
+                out.push(':');
+            }
+            out.push_str(&(c as u32).to_string());
+        }
+    }
+    out.push(final_byte);
+    Some(out.into_bytes())
+}
+
+/// `:shifted:base` after the key code, each part only when it differs from the code.
+fn push_alternates(out: &mut String, k: &KittyKey, m: Mods, code: u32) {
+    let shifted = match k.key {
+        Key::Character(s) if m.shift => single_char(s).map(|c| c as u32).filter(|&c| c != code),
+        _ => None,
+    };
+    let base = k.physical.and_then(us_layout_char).map(|c| c as u32).filter(|&c| c != code);
+    if shifted.is_none() && base.is_none() {
+        return;
+    }
+    out.push(':');
+    if let Some(s) = shifted {
+        out.push_str(&s.to_string());
+    }
+    if let Some(b) = base {
+        out.push(':');
+        out.push_str(&b.to_string());
+    }
+}
+
+fn single_char(s: &str) -> Option<char> {
+    let mut it = s.chars();
+    let c = it.next()?;
+    it.next().is_none().then_some(c)
+}
+
+/// The Kitty key number of a key: the lowercase unshifted character for text
+/// keys, a legacy number/letter or a Private Use Area code for functional keys.
+fn kitty_code(k: &KittyKey) -> Option<KittyCode> {
+    use KittyCode::{Letter, Tilde, U};
+    let numpad = k.location == KeyLocation::Numpad;
+    if numpad {
+        let kp = match k.key {
+            Key::Character(s) => match single_char(s)? {
+                c @ '0'..='9' => 57399 + (c as u32 - '0' as u32),
+                '.' | ',' => 57409,
+                '/' => 57410,
+                '*' => 57411,
+                '-' => 57412,
+                '+' => 57413,
+                '=' => 57415,
+                _ => 0,
+            },
+            Key::Named(n) => match n {
+                NamedKey::Enter => 57414,
+                NamedKey::ArrowLeft => 57417,
+                NamedKey::ArrowRight => 57418,
+                NamedKey::ArrowUp => 57419,
+                NamedKey::ArrowDown => 57420,
+                NamedKey::PageUp => 57421,
+                NamedKey::PageDown => 57422,
+                NamedKey::Home => 57423,
+                NamedKey::End => 57424,
+                NamedKey::Insert => 57425,
+                NamedKey::Delete => 57426,
+                NamedKey::Clear => 57427,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        if kp != 0 {
+            return Some(U(kp));
+        }
+    }
+    let right = k.location == KeyLocation::Right;
+    let side = |left: u32| U(if right { left + 6 } else { left });
+    let code = match k.key {
+        Key::Character(_) => {
+            let base = match k.unshifted {
+                Key::Character(s) => single_char(s),
+                _ => None,
+            };
+            let c = base.or_else(|| match k.key {
+                Key::Character(s) => single_char(s),
+                _ => None,
+            })?;
+            U(c.to_lowercase().next().unwrap_or(c) as u32)
+        }
+        Key::Named(n) => match n {
+            NamedKey::Escape => U(27),
+            NamedKey::Enter => U(13),
+            NamedKey::Tab => U(9),
+            NamedKey::Backspace => U(127),
+            NamedKey::Space => U(32),
+            NamedKey::Insert => Tilde(2),
+            NamedKey::Delete => Tilde(3),
+            NamedKey::PageUp => Tilde(5),
+            NamedKey::PageDown => Tilde(6),
+            NamedKey::ArrowUp => Letter(b'A'),
+            NamedKey::ArrowDown => Letter(b'B'),
+            NamedKey::ArrowRight => Letter(b'C'),
+            NamedKey::ArrowLeft => Letter(b'D'),
+            NamedKey::Home => Letter(b'H'),
+            NamedKey::End => Letter(b'F'),
+            NamedKey::F1 => Letter(b'P'),
+            NamedKey::F2 => Letter(b'Q'),
+            // `CSI R` would collide with a cursor position report.
+            NamedKey::F3 => Tilde(13),
+            NamedKey::F4 => Letter(b'S'),
+            NamedKey::F5 => Tilde(15),
+            NamedKey::F6 => Tilde(17),
+            NamedKey::F7 => Tilde(18),
+            NamedKey::F8 => Tilde(19),
+            NamedKey::F9 => Tilde(20),
+            NamedKey::F10 => Tilde(21),
+            NamedKey::F11 => Tilde(23),
+            NamedKey::F12 => Tilde(24),
+            NamedKey::F13 => U(57376),
+            NamedKey::F14 => U(57377),
+            NamedKey::F15 => U(57378),
+            NamedKey::F16 => U(57379),
+            NamedKey::F17 => U(57380),
+            NamedKey::F18 => U(57381),
+            NamedKey::F19 => U(57382),
+            NamedKey::F20 => U(57383),
+            NamedKey::CapsLock => U(57358),
+            NamedKey::ScrollLock => U(57359),
+            NamedKey::NumLock => U(57360),
+            NamedKey::PrintScreen => U(57361),
+            NamedKey::Pause => U(57362),
+            NamedKey::ContextMenu => U(57363),
+            NamedKey::MediaPlay => U(57428),
+            NamedKey::MediaPause => U(57429),
+            NamedKey::MediaPlayPause => U(57430),
+            NamedKey::MediaStop => U(57432),
+            NamedKey::MediaFastForward => U(57433),
+            NamedKey::MediaRewind => U(57434),
+            NamedKey::MediaTrackNext => U(57435),
+            NamedKey::MediaTrackPrevious => U(57436),
+            NamedKey::MediaRecord => U(57437),
+            NamedKey::AudioVolumeDown => U(57438),
+            NamedKey::AudioVolumeUp => U(57439),
+            NamedKey::AudioVolumeMute => U(57440),
+            NamedKey::Shift => side(57441),
+            NamedKey::Control => side(57442),
+            NamedKey::Alt => side(57443),
+            NamedKey::Super => side(57444),
+            NamedKey::Hyper => side(57445),
+            NamedKey::Meta => side(57446),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(code)
+}
+
+/// The character a key produces on a US layout, for the Kitty "base layout key".
+fn us_layout_char(code: KeyCode) -> Option<char> {
+    let c = match code {
+        KeyCode::KeyA => 'a', KeyCode::KeyB => 'b', KeyCode::KeyC => 'c', KeyCode::KeyD => 'd',
+        KeyCode::KeyE => 'e', KeyCode::KeyF => 'f', KeyCode::KeyG => 'g', KeyCode::KeyH => 'h',
+        KeyCode::KeyI => 'i', KeyCode::KeyJ => 'j', KeyCode::KeyK => 'k', KeyCode::KeyL => 'l',
+        KeyCode::KeyM => 'm', KeyCode::KeyN => 'n', KeyCode::KeyO => 'o', KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q', KeyCode::KeyR => 'r', KeyCode::KeyS => 's', KeyCode::KeyT => 't',
+        KeyCode::KeyU => 'u', KeyCode::KeyV => 'v', KeyCode::KeyW => 'w', KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y', KeyCode::KeyZ => 'z',
+        KeyCode::Digit0 => '0', KeyCode::Digit1 => '1', KeyCode::Digit2 => '2', KeyCode::Digit3 => '3',
+        KeyCode::Digit4 => '4', KeyCode::Digit5 => '5', KeyCode::Digit6 => '6', KeyCode::Digit7 => '7',
+        KeyCode::Digit8 => '8', KeyCode::Digit9 => '9',
+        KeyCode::Backquote => '`', KeyCode::Minus => '-', KeyCode::Equal => '=',
+        KeyCode::BracketLeft => '[', KeyCode::BracketRight => ']', KeyCode::Backslash => '\\',
+        KeyCode::Semicolon => ';', KeyCode::Quote => '\'', KeyCode::Comma => ',',
+        KeyCode::Period => '.', KeyCode::Slash => '/',
+        _ => return None,
+    };
+    Some(c)
+}
+
 /// Word jump: `Option+←/→` on macOS (Cmd/Ctrl arrows belong to Spaces and splits),
 /// `Ctrl+←/→` or `Alt+←/→` on Linux.
 fn is_word_jump(platform: Platform, m: Mods) -> bool {
@@ -444,5 +760,147 @@ mod tests {
         assert_eq!(enc(mac, &ch("ệ"), Some("ệ"), NONE, false), "ệ".as_bytes());
         assert_eq!(enc(mac, &Key::Named(NamedKey::Tab), None, Mods { shift: true, ..NONE }, false), b"\x1b[Z");
         assert!(encode(mac, &Key::Named(NamedKey::Shift), None, NONE, false).is_none());
+    }
+
+    struct K {
+        key: Key,
+        unshifted: Key,
+        physical: Option<KeyCode>,
+        location: KeyLocation,
+        text: Option<&'static str>,
+    }
+
+    /// A character key: logical text, unshifted text and its physical position.
+    fn kc(key: &str, unshifted: &str, physical: KeyCode) -> K {
+        K { key: ch(key), unshifted: ch(unshifted), physical: Some(physical), location: KeyLocation::Standard, text: None }
+    }
+
+    fn named(n: NamedKey) -> K {
+        K { key: Key::Named(n), unshifted: Key::Named(n), physical: None, location: KeyLocation::Standard, text: None }
+    }
+
+    impl K {
+        fn text(mut self, t: &'static str) -> Self {
+            self.text = Some(t);
+            self
+        }
+
+        fn at(mut self, location: KeyLocation) -> Self {
+            self.location = location;
+            self
+        }
+
+        fn kitty(&self, flags: u8, m: Mods, kind: KeyKind) -> Option<String> {
+            let k = KittyKey {
+                key: &self.key,
+                unshifted: &self.unshifted,
+                physical: self.physical,
+                location: self.location,
+                text: self.text,
+                kind,
+            };
+            encode_kitty(Platform::MacOs, &k, m, flags, false).map(|b| String::from_utf8(b).unwrap())
+        }
+
+        fn press(&self, flags: u8, m: Mods) -> Option<String> {
+            self.kitty(flags, m, KeyKind::Press)
+        }
+    }
+
+    const SHIFT: Mods = Mods { shift: true, ..NONE };
+    const D: u8 = KITTY_DISAMBIGUATE;
+
+    #[test]
+    fn kitty_disambiguate_keeps_text_and_plain_editing_keys() {
+        let a = kc("a", "a", KeyCode::KeyA).text("a");
+        assert_eq!(a.press(D, NONE).as_deref(), Some("a"));
+        assert_eq!(kc("A", "a", KeyCode::KeyA).text("A").press(D, SHIFT).as_deref(), Some("A"));
+        assert_eq!(a.press(D, CTRL).as_deref(), Some("\x1b[97;5u"));
+        assert_eq!(a.press(D, ALT).as_deref(), Some("\x1b[97;3u"));
+        assert_eq!(kc("A", "a", KeyCode::KeyA).press(D, CTRL_SHIFT).as_deref(), Some("\x1b[97;6u"));
+        assert_eq!(kc(" ", " ", KeyCode::Space).text(" ").press(D, NONE).as_deref(), Some(" "));
+        assert_eq!(named(NamedKey::Space).press(D, CTRL).as_deref(), Some("\x1b[32;5u"));
+
+        assert_eq!(named(NamedKey::Escape).press(D, NONE).as_deref(), Some("\x1b[27u"));
+        assert_eq!(named(NamedKey::Enter).press(D, NONE).as_deref(), Some("\r"));
+        assert_eq!(named(NamedKey::Enter).press(D, SHIFT).as_deref(), Some("\x1b[13;2u"));
+        assert_eq!(named(NamedKey::Tab).press(D, NONE).as_deref(), Some("\t"));
+        assert_eq!(named(NamedKey::Tab).press(D, SHIFT).as_deref(), Some("\x1b[9;2u"));
+        assert_eq!(named(NamedKey::Backspace).press(D, NONE).as_deref(), Some("\x7f"));
+        assert_eq!(named(NamedKey::Backspace).press(D, CTRL).as_deref(), Some("\x1b[127;5u"));
+    }
+
+    #[test]
+    fn kitty_functional_keys() {
+        assert_eq!(named(NamedKey::ArrowUp).press(D, NONE).as_deref(), Some("\x1b[A"));
+        assert_eq!(named(NamedKey::ArrowUp).press(D, CTRL).as_deref(), Some("\x1b[1;5A"));
+        // Option+Left is a real Alt+Left here, not the legacy `ESC b` word jump.
+        assert_eq!(named(NamedKey::ArrowLeft).press(D, ALT).as_deref(), Some("\x1b[1;3D"));
+        assert_eq!(named(NamedKey::F1).press(D, NONE).as_deref(), Some("\x1bOP"));
+        assert_eq!(named(NamedKey::F1).press(D, SHIFT).as_deref(), Some("\x1b[1;2P"));
+        assert_eq!(named(NamedKey::F3).press(D, CTRL).as_deref(), Some("\x1b[13;5~"));
+        assert_eq!(named(NamedKey::Delete).press(D, NONE).as_deref(), Some("\x1b[3~"));
+        assert_eq!(named(NamedKey::PageDown).press(D, ALT).as_deref(), Some("\x1b[6;3~"));
+        assert_eq!(named(NamedKey::F13).press(D, NONE).as_deref(), Some("\x1b[57376u"));
+        assert_eq!(named(NamedKey::Enter).at(KeyLocation::Numpad).press(D, NONE).as_deref(), Some("\x1b[57414u"));
+        assert_eq!(kc("5", "5", KeyCode::Numpad5).text("5").at(KeyLocation::Numpad).press(D, NONE).as_deref(), Some("5"));
+        assert_eq!(kc("5", "5", KeyCode::Numpad5).at(KeyLocation::Numpad).press(D, CTRL).as_deref(), Some("\x1b[57404;5u"));
+        // Modifier keys alone are not reported without "report all keys".
+        assert_eq!(named(NamedKey::Shift).press(D, SHIFT), None);
+    }
+
+    #[test]
+    fn kitty_event_types() {
+        let ev = D | KITTY_REPORT_EVENTS;
+        let a = kc("a", "a", KeyCode::KeyA).text("a");
+        assert_eq!(a.kitty(D, NONE, KeyKind::Release), None);
+        assert_eq!(a.kitty(D, NONE, KeyKind::Repeat).as_deref(), Some("a"));
+        assert_eq!(a.kitty(ev, NONE, KeyKind::Repeat).as_deref(), Some("a"));
+        assert_eq!(a.kitty(ev, NONE, KeyKind::Release).as_deref(), Some("\x1b[97;1:3u"));
+        assert_eq!(a.kitty(ev, CTRL, KeyKind::Repeat).as_deref(), Some("\x1b[97;5:2u"));
+        assert_eq!(named(NamedKey::Enter).kitty(ev, NONE, KeyKind::Release), None);
+        assert_eq!(named(NamedKey::ArrowUp).kitty(ev, NONE, KeyKind::Repeat).as_deref(), Some("\x1b[1;1:2A"));
+        assert_eq!(named(NamedKey::ArrowUp).kitty(ev, NONE, KeyKind::Release).as_deref(), Some("\x1b[1;1:3A"));
+        // Without event reporting a repeat is a plain press.
+        assert_eq!(named(NamedKey::ArrowUp).kitty(D, NONE, KeyKind::Repeat).as_deref(), Some("\x1b[A"));
+    }
+
+    #[test]
+    fn kitty_report_all_keys_and_text() {
+        let all = D | KITTY_REPORT_ALL;
+        let a = kc("a", "a", KeyCode::KeyA).text("a");
+        assert_eq!(a.press(all, NONE).as_deref(), Some("\x1b[97u"));
+        assert_eq!(kc("A", "a", KeyCode::KeyA).text("A").press(all, SHIFT).as_deref(), Some("\x1b[97;2u"));
+        assert_eq!(named(NamedKey::Enter).press(all, NONE).as_deref(), Some("\x1b[13u"));
+        assert_eq!(named(NamedKey::Enter).kitty(all | KITTY_REPORT_EVENTS, NONE, KeyKind::Release).as_deref(), Some("\x1b[13;1:3u"));
+
+        let shift = named(NamedKey::Shift).at(KeyLocation::Left);
+        assert_eq!(shift.press(all, SHIFT).as_deref(), Some("\x1b[57441;2u"));
+        assert_eq!(shift.kitty(all | KITTY_REPORT_EVENTS, SHIFT, KeyKind::Release).as_deref(), Some("\x1b[57441;1:3u"));
+        assert_eq!(named(NamedKey::Control).at(KeyLocation::Right).press(all, NONE).as_deref(), Some("\x1b[57448;5u"));
+
+        let text = all | KITTY_REPORT_TEXT;
+        assert_eq!(a.press(text, NONE).as_deref(), Some("\x1b[97;;97u"));
+        assert_eq!(kc("A", "a", KeyCode::KeyA).text("A").press(text, SHIFT).as_deref(), Some("\x1b[97;2;65u"));
+        assert_eq!(a.kitty(text | KITTY_REPORT_EVENTS, NONE, KeyKind::Release).as_deref(), Some("\x1b[97;1:3u"));
+    }
+
+    #[test]
+    fn kitty_alternate_keys() {
+        let alt = D | KITTY_REPORT_ALTERNATES;
+        assert_eq!(kc("A", "a", KeyCode::KeyA).press(alt, CTRL_SHIFT).as_deref(), Some("\x1b[97:65;6u"));
+        assert_eq!(kc("a", "a", KeyCode::KeyA).press(alt, CTRL).as_deref(), Some("\x1b[97;5u"));
+        // A non-US layout reports its own key plus the US key at the same position.
+        assert_eq!(kc("ф", "ф", KeyCode::KeyA).press(alt, CTRL).as_deref(), Some("\x1b[1092::97;5u"));
+        assert_eq!(kc("Ф", "ф", KeyCode::KeyA).press(alt, CTRL_SHIFT).as_deref(), Some("\x1b[1092:1060:97;6u"));
+    }
+
+    #[test]
+    fn kitty_flags_without_disambiguate_keep_legacy_presses() {
+        let ev = KITTY_REPORT_EVENTS;
+        let a = kc("a", "a", KeyCode::KeyA).text("a");
+        assert_eq!(a.press(ev, CTRL).as_deref(), Some("\x01"));
+        assert_eq!(named(NamedKey::Escape).press(ev, NONE).as_deref(), Some("\x1b"));
+        assert_eq!(a.kitty(ev, CTRL, KeyKind::Release).as_deref(), Some("\x1b[97;5:3u"));
     }
 }
