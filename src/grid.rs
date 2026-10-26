@@ -906,6 +906,50 @@ impl Grid {
         self.selected_text().unwrap_or_default()
     }
 
+    /// Columns of the run of non-blank cells around `(row, col)`; the placeholder
+    /// cell of a wide glyph belongs to the glyph.
+    fn block_range(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        let r = self.display_row(row);
+        let filled = |c: usize| {
+            !Self::is_blank(r[c].codepoint) || (c > 0 && r[c].codepoint == 0 && is_wide_cp(r[c - 1].codepoint))
+        };
+        if !filled(col) {
+            return None;
+        }
+        let mut sc = col;
+        while sc > 0 && filled(sc - 1) {
+            sc -= 1;
+        }
+        let mut ec = col;
+        while ec + 1 < r.len() && filled(ec + 1) {
+            ec += 1;
+        }
+        Some((sc, ec))
+    }
+
+    /// Double-click: select the contiguous block of text at `(row, col)` and return
+    /// it. On a blank cell, fall back to the smart line selection.
+    pub fn select_block(&mut self, row: usize, col: usize) -> String {
+        let Some((sc, ec)) = self.block_range(row, col) else {
+            return self.select_smart_line(row, col);
+        };
+        self.set_selection(Some(Selection { start: (row, sc), end: (row, ec) }));
+        self.selected_text().unwrap_or_default()
+    }
+
+    /// Whether the selection is exactly the block at `(row, col)`, so a further
+    /// double-click there widens it to the line.
+    pub fn is_block_selected(&self, row: usize, col: usize) -> bool {
+        let (Some(sel), Some((sc, ec))) = (self.selection, self.block_range(row, col)) else {
+            return false;
+        };
+        let line = self.abs_line(row);
+        sel.ordered() == ((line, sc), (line, ec))
+    }
+
     /// Select the entire visible line `row` (up to the last non-blank character)
     /// and return its text.
     pub fn select_line(&mut self, row: usize) -> String {
@@ -2399,6 +2443,23 @@ mod tests {
         assert_eq!(g.select_smart_line(2, 10), "./target/release/laplace");
         // Triple-click selects raw full line
         assert_eq!(g.select_line(1), "$ cd Desktop/personal/laplace-terninal");
+    }
+
+    #[test]
+    fn double_click_selects_block_then_line() {
+        let mut g = Grid::new(40, 3);
+        feed(&mut g, "$ git log --oneline 中文x\r\n");
+        assert_eq!(g.select_block(0, 8), "log");
+        assert!(g.is_block_selected(0, 6));
+        assert!(!g.is_block_selected(0, 2), "a different block");
+        assert_eq!(g.select_block(0, 12), "--oneline");
+        // A wide glyph and its placeholder cell stay in one block.
+        assert_eq!(g.select_block(0, 21), "中文x");
+        // A blank cell falls back to the smart line.
+        assert_eq!(g.select_block(0, 5), "git log --oneline 中文x");
+        assert!(!g.is_block_selected(0, 8));
+        g.set_selection(None);
+        assert!(!g.is_block_selected(0, 8));
     }
 
     #[test]

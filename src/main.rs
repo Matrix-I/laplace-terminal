@@ -151,6 +151,9 @@ struct State {
     last_click_cell: Option<(usize, usize)>,
     active_click_pane_id: Option<u64>,
     click_count: u8,
+    /// The press that started this click sequence landed on an already selected
+    /// block, so the double-click widens the selection to the line.
+    click_on_selected_block: bool,
     hovered_link: Option<HoveredPaneLink>,
     config: config::Config,
     config_mtime: Option<std::time::SystemTime>,
@@ -298,6 +301,7 @@ impl ApplicationHandler<AppEvent> for App {
             last_click_cell: None,
             active_click_pane_id: None,
             click_count: 0,
+            click_on_selected_block: false,
             hovered_link: None,
             config: cfg,
             config_mtime,
@@ -597,9 +601,17 @@ impl ApplicationHandler<AppEvent> for App {
 
                                 if let Some(pane) = tab.pane(clicked_id) {
                                     match s.click_count {
+                                        // Double-click selects a block of text; again on a
+                                        // selected block, the whole line.
                                         2 => {
-                                            let line_text =
-                                                pane.grid.lock().select_smart_line(pane_row, pane_col);
+                                            let line_text = {
+                                                let mut g = pane.grid.lock();
+                                                if std::mem::take(&mut s.click_on_selected_block) {
+                                                    g.select_smart_line(pane_row, pane_col)
+                                                } else {
+                                                    g.select_block(pane_row, pane_col)
+                                                }
+                                            };
                                             if !line_text.is_empty() {
                                                 copy_to_clipboard(&line_text);
                                             }
@@ -617,7 +629,10 @@ impl ApplicationHandler<AppEvent> for App {
                                             s.window.request_redraw();
                                         }
                                         _ => {
-                                            pane.grid.lock().set_selection(None);
+                                            let mut g = pane.grid.lock();
+                                            s.click_on_selected_block = g.is_block_selected(pane_row, pane_col);
+                                            g.set_selection(None);
+                                            drop(g);
                                             s.selecting = true;
                                             s.drag_moved = false;
                                             s.window.request_redraw();
