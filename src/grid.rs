@@ -69,17 +69,34 @@ pub const FG_SET: u32 = 0x80;
 pub const FG_BOLD: u32 = 0x01;
 /// `fg` low byte bit: italic glyph.
 pub const FG_ITALIC: u32 = 0x02;
+/// `fg` low byte bits 2..=6: low 5 bits of the cell's extra-attribute index.
+pub const FG_EXTRA: u32 = 0x7C;
 /// `bg` low byte bit: explicit background color (otherwise default bg).
 pub const BG_SET: u32 = 0x80;
-/// `bg` low byte bit: draw an underline.
-pub const BG_UNDERLINE: u32 = 0x01;
+/// `bg` low byte bits 0..=2: underline style (`UNDERLINE_*`, 0 = none).
+pub const BG_UNDERLINE_MASK: u32 = 0x07;
+/// `bg` low byte bit: single underline (`UNDERLINE_SINGLE` in the style bits).
+pub const BG_UNDERLINE: u32 = UNDERLINE_SINGLE as u32;
+/// `bg` low byte bit: strikethrough.
+pub const BG_STRIKE: u32 = 0x08;
+/// `bg` low byte bits 4..=6: high 3 bits of the cell's extra-attribute index.
+pub const BG_EXTRA: u32 = 0x70;
+
+/// Underline styles (SGR `4:x`), stored in `BG_UNDERLINE_MASK`:
+/// 1 single, 2 double, 3 curly, 4 dotted, 5 dashed.
+pub const UNDERLINE_SINGLE: u8 = 1;
+const UNDERLINE_DOUBLE: u8 = 2;
+const UNDERLINE_DASHED: u8 = 5;
 
 const ATTR_BOLD: u8 = 1 << 0;
 const ATTR_DIM: u8 = 1 << 1;
 const ATTR_ITALIC: u8 = 1 << 2;
-const ATTR_UNDERLINE: u8 = 1 << 3;
+const ATTR_STRIKE: u8 = 1 << 3;
 const ATTR_INVERSE: u8 = 1 << 4;
 const ATTR_HIDDEN: u8 = 1 << 5;
+
+/// Upper bound on an OSC 8 URI; longer links are ignored.
+const MAX_LINK_LEN: usize = 2048;
 
 /// One terminal cell: exactly 12 bytes.
 #[repr(C)]
@@ -87,19 +104,56 @@ const ATTR_HIDDEN: u8 = 1 << 5;
 pub struct Cell {
     /// Unicode scalar value (0 = empty).
     pub codepoint: u32,
-    /// Packed `0xRRGGBB` + flags in the low byte (`FG_SET`, `FG_BOLD`, `FG_ITALIC`).
+    /// Packed `0xRRGGBB` + flags in the low byte (`FG_SET`, `FG_BOLD`, `FG_ITALIC`,
+    /// low bits of the extra index).
     pub fg: u32,
-    /// Packed `0xRRGGBB` + style flags in the low byte (`BG_SET`, `BG_UNDERLINE`).
+    /// Packed `0xRRGGBB` + style flags in the low byte (`BG_SET`, underline style,
+    /// `BG_STRIKE`, high bits of the extra index).
     pub bg: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<Cell>() == 12);
+
+impl Cell {
+    /// Index into `Grid::extras` (0 = no hyperlink and default underline color).
+    #[inline]
+    pub fn extra(&self) -> u8 {
+        (((self.fg & FG_EXTRA) >> 2) | ((self.bg & BG_EXTRA) << 1)) as u8
+    }
+}
+
+/// Pack an extra-attribute index into the spare low bits of `fg` / `bg`.
+#[inline]
+fn with_extra(fg: u32, bg: u32, extra: u8) -> (u32, u32) {
+    let e = extra as u32;
+    ((fg & !FG_EXTRA) | ((e & 0x1F) << 2), (bg & !BG_EXTRA) | ((e >> 5) << 4))
+}
+
+/// Attributes too large for a `Cell`, shared by every cell that uses them: an
+/// OSC 8 hyperlink and an SGR 58 underline color. Cells refer to them by index.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CellExtra {
+    link: Option<OscLink>,
+    /// `0xRRGGBB00` | 1, or 0 for "same as the text color".
+    underline_color: u32,
+}
+
+/// An OSC 8 hyperlink: `ESC ] 8 ; id=... ; URI ST`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OscLink {
+    id: Box<str>,
+    uri: Box<str>,
+}
 
 #[derive(Copy, Clone, Default)]
 struct Pen {
     fg: u32, // 0 = default, else rgb<<8 | FG_SET
     bg: u32, // 0 = default, else rgb<<8 | BG_SET
     attrs: u8,
+    /// Underline style (`UNDERLINE_*`).
+    underline: u8,
+    /// Index into `Grid::extras` (hyperlink + underline color), 0 = none.
+    extra: u8,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -258,6 +312,10 @@ pub struct Grid {
 
     /// Bytes the terminal must send back to the shell (DSR, DA replies).
     pub response: Vec<u8>,
+
+    /// Hyperlinks and underline colors referenced by `Cell::extra` (index 0 is
+    /// reserved for "none"). Slots no cell uses any more are reclaimed when full.
+    extras: Vec<Option<CellExtra>>,
 }
 
 impl Grid {
@@ -310,6 +368,7 @@ impl Grid {
             dirty: vec![true; rows],
             all_dirty: true,
             response: Vec::with_capacity(256),
+            extras: vec![None],
         }
     }
 
@@ -709,12 +768,22 @@ impl Grid {
             return None;
         }
         let r = self.display_row(row);
+
+        // 1. An explicit OSC 8 hyperlink wins over anything detected in the text.
+        if let Some(link) = self.cell_link(&r[col]) {
+            let same = |c: &Cell| self.cell_link(c) == Some(link);
+            let start = r[..col].iter().rposition(|c| !same(c)).map_or(0, |i| i + 1);
+            let end = r[col..].iter().position(|c| !same(c)).map_or(self.cols, |i| col + i);
+            let (url, is_path) = osc8_target(&link.uri)?;
+            return Some(Hyperlink { row, start_col: start, end_col: end - 1, url, is_path });
+        }
+
         let chars: Vec<char> = r
             .iter()
             .map(|c| char::from_u32(c.codepoint).filter(|&ch| ch != '\0').unwrap_or(' '))
             .collect();
 
-        // 1. Try URL matching first
+        // 2. Try URL matching
         let mut idx = 0;
         while idx < chars.len() {
             let starts_with = |pat: &str| pat.chars().enumerate().all(|(k, p)| chars.get(idx + k) == Some(&p));
@@ -751,7 +820,7 @@ impl Grid {
             }
         }
 
-        // 2. Try file/directory path matching at `col`
+        // 3. Try file/directory path matching at `col`
         if !Self::is_path_char(chars[col]) {
             return None;
         }
@@ -1286,8 +1355,9 @@ impl Grid {
         if p.attrs & ATTR_HIDDEN != 0 {
             fg = if bg == 0 { default_bg() | FG_SET } else { (bg & !0xFF) | FG_SET };
         }
-        if p.attrs & ATTR_UNDERLINE != 0 {
-            bg |= BG_UNDERLINE;
+        bg |= p.underline as u32;
+        if p.attrs & ATTR_STRIKE != 0 {
+            bg |= BG_STRIKE;
         }
         if p.attrs & ATTR_BOLD != 0 {
             fg |= FG_BOLD;
@@ -1295,7 +1365,7 @@ impl Grid {
         if p.attrs & ATTR_ITALIC != 0 {
             fg |= FG_ITALIC;
         }
-        (fg, bg)
+        with_extra(fg, bg, p.extra)
     }
 
     fn tab_forward(&mut self, n: usize) {
@@ -1518,18 +1588,27 @@ impl Grid {
         while let Some(sp) = it.next() {
             let pen = &mut self.cur.pen;
             match sp[0] {
-                0 => *pen = Pen::default(),
+                0 => {
+                    // SGR 0 resets the underline color but not the OSC 8 hyperlink.
+                    let extra = pen.extra;
+                    *pen = Pen::default();
+                    self.set_underline_color(extra, 0);
+                }
                 1 => pen.attrs |= ATTR_BOLD,
                 2 => pen.attrs |= ATTR_DIM,
                 3 => pen.attrs |= ATTR_ITALIC,
-                4 => pen.attrs |= ATTR_UNDERLINE,
+                // `4:0` .. `4:5`: none, single, double, curly, dotted, dashed.
+                4 => pen.underline = sp.get(1).map_or(UNDERLINE_SINGLE, |&s| s.min(UNDERLINE_DASHED as u16) as u8),
                 7 => pen.attrs |= ATTR_INVERSE,
                 8 => pen.attrs |= ATTR_HIDDEN,
-                21 | 22 => pen.attrs &= !(ATTR_BOLD | ATTR_DIM),
+                9 => pen.attrs |= ATTR_STRIKE,
+                21 => pen.underline = UNDERLINE_DOUBLE,
+                22 => pen.attrs &= !(ATTR_BOLD | ATTR_DIM),
                 23 => pen.attrs &= !ATTR_ITALIC,
-                24 => pen.attrs &= !ATTR_UNDERLINE,
+                24 => pen.underline = 0,
                 27 => pen.attrs &= !ATTR_INVERSE,
                 28 => pen.attrs &= !ATTR_HIDDEN,
+                29 => pen.attrs &= !ATTR_STRIKE,
                 n @ 30..=37 => pen.fg = palette((n - 30) as u8) | FG_SET,
                 38 => {
                     if let Some(c) = ext_color(sp, &mut it) {
@@ -1544,11 +1623,122 @@ impl Grid {
                     }
                 }
                 49 => pen.bg = 0,
+                58 => {
+                    if let Some(c) = ext_color(sp, &mut it) {
+                        let extra = self.cur.pen.extra;
+                        self.set_underline_color(extra, c | 1);
+                    }
+                }
+                59 => {
+                    let extra = pen.extra;
+                    self.set_underline_color(extra, 0);
+                }
                 n @ 90..=97 => pen.fg = palette((n - 90 + 8) as u8) | FG_SET,
                 n @ 100..=107 => pen.bg = palette((n - 100 + 8) as u8) | BG_SET,
                 _ => {}
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Extra cell attributes (OSC 8 hyperlinks, SGR 58 underline colors)
+    // ------------------------------------------------------------------
+
+    fn extra_at(&self, idx: u8) -> Option<&CellExtra> {
+        self.extras.get(idx as usize)?.as_ref()
+    }
+
+    /// Point the pen at `extra` with its underline color replaced.
+    fn set_underline_color(&mut self, extra: u8, color: u32) {
+        let link = self.extra_at(extra).and_then(|e| e.link.clone());
+        self.cur.pen.extra = self.intern_extra(CellExtra { link, underline_color: color });
+    }
+
+    /// Point the pen at the current extra with its hyperlink replaced.
+    fn set_link(&mut self, link: Option<OscLink>) {
+        let underline_color = self.extra_at(self.cur.pen.extra).map_or(0, |e| e.underline_color);
+        self.cur.pen.extra = self.intern_extra(CellExtra { link, underline_color });
+    }
+
+    /// Index of `extra` in the table, adding it if needed. Runs only when an escape
+    /// sequence changes the pen, never per printed character. Returns 0 (plain text)
+    /// if all 255 slots are still referenced by cells.
+    fn intern_extra(&mut self, extra: CellExtra) -> u8 {
+        if extra == CellExtra::default() {
+            return 0;
+        }
+        if let Some(i) = self.extras.iter().position(|e| e.as_ref() == Some(&extra)) {
+            return i as u8;
+        }
+        if self.extras.len() <= u8::MAX as usize {
+            self.extras.push(Some(extra));
+            return (self.extras.len() - 1) as u8;
+        }
+        let free = match self.extras.iter().skip(1).position(Option::is_none) {
+            Some(i) => Some(i + 1),
+            None => self.collect_extras(),
+        };
+        match free {
+            Some(i) => {
+                self.extras[i] = Some(extra);
+                i as u8
+            }
+            None => 0,
+        }
+    }
+
+    /// Free every extra slot no cell or saved pen refers to; returns the first free one.
+    fn collect_extras(&mut self) -> Option<usize> {
+        let mut used = [false; 256];
+        for c in self.cells.iter().chain(self.alt.iter()) {
+            used[c.extra() as usize] = true;
+        }
+        for c in [&self.cur, &self.saved, &self.saved_main] {
+            used[c.pen.extra as usize] = true;
+        }
+        for (slot, used) in self.extras.iter_mut().zip(used).skip(1) {
+            if !used {
+                *slot = None;
+            }
+        }
+        self.extras.iter().skip(1).position(Option::is_none).map(|i| i + 1)
+    }
+
+    /// Explicit underline color of a cell as `0xRRGGBB00`, if SGR 58 set one.
+    pub fn underline_color(&self, cell: &Cell) -> Option<u32> {
+        match cell.extra() {
+            0 => None,
+            i => self.extra_at(i).map(|e| e.underline_color).filter(|&c| c != 0).map(|c| c & !0xFF),
+        }
+    }
+
+    /// The OSC 8 link of a cell as `(id, uri)`.
+    fn cell_link(&self, cell: &Cell) -> Option<&OscLink> {
+        match cell.extra() {
+            0 => None,
+            i => self.extra_at(i)?.link.as_ref(),
+        }
+    }
+
+    /// OSC 8: `8 ; params ; URI` starts a hyperlink, an empty URI ends it.
+    fn osc8(&mut self, params: &[&[u8]]) {
+        let uri = params.get(2..).unwrap_or_default();
+        // The URI may itself contain ';', which vte splits into extra parameters.
+        let len = uri.iter().map(|p| p.len() + 1).sum::<usize>().saturating_sub(1);
+        let link = if len == 0 || len > MAX_LINK_LEN {
+            None
+        } else {
+            let uri = uri.join(&b';');
+            let id = params[1]
+                .split(|&b| b == b':')
+                .find_map(|kv| kv.strip_prefix(b"id="))
+                .unwrap_or_default();
+            match (std::str::from_utf8(&uri), std::str::from_utf8(id)) {
+                (Ok(uri), Ok(id)) => Some(OscLink { id: id.into(), uri: uri.into() }),
+                _ => None,
+            }
+        };
+        self.set_link(link);
     }
 }
 
@@ -1636,6 +1826,18 @@ fn parse_osc7_path(payload: &[u8]) -> Option<String> {
         i += 1;
     }
     String::from_utf8(out).ok()
+}
+
+/// What Cmd/Ctrl+Click on an OSC 8 link opens: `(target, is_path)`. `file://` URIs
+/// become local paths; other URIs are only opened for a few well-known schemes, so
+/// a program cannot make a click launch an arbitrary URL handler.
+fn osc8_target(uri: &str) -> Option<(String, bool)> {
+    if uri.starts_with("file://") {
+        return parse_osc7_path(uri.as_bytes()).map(|path| (path, true));
+    }
+    let (scheme, _) = uri.split_once(':')?;
+    const SCHEMES: [&str; 5] = ["http", "https", "ftp", "ftps", "mailto"];
+    SCHEMES.iter().any(|s| s.eq_ignore_ascii_case(scheme)).then(|| (uri.to_string(), false))
 }
 
 /// Standard base64 decoder for OSC 52 payloads (capped at 1 MiB of input).
@@ -2033,6 +2235,10 @@ impl Perform for Grid {
                 }
                 return;
             }
+            b"8" => {
+                self.osc8(params);
+                return;
+            }
             b"133" => {
                 match params[1].first() {
                     Some(b'B') => {
@@ -2193,6 +2399,78 @@ mod tests {
         assert_eq!(row[1].fg, FG_BOLD | FG_ITALIC);
         assert_eq!(row[2].fg, FG_ITALIC);
         assert_eq!(row[3].fg, palette(1) | FG_SET | FG_BOLD);
+    }
+
+    #[test]
+    fn sgr_underline_styles_and_strikethrough() {
+        let mut g = Grid::new(10, 1);
+        feed(&mut g, "\x1b[4ma\x1b[4:3mb\x1b[21mc\x1b[4:0md\x1b[4:4;9me\x1b[29mf\x1b[4:5mg\x1b[24mh");
+        let style = |c: &Cell| (c.bg & BG_UNDERLINE_MASK, c.bg & BG_STRIKE != 0);
+        let row: Vec<_> = g.display_row(0)[..8].iter().map(style).collect();
+        assert_eq!(
+            row,
+            [(1, false), (3, false), (2, false), (0, false), (4, true), (4, false), (5, false), (0, false)]
+        );
+    }
+
+    #[test]
+    fn sgr_58_sets_underline_color_without_touching_colors() {
+        let mut g = Grid::new(8, 1);
+        feed(&mut g, "\x1b[4;31;58;2;255;0;16ma\x1b[58:5:2mb\x1b[59mc\x1b[58:2::1:2:3;0md");
+        let row = g.display_row(0);
+        assert_eq!(row[0].fg & !FG_EXTRA, palette(1) | FG_SET);
+        assert_eq!(row[0].bg & !BG_EXTRA, BG_UNDERLINE);
+        assert_ne!(row[0].extra(), 0);
+        assert_eq!(g.underline_color(&row[0]), Some(0xFF00_1000));
+        assert_eq!(g.underline_color(&row[1]), Some(palette(2)));
+        assert_eq!(g.underline_color(&row[2]), None);
+        assert_eq!(g.underline_color(&row[3]), None, "SGR 0 resets the underline color");
+        assert_eq!(row[3], Cell { codepoint: 'd' as u32, fg: 0, bg: 0 });
+    }
+
+    #[test]
+    fn osc8_hyperlink_spans_its_cells() {
+        let mut g = Grid::new(20, 1);
+        feed(&mut g, "\x1b]8;id=x;https://example.com/a;b\x1b\\link\x1b]8;;\x1b\\ plain");
+        let link = g.find_hyperlink_at(0, 2, None).expect("osc 8 link");
+        assert_eq!((link.start_col, link.end_col), (0, 3));
+        assert_eq!(link.url, "https://example.com/a;b");
+        assert!(!link.is_path);
+        assert_eq!(g.find_hyperlink_at(0, 6, None), None);
+    }
+
+    #[test]
+    fn osc8_survives_sgr_reset_and_adjacent_links_stay_apart() {
+        let mut g = Grid::new(20, 1);
+        feed(&mut g, "\x1b]8;;http://a.test\x07a\x1b[0;1mb\x1b]8;;http://b.test\x07c\x1b]8;;\x07d");
+        let a = g.find_hyperlink_at(0, 1, None).expect("link a");
+        assert_eq!((a.start_col, a.end_col, a.url.as_str()), (0, 1, "http://a.test"));
+        let b = g.find_hyperlink_at(0, 2, None).expect("link b");
+        assert_eq!((b.start_col, b.end_col, b.url.as_str()), (2, 2, "http://b.test"));
+        assert_eq!(g.find_hyperlink_at(0, 3, None), None);
+    }
+
+    #[test]
+    fn osc8_targets() {
+        assert_eq!(osc8_target("file://host/tmp/a%20b.txt"), Some(("/tmp/a b.txt".into(), true)));
+        assert_eq!(osc8_target("HTTPS://x.test"), Some(("HTTPS://x.test".into(), false)));
+        assert_eq!(osc8_target("mailto:me@x.test"), Some(("mailto:me@x.test".into(), false)));
+        assert_eq!(osc8_target("javascript:alert(1)"), None);
+        assert_eq!(osc8_target("-a Calculator"), None);
+        let mut g = Grid::new(10, 1);
+        feed(&mut g, "\x1b]8;;x-evil://run\x1b\\click\x1b]8;;\x1b\\");
+        assert_eq!(g.find_hyperlink_at(0, 1, None), None);
+    }
+
+    #[test]
+    fn extra_slots_are_reclaimed_once_cells_stop_using_them() {
+        let mut g = Grid::new(4, 2);
+        for i in 0..600 {
+            feed(&mut g, &format!("\x1b]8;;https://e.test/{i}\x1b\\x\x1b]8;;\x1b\\\r"));
+        }
+        let link = g.find_hyperlink_at(0, 0, None).expect("latest link");
+        assert_eq!(link.url, "https://e.test/599");
+        assert!(g.extras.len() <= 256);
     }
 
     #[test]

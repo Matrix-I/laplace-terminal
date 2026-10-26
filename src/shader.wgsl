@@ -16,8 +16,8 @@ struct Uniforms {
     default_bg: u32,
     tab_info: u32,          // low 16 bits = tab_count (0 if single tab), high 16 bits = active_tab
     bg_opacity: f32,
-    pad0: u32,
-    pad1: u32,
+    underline_y: f32,       // underline top, px from the cell top
+    strike_y: f32,          // strikethrough center, px from the cell top
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -30,8 +30,11 @@ struct VsOut {
     @location(1) local: vec2<f32>,
     @location(2) @interpolate(flat) fg: vec3<f32>,
     @location(3) @interpolate(flat) bg: vec3<f32>,
-    @location(4) @interpolate(flat) flags: u32, // bit 0 = underline, bit 1 = tab_bar_row, bits 16..31 = sxy.y
+    // bits 0..3 = underline style, bit 3 = strikethrough, bits 4..7 = dividers, bit 7 = tab_bar_row,
+    // bits 8..11 = cursor style, bits 16..31 = sxy.y
+    @location(4) @interpolate(flat) flags: u32,
     @location(5) @interpolate(flat) col: u32,
+    @location(6) @interpolate(flat) ul: vec3<f32>,
 };
 
 fn unpack(c: u32) -> vec3<f32> {
@@ -54,6 +57,49 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(higher, lower, cutoff);
 }
 
+// Coverage (0..1) of an underline of `style` (1 single, 2 double, 3 curly, 4 dotted,
+// 5 dashed) at `px` inside the cell. Patterns repeat per cell so they tile seamlessly.
+fn underline_coverage(style: u32, px: vec2<f32>, t: f32) -> f32 {
+    if (style == 0u) {
+        return 0.0;
+    }
+    // Room below the line: double needs two lines with a gap, curly needs its wave amplitude.
+    let amp = max(1.0, round(t * 1.5));
+    var room = t;
+    if (style == 2u) {
+        room = 3.0 * t;
+    } else if (style == 3u) {
+        room = 2.0 * amp + t;
+    }
+    let y0 = max(0.0, min(u.underline_y, u.cell.y - room));
+    let in_line = px.y >= y0 && px.y < y0 + t;
+    if (style == 2u) {
+        return select(0.0, 1.0, in_line || (px.y >= y0 + 2.0 * t && px.y < y0 + 3.0 * t));
+    }
+    if (style == 3u) {
+        // One sine period per cell; distance to the curve, corrected for its slope, gives AA.
+        let k = 6.2831853 / u.cell.x;
+        let center = y0 + amp + t * 0.5;
+        let wave = center - amp * sin(px.x * k);
+        let slope = amp * k * cos(px.x * k);
+        let d = abs(px.y - wave) / sqrt(1.0 + slope * slope);
+        return clamp(t * 0.5 + 0.5 - d, 0.0, 1.0);
+    }
+    if (!in_line) {
+        return 0.0;
+    }
+    if (style == 4u) {
+        // Dots as long as the line is thick, with equal gaps.
+        return select(0.0, 1.0, fract(floor(px.x / t) * 0.5) < 0.25);
+    }
+    if (style == 5u) {
+        // One dash per cell, centered, with a gap on either side.
+        let x = px.x / u.cell.x;
+        return select(0.0, 1.0, x >= 0.2 && x < 0.8);
+    }
+    return 1.0;
+}
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) vi: u32,
@@ -67,7 +113,7 @@ fn vs_main(
     let row = ii / u.cols;
     let tab_count = u.tab_info & 0xFFFFu;
     let is_tab_row = tab_count > 0u && row == 0u;
-    let is_preview = (bg & 4u) != 0u;
+    let is_preview = (bg & 16u) != 0u;
 
     var px: vec2<f32>;
     if (is_tab_row) {
@@ -106,16 +152,19 @@ fn vs_main(
     }
     out.fg = f;
     out.bg = b;
+    // Underline color: 4-bit RGB in glyph bits 19..31 when bit 31 is set, else the text color.
+    let ul = (glyph >> 19u) & 0xFFFu;
+    out.ul = select(f, vec3<f32>(f32(ul >> 8u), f32((ul >> 4u) & 15u), f32(ul & 15u)) / 15.0, (glyph >> 31u) != 0u);
     let cursor_flag = select(0u, (u.cursor_style + 1u) << 8u, is_cursor);
     let divider_flags = (glyph >> 16u) & 7u;
-    out.flags = (bg & 1u) | (select(0u, 2u, is_tab_row)) | (bg & 12u) | (divider_flags << 4u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
+    out.flags = (bg & 15u) | (select(0u, 128u, is_tab_row)) | (divider_flags << 4u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
     out.col = col;
     return out;
 }
 
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
-    if ((v.flags & 2u) != 0u) {
+    if ((v.flags & 128u) != 0u) {
         let tab_count = u.tab_info & 0xFFFFu;
         let active_tab = u.tab_info >> 16u;
         let bar_h = floor(u.cell.y * 1.56);
@@ -214,8 +263,9 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     }
 
     var a = textureSampleLevel(atlas, samp, v.uv, 0.0).r;
+    let px = v.local * u.cell;
     let thickness = max(1.0, floor(u.cell.y / 14.0));
-    if ((v.flags & 1u) != 0u && v.local.y * u.cell.y >= u.cell.y - thickness) {
+    if ((v.flags & 8u) != 0u && abs(px.y - u.strike_y) <= thickness * 0.5) {
         a = 1.0;
     }
     var cell_color: vec3<f32>;
@@ -228,6 +278,12 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         let bg_lin = srgb_to_linear(v.bg);
         let cell_lin = mix(bg_lin, fg_lin, a);
         cell_color = linear_to_srgb(cell_lin);
+    }
+
+    let ul_cov = underline_coverage(v.flags & 7u, px, thickness);
+    if (ul_cov > 0.0) {
+        cell_color = linear_to_srgb(mix(srgb_to_linear(cell_color), srgb_to_linear(v.ul), ul_cov));
+        a = max(a, ul_cov);
     }
 
     // Non-block cursor styling (1=block handled in vs_main, 2=bar, 3=underline, 4=block_hollow)
@@ -279,7 +335,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
     var out_alpha = 1.0;
     let def_bg = unpack(u.default_bg);
-    if (!on_divider && (v.flags & 2u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
+    if (!on_divider && (v.flags & 128u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
         out_alpha = mix(u.bg_opacity, 1.0, a);
     }
 

@@ -9,7 +9,10 @@ use parking_lot::Mutex;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet, GlyphStyle};
-use crate::grid::{char_width, default_bg, default_fg, Grid, Hyperlink, SearchHit, BG_UNDERLINE, FG_BOLD, FG_ITALIC};
+use crate::grid::{
+    char_width, default_bg, default_fg, Grid, Hyperlink, SearchHit, BG_EXTRA, BG_STRIKE, BG_UNDERLINE,
+    BG_UNDERLINE_MASK, FG_BOLD, FG_EXTRA, FG_ITALIC, UNDERLINE_SINGLE,
+};
 use crate::history::HistorySearch;
 use crate::search::SearchBar;
 use crate::split::PaneRect;
@@ -23,6 +26,10 @@ pub struct RenderPane<'a> {
 }
 
 /// Per-cell GPU instance: 12 bytes, mirrors `Cell` with codepoint → atlas slot.
+///
+/// `glyph`: bits 0..16 atlas slot, 16..19 pane divider flags, 19..31 underline
+/// color as 4-bit RGB, bit 31 set when that color is used. `bg` low byte: bits 0..3
+/// underline style, bit 3 strikethrough, bit 4 preview row, bit 7 explicit color.
 #[repr(C)]
 #[derive(Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
@@ -47,7 +54,9 @@ struct Uniforms {
     default_bg: u32,
     tab_info: u32,
     bg_opacity: f32,
-    _pad: [u32; 2],
+    /// Underline top and strikethrough center, in px from the cell top.
+    underline_y: f32,
+    strike_y: f32,
 }
 
 const _: () = assert!(std::mem::size_of::<Uniforms>() == 80);
@@ -570,8 +579,8 @@ impl Renderer {
             let preview_row = total_rows - 1;
             let row_start = preview_row * cols;
             // Naturally blend with terminal background without any background box or borders:
-            // bit 2 is set so is_preview=true (suppresses cursor), while bit 7 is 0 so background matches default_bg.
-            const PREVIEW_BG: u32 = 4;
+            // bit 4 is set so is_preview=true (suppresses cursor), while bit 7 is 0 so background matches default_bg.
+            const PREVIEW_BG: u32 = 16;
             const PREVIEW_FG: u32 = 0xF2F2_F7FF;
             for (col, ch) in display_url.chars().enumerate() {
                 if col < cols {
@@ -662,6 +671,7 @@ impl Renderer {
         };
         self.last_cursor_visible = effective_cursor_visible;
 
+        let (underline_y, strike_y) = self.atlas.decoration_offsets();
         let u = Uniforms {
             screen: [self.config.width as f32, self.config.height as f32],
             cell: [self.atlas.cell_w as f32, self.atlas.cell_h as f32],
@@ -676,7 +686,8 @@ impl Renderer {
             default_bg: default_bg(),
             tab_info,
             bg_opacity: self.bg_opacity,
-            _pad: [0; 2],
+            underline_y,
+            strike_y,
         };
         self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
@@ -765,12 +776,11 @@ impl Renderer {
                     left
                 }
             };
-            let underline_flag = if is_link_row {
-                if let Some(l) = hovered_link {
-                    if col >= l.start_col && col <= l.end_col { 1u32 } else { 0u32 }
-                } else { 0u32 }
-            } else {
-                0u32
+            // Underline style + strikethrough; a hovered link gets at least a single underline.
+            let hovered = is_link_row && hovered_link.is_some_and(|l| col >= l.start_col && col <= l.end_col);
+            let deco = match cell.bg & (BG_UNDERLINE_MASK | BG_STRIKE) {
+                d if hovered && d & BG_UNDERLINE_MASK == 0 => d | UNDERLINE_SINGLE as u32,
+                d => d,
             };
 
             // Divider flags (bit 0: right, bit 1: bottom, bit 2: active) packed into high 16 bits of glyph
@@ -787,24 +797,21 @@ impl Renderer {
                     div_flags |= 4;
                 }
             }
-            let glyph_with_div = (slot as u32) | (div_flags << 16);
+            let mut glyph_with_div = (slot as u32) | (div_flags << 16);
+            if let Some(c) = g.underline_color(cell).filter(|_| deco & BG_UNDERLINE_MASK != 0) {
+                let rgb444 = ((c >> 20) & 0xF00) | ((c >> 16) & 0xF0) | ((c >> 12) & 0xF);
+                glyph_with_div |= (1 << 31) | (rgb444 << 19);
+            }
 
             let hit = hits.at(col);
             if g.is_selected(src_row, col) {
-                *dst = Instance {
-                    glyph: glyph_with_div,
-                    fg: SEL_FG,
-                    bg: (SEL_BG | (cell.bg & 1)) | underline_flag,
-                };
+                *dst = Instance { glyph: glyph_with_div, fg: SEL_FG, bg: SEL_BG | deco };
             } else if hit != SearchHit::None {
                 let (fg, bg) = if hit == SearchHit::Current { (CURRENT_FG, CURRENT_BG) } else { (MATCH_FG, MATCH_BG) };
-                *dst = Instance { glyph: glyph_with_div, fg, bg: bg | (cell.bg & 1) | underline_flag };
+                *dst = Instance { glyph: glyph_with_div, fg, bg: bg | deco };
             } else {
-                *dst = Instance {
-                    glyph: glyph_with_div,
-                    fg: cell.fg,
-                    bg: cell.bg | underline_flag,
-                };
+                let bg = (cell.bg & !(BG_EXTRA | BG_UNDERLINE_MASK | BG_STRIKE)) | deco;
+                *dst = Instance { glyph: glyph_with_div, fg: cell.fg & !FG_EXTRA, bg };
             }
         }
     }

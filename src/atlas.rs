@@ -64,6 +64,15 @@ pub struct Atlas {
 }
 
 impl Atlas {
+    /// Vertical positions inside a cell, in px from its top: where the underline
+    /// starts (just below the baseline) and the center of a strikethrough
+    /// (half the x-height above the baseline).
+    pub fn decoration_offsets(&self) -> (f32, f32) {
+        let underline = self.baseline as f32 + (self.px * 0.08).round().max(1.0);
+        let strike = self.baseline as f32 - (self.px * 0.26).round();
+        (underline, strike)
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, fonts: Arc<FontSet>, px: f32) -> Self {
         let font = &fonts.primary;
         let lm = font
