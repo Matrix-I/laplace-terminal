@@ -399,7 +399,7 @@ mod imp {
         // type encoding; the observer instance lives for the whole process.
         unsafe {
             let Some(app) = shared_application() else { return };
-            let name = c"LaplaceAppearanceObserver";
+            let name = c"LittyAppearanceObserver";
             let mut cls = objc_getClass(name.as_ptr());
             if cls.is_null() {
                 let Some(base) = class(c"NSObject") else { return };
@@ -500,17 +500,17 @@ mod imp {
         use Item::{Laplace, Native, Separator};
         let menus: [(&str, Vec<Item>); 5] = [
             (
-                "Laplace",
+                "Litty",
                 vec![
                     Laplace("Settings…", Action::OpenConfig),
                     Laplace("Check for Updates…", Action::CheckUpdate),
                     Laplace("Secure Keyboard Entry", Action::ToggleSecureInput),
                     Separator,
-                    Native("Hide Laplace", c"hide:", "h", CMD),
+                    Native("Hide Litty", c"hide:", "h", CMD),
                     Native("Hide Others", c"hideOtherApplications:", "h", CMD | OPT),
                     Native("Show All", c"unhideAllApplications:", "", 0),
                     Separator,
-                    Laplace("Quit Laplace", Action::Quit),
+                    Laplace("Quit Litty", Action::Quit),
                 ],
             ),
             (
@@ -558,7 +558,7 @@ mod imp {
         unsafe {
             let Some(app) = shared_application() else { return };
             let target = {
-                let name = c"LaplaceMenuTarget";
+                let name = c"LittyMenuTarget";
                 let mut cls = objc_getClass(name.as_ptr());
                 if cls.is_null() {
                     let Some(base) = class(c"NSObject") else { return };
@@ -566,7 +566,7 @@ mod imp {
                     if cls.is_null() {
                         return;
                     }
-                    class_addMethod(cls, sel(c"laplaceMenu:"), on_menu as *const (), c"v@:@".as_ptr());
+                    class_addMethod(cls, sel(c"littyMenu:"), on_menu as *const (), c"v@:@".as_ptr());
                     objc_registerClassPair(cls);
                 }
                 let Some(obj) = send_id(cls, c"alloc").and_then(|o| send_id(o, c"init")) else { return };
@@ -599,7 +599,7 @@ mod imp {
                         Laplace(label, action) => {
                             // Quit needs Cmd+Q here: AppKit would otherwise terminate.
                             let key = if action == Action::Quit { "q" } else { "" };
-                            new_item(label, sel(c"laplaceMenu:"), key).inspect(|&it| {
+                            new_item(label, sel(c"littyMenu:"), key).inspect(|&it| {
                                 msg_send!(it, c"setTarget:", target => Id);
                                 msg_send!(it, c"setTag:", menu_tag(action) => isize);
                                 if action == Action::ToggleSecureInput {
@@ -819,7 +819,7 @@ mod imp {
                 return;
             }
 
-            if let Some(s) = ns_string("Laplace") {
+            if let Some(s) = ns_string("Litty") {
                 msg_send!(win, c"setTitle:", s => Id);
             }
             msg_send!(win, c"setReleasedWhenClosed:", false => bool);

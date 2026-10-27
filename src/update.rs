@@ -448,7 +448,7 @@ fn fetch_release_from_api(channel: AutoUpdateChannel) -> Result<ReleaseInfo, Str
         "--max-time",
         "30",
         "-H",
-        "User-Agent: Laplace-Terminal",
+        "User-Agent: Litty-Terminal",
         "-H",
         "Accept: application/vnd.github+json",
     ]);
@@ -631,9 +631,9 @@ fn find_macos_app_bundle() -> Option<PathBuf> {
 /// (arm64 on macOS, x86_64 on Linux); they are offered only to that architecture.
 fn asset_candidates(os: &str, arch: &str, app_bundle: bool) -> Vec<String> {
     let (stem, ext, legacy_arch) = match (os, app_bundle) {
-        ("macos", true) => ("Laplace-macos", ".zip", "aarch64"),
-        ("macos", false) => ("laplace-macos", "", "aarch64"),
-        _ => ("laplace-linux", "", "x86_64"),
+        ("macos", true) => ("Litty-macos", ".zip", "aarch64"),
+        ("macos", false) => ("litty-macos", "", "aarch64"),
+        _ => ("litty-linux", "", "x86_64"),
     };
     let mut names = vec![format!("{stem}-{arch}{ext}")];
     if arch == legacy_arch {
@@ -839,7 +839,7 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
 
     #[cfg(target_os = "macos")]
     if asset_name.ends_with(".zip") {
-        let app_path = find_macos_app_bundle().ok_or("Laplace is not running from an .app bundle")?;
+        let app_path = find_macos_app_bundle().ok_or("Litty is not running from an .app bundle")?;
         let staging_dir = downloaded_file.with_file_name("staging");
         let _ = fs::remove_dir_all(&staging_dir);
         let _ = fs::create_dir_all(&staging_dir);
@@ -856,11 +856,22 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
             return Err(format!("failed to extract {asset_name}"));
         }
 
-        let staged_app = staging_dir.join("Laplace.app");
+        let staged_app = staging_dir.join("Litty.app");
+        let staged_app = if staged_app.exists() {
+            staged_app
+        } else {
+            staging_dir.join("Laplace.app")
+        };
         if !staged_app.exists() {
-            return Err("extracted archive did not contain Laplace.app".to_string());
+            return Err("extracted archive did not contain Litty.app".to_string());
         }
-        check_binary_arch(&staged_app.join("Contents").join("MacOS").join("laplace"))?;
+        let bin_path = staged_app.join("Contents").join("MacOS").join("litty");
+        let bin_path = if bin_path.exists() {
+            bin_path
+        } else {
+            staged_app.join("Contents").join("MacOS").join("laplace")
+        };
+        check_binary_arch(&bin_path)?;
 
         // Sync updated contents to app_path
         let status = Command::new("/usr/bin/ditto")
@@ -1221,35 +1232,35 @@ mod tests {
 
     #[test]
     fn test_asset_candidates_per_arch() {
-        assert_eq!(asset_candidates("macos", "aarch64", true), ["Laplace-macos-aarch64.zip", "Laplace-macos.zip"]);
-        assert_eq!(asset_candidates("macos", "x86_64", true), ["Laplace-macos-x86_64.zip"]);
-        assert_eq!(asset_candidates("macos", "aarch64", false), ["laplace-macos-aarch64", "laplace-macos"]);
-        assert_eq!(asset_candidates("macos", "x86_64", false), ["laplace-macos-x86_64"]);
-        assert_eq!(asset_candidates("linux", "x86_64", false), ["laplace-linux-x86_64", "laplace-linux"]);
-        assert_eq!(asset_candidates("linux", "aarch64", false), ["laplace-linux-aarch64"]);
+        assert_eq!(asset_candidates("macos", "aarch64", true), ["Litty-macos-aarch64.zip", "Litty-macos.zip"]);
+        assert_eq!(asset_candidates("macos", "x86_64", true), ["Litty-macos-x86_64.zip"]);
+        assert_eq!(asset_candidates("macos", "aarch64", false), ["litty-macos-aarch64", "litty-macos"]);
+        assert_eq!(asset_candidates("macos", "x86_64", false), ["litty-macos-x86_64"]);
+        assert_eq!(asset_candidates("linux", "x86_64", false), ["litty-linux-x86_64", "litty-linux"]);
+        assert_eq!(asset_candidates("linux", "aarch64", false), ["litty-linux-aarch64"]);
     }
 
     #[test]
     fn test_pick_asset_requires_listing_in_sums() {
         let hash = "a".repeat(64);
-        let r = release("v0.4.0", &["laplace-linux-x86_64", "laplace-linux", SUMS_NAME]);
+        let r = release("v0.4.0", &["litty-linux-x86_64", "litty-linux", SUMS_NAME]);
         let candidates = asset_candidates("linux", "x86_64", false);
         // Only the legacy name is checksummed, so it wins despite being second.
-        let sums = format!("{hash}  laplace-linux\n");
-        assert_eq!(pick_asset(&r, &sums, &candidates).unwrap().name, "laplace-linux");
-        let sums = format!("{hash}  laplace-linux-x86_64\n{hash} *laplace-linux\n");
-        assert_eq!(pick_asset(&r, &sums, &candidates).unwrap().name, "laplace-linux-x86_64");
+        let sums = format!("{hash}  litty-linux\n");
+        assert_eq!(pick_asset(&r, &sums, &candidates).unwrap().name, "litty-linux");
+        let sums = format!("{hash}  litty-linux-x86_64\n{hash} *litty-linux\n");
+        assert_eq!(pick_asset(&r, &sums, &candidates).unwrap().name, "litty-linux-x86_64");
         let err = pick_asset(&r, &sums, &asset_candidates("linux", "aarch64", false)).unwrap_err();
-        assert!(err.contains("laplace-linux-aarch64"), "{err}");
+        assert!(err.contains("litty-linux-aarch64"), "{err}");
     }
 
     #[test]
     fn test_expected_hash() {
         let hash = "AB".repeat(32);
-        let sums = format!("{hash}  Laplace.dmg\n{hash} *laplace-macos\nnot-a-hash  laplace-linux\n\n");
-        assert_eq!(expected_hash(&sums, "laplace-macos"), Some("ab".repeat(32)));
-        assert_eq!(expected_hash(&sums, "laplace-linux"), None);
-        assert_eq!(expected_hash(&sums, "laplace"), None);
+        let sums = format!("{hash}  Litty.dmg\n{hash} *litty-macos\nnot-a-hash  litty-linux\n\n");
+        assert_eq!(expected_hash(&sums, "litty-macos"), Some("ab".repeat(32)));
+        assert_eq!(expected_hash(&sums, "litty-linux"), None);
+        assert_eq!(expected_hash(&sums, "litty"), None);
     }
 
     #[test]

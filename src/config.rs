@@ -239,7 +239,13 @@ impl Default for Config {
     }
 }
 
-/// Primary path for Laplace config: `~/.laplace/config`.
+/// Primary path for Litty config: `~/.litty/config`.
+pub fn litty_config_path() -> PathBuf {
+    let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
+    PathBuf::from(home).join(".litty").join("config")
+}
+
+/// Fallback path for Laplace config: `~/.laplace/config`.
 pub fn laplace_config_path() -> PathBuf {
     let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
     PathBuf::from(home).join(".laplace").join("config")
@@ -251,14 +257,18 @@ pub fn ghostty_config_path() -> PathBuf {
     PathBuf::from(home).join(".config").join("ghostty").join("config")
 }
 
-/// Legacy/canonical path for Laplace config.
+/// Primary path for Litty config.
 pub fn config_path() -> PathBuf {
-    laplace_config_path()
+    litty_config_path()
 }
 
-/// Active path: prefers `~/.laplace/config` if it exists, otherwise falls back
-/// to `~/.config/ghostty/config` so Ghostty configuration works out of the box.
+/// Active path: prefers `~/.litty/config` if it exists, otherwise falls back
+/// to `~/.laplace/config`, then `~/.config/ghostty/config` so configurations work out of the box.
 pub fn active_config_path() -> PathBuf {
+    let litty = litty_config_path();
+    if litty.exists() {
+        return litty;
+    }
     let laplace = laplace_config_path();
     if laplace.exists() {
         return laplace;
@@ -267,7 +277,7 @@ pub fn active_config_path() -> PathBuf {
     if ghostty.exists() {
         return ghostty;
     }
-    laplace
+    litty
 }
 
 pub fn config_mtime() -> Option<SystemTime> {
@@ -813,6 +823,7 @@ fn theme_file_text(name: &str) -> Option<String> {
     }
     let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
     let candidates = [
+        PathBuf::from(&home).join(".litty").join("themes").join(name),
         PathBuf::from(&home).join(".laplace").join("themes").join(name),
         PathBuf::from(&home).join(".config").join("ghostty").join("themes").join(name),
         PathBuf::from(&home).join("Applications/Ghostty.app/Contents/Resources/ghostty/themes").join(name),
@@ -933,14 +944,14 @@ pub fn open_config_in_editor() {
     }
 }
 
-const TEMPLATE: &str = r#"# This is the configuration file for Laplace.
+const TEMPLATE: &str = r#"# This is the configuration file for Litty.
 #
 # This template file has been automatically created at the following
-# path since Laplace couldn't find any existing config file on your system:
+# path since Litty couldn't find any existing config file on your system:
 #
 #   {path}
 #
-# The template does not set any options, since Laplace ships with sensible
+# The template does not set any options, since Litty ships with sensible
 # defaults for all of them. Only set the options you want to change: remove
 # the leading `# ` from a line below and edit its value.
 #
@@ -1257,9 +1268,9 @@ shell-integration-features = false
     }
 
     #[test]
-    fn config_path_ends_with_laplace_config() {
+    fn config_path_ends_with_litty_config() {
         let p = config_path();
-        assert!(p.ends_with(".laplace/config") || p.ends_with(".laplace\\config"));
+        assert!(p.ends_with(".litty/config") || p.ends_with(".litty\\config"));
     }
 
     #[test]

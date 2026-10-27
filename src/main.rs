@@ -47,7 +47,7 @@ use crate::split::{Direction, PaneRect, Rect, SplitDirection, SplitNode};
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    WakeUp,
+    WakeUp(Option<WindowId>),
     ChildExit(u64),
     Reopen,
     /// A menu bar item (macOS) was chosen.
@@ -159,6 +159,7 @@ struct HoveredPaneLink {
 struct State {
     window: Arc<Window>,
     renderer: Renderer,
+    waker: Waker,
     tabs: Vec<Tab>,
     tab_titles: Vec<String>,
     active: usize,
@@ -244,12 +245,21 @@ fn next_id() -> u64 {
 struct Waker {
     proxy: EventLoopProxy<AppEvent>,
     queued: Arc<AtomicBool>,
+    window_id: Option<WindowId>,
 }
 
 impl Waker {
+    fn for_window(&self, window_id: WindowId) -> Self {
+        Self {
+            proxy: self.proxy.clone(),
+            queued: Arc::new(AtomicBool::new(false)),
+            window_id: Some(window_id),
+        }
+    }
+
     fn wake(&self) {
         if !self.queued.swap(true, Ordering::AcqRel) {
-            let _ = self.proxy.send_event(AppEvent::WakeUp);
+            let _ = self.proxy.send_event(AppEvent::WakeUp(self.window_id));
         }
     }
 
@@ -328,7 +338,7 @@ impl App {
         if self.windows.iter_mut().any(|s| std::mem::take(&mut s.quit_requested)) {
             let config = &self.windows[0].config;
             let panes = self.windows.iter().flat_map(|s| s.tabs.iter().flat_map(|t| &t.panes));
-            if confirm_close(config, panes, "Laplace") {
+            if confirm_close(config, panes, "Litty") {
                 event_loop.exit();
                 return;
             }
@@ -339,7 +349,7 @@ impl App {
             let new_window = std::mem::take(&mut s.new_window_requested);
             let native_tab = std::mem::take(&mut s.native_tab_requested);
             if new_window || native_tab {
-                let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
+                let cwd = s.tabs.get_mut(s.active).and_then(|t| t.active_pane_mut().cwd());
                 let from = (!native_tab && s.window.is_visible() != Some(false))
                     .then(|| s.window.outer_position().ok().map(|p| (p, s.window.scale_factor())))
                     .flatten();
@@ -409,7 +419,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     grid::set_grapheme_default(cfg.grapheme_unicode);
 
     let attrs = Window::default_attributes()
-        .with_title("Laplace")
+        .with_title("Litty")
         .with_transparent(cfg.background_opacity < 1.0)
         .with_inner_size(LogicalSize::new(960.0, 600.0));
     // Native tabs (`macos-native-tabs`) group under one identifier. Created
@@ -418,7 +428,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     #[cfg(target_os = "macos")]
     let attrs = {
         use winit::platform::macos::WindowAttributesExtMacOS;
-        attrs.with_tabbing_identifier("laplace").with_visible(false)
+        attrs.with_tabbing_identifier("litty").with_visible(false)
     };
     let window = Arc::new(event_loop.create_window(attrs).map_err(std::io::Error::other)?);
     macos::set_tabbing_allowed(&window, false);
@@ -477,6 +487,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     let (cols, rows) = renderer.grid_size_for_tabs(false);
     let (cw, ch) = renderer.cell_size();
 
+    let win_waker = waker.for_window(window.id());
     let pane = spawn_pane(
         next_id(),
         cols,
@@ -484,7 +495,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         (cw, ch),
         cwd,
         Some((cfg.shell_integration, cfg.shell_integration_features)),
-        waker,
+        &win_waker,
     )?;
     let mut tab = Tab::new(next_id(), pane);
     let title = tab_title(&mut tab);
@@ -493,6 +504,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     Ok(State {
         window,
         renderer,
+        waker: win_waker,
         tabs: vec![tab],
         tab_titles: vec![title],
         active: 0,
@@ -576,9 +588,14 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::WakeUp => {
-                self.waker.rearm();
+            AppEvent::WakeUp(target_wid) => {
                 for s in &mut self.windows {
+                    if let Some(target) = target_wid {
+                        if s.window.id() != target {
+                            continue;
+                        }
+                    }
+                    s.waker.rearm();
                     // OSC 52: applications (e.g. vim/tmux over ssh) setting the clipboard.
                     for pane in s.tabs.iter().flat_map(|t| &t.panes) {
                         let request = pane.grid.lock().clipboard_request.take();
@@ -714,24 +731,24 @@ impl ApplicationHandler<AppEvent> for App {
                         let current = update::Version::current();
                         if release.version <= current {
                             macos::alert(
-                                "Laplace",
-                                &format!("You're up to date!\n\nLaplace v{current} is currently the newest version available."),
+                                "Litty",
+                                &format!("You're up to date!\n\nLitty v{current} is currently the newest version available."),
                             );
                         } else {
                             let title = "Update Available";
                             let message = format!(
-                                "Laplace v{} is available (you have v{}).\n\nWould you like to download and install this update now?",
+                                "Litty v{} is available (you have v{}).\n\nWould you like to download and install this update now?",
                                 release.version, current
                             );
                             let choice = macos::alert_choice(title, &message, &["Update Now", "View Release", "Cancel"]);
                             match choice {
                                 0 => {
-                                    let text = format!("Downloading and installing Laplace v{}…", release.version);
+                                    let text = format!("Downloading and installing Litty v{}…", release.version);
                                     // The result event is handled after this one, so the dialog opens before it closes.
                                     if update::start_install_update(release, self.waker.proxy.clone()) {
-                                        macos::show_progress_dialog("Updating Laplace…", &text);
+                                        macos::show_progress_dialog("Updating Litty…", &text);
                                     } else {
-                                        macos::alert("Update In Progress", "Laplace is already installing an update.");
+                                        macos::alert("Update In Progress", "Litty is already installing an update.");
                                     }
                                 }
                                 1 => {
@@ -753,7 +770,7 @@ impl ApplicationHandler<AppEvent> for App {
                         macos::alert(
                             "Update Complete",
                             &format!(
-                                "Laplace has been successfully updated to v{new_ver}!\n\nPlease restart Laplace to apply changes."
+                                "Litty has been successfully updated to v{new_ver}!\n\nPlease restart Litty to apply changes."
                             ),
                         );
                     }
@@ -771,7 +788,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.waker.is_queued() {
+        if self.windows.iter().any(|s| s.waker.is_queued()) || self.waker.is_queued() {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
@@ -808,8 +825,8 @@ impl ApplicationHandler<AppEvent> for App {
 
 impl App {
     fn handle_window_event(&mut self, id: WindowId, event: WindowEvent) {
-        let waker = self.waker.clone();
         let Some(s) = self.window_mut(id) else { return };
+        let waker = s.waker.clone();
         match event {
             WindowEvent::CloseRequested => {
                 if confirm_close(&s.config, s.tabs.iter().flat_map(|t| &t.panes), "this window") {
@@ -1391,7 +1408,7 @@ fn handle_terminal_requests(s: &mut State) {
                 // At most one per second, so a runaway loop cannot flood the desktop.
                 if s.last_notification.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
                     s.last_notification = Some(std::time::Instant::now());
-                    let title = if title.is_empty() { "Laplace".to_string() } else { title };
+                    let title = if title.is_empty() { "Litty".to_string() } else { title };
                     show_notification(&title, &body);
                 }
             }
@@ -2038,7 +2055,7 @@ fn duplicate_active_tab(
         open_fresh_tab(s, waker);
         return;
     }
-    let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
+    let cwd = s.tabs.get_mut(s.active).and_then(|t| t.active_pane_mut().cwd());
     let (cols, rows) = s.renderer.grid_size_for_tabs(true);
     let (cw, ch) = s.renderer.cell_size();
     let id = next_id();
@@ -2053,13 +2070,14 @@ fn duplicate_active_tab(
         waker,
     ) {
         Ok(pane) => {
-            let tab = Tab::new(id, pane);
+            let mut tab = Tab::new(id, pane);
+            let title = tab_title(&mut tab);
             let insert_at = (s.active + 1).min(s.tabs.len());
             s.tabs.insert(insert_at, tab);
+            s.tab_titles.insert(insert_at, title);
             s.active = insert_at;
             s.window.set_visible(true);
             sync_size(s);
-            refresh_tab_titles(s);
             s.renderer.invalidate();
             s.window.request_redraw();
         }
@@ -2079,7 +2097,7 @@ fn confirm_close<'a>(cfg: &config::Config, mut panes: impl Iterator<Item = &'a P
     }
     let text = if running { "A program is still running. Closing will end it." } else { "The terminal will be closed." };
     let (title, button) = match what {
-        "Laplace" => ("Quit Laplace?".to_string(), "Quit"),
+        "Litty" => ("Quit Litty?".to_string(), "Quit"),
         _ => (format!("Close {what}?"), "Close"),
     };
     #[cfg(target_os = "macos")]
@@ -2507,19 +2525,10 @@ fn handle_key(
                 return;
             }
         }
-        Key::Named(NamedKey::Enter) => {
-            let cmd = {
-                let g = pane.grid.lock();
-                // Full-screen apps (vim, less, REPL UIs) are not shell commands.
-                if g.alt_active { String::new() } else { g.current_prompt_input() }
-            };
-            if !cmd.is_empty() {
-                s.history_search.add_session_command(&cmd);
-            }
-        }
         _ => {}
     }
 
+    let is_enter = matches!(ev.logical_key, Key::Named(NamedKey::Enter));
     let bytes = if kitty_flags != 0 {
         let kind = if ev.repeat { keymap::KeyKind::Repeat } else { keymap::KeyKind::Press };
         let unshifted = ev.key_without_modifiers();
@@ -2532,6 +2541,16 @@ fn handle_key(
     };
     if let Some(bytes) = &bytes {
         pane.pty.write(bytes);
+    }
+    if is_enter {
+        let cmd = {
+            let g = pane.grid.lock();
+            // Full-screen apps (vim, less, REPL UIs) are not shell commands.
+            if g.alt_active { String::new() } else { g.current_prompt_input() }
+        };
+        if !cmd.is_empty() {
+            s.history_search.add_session_command(&cmd);
+        }
     }
     if s.inspector {
         s.inspector_key = describe_key(&ev.logical_key, m, bytes.as_deref());
@@ -2854,7 +2873,7 @@ fn run_action(
         A::NewTab if cfg!(target_os = "macos") && s.config.macos_native_tabs => s.native_tab_requested = true,
         A::NewTab => duplicate_active_tab(s, waker),
         A::CheckUpdate => {
-            macos::show_progress_dialog("Checking for Updates…", "Checking for new releases of Laplace…");
+            macos::show_progress_dialog("Checking for Updates…", "Checking for new releases of Litty…");
             update::start_interactive_check(waker.proxy.clone(), s.config.auto_update_channel);
         }
         _ if s.tabs.is_empty() => {}
@@ -2874,7 +2893,7 @@ fn run_tab_action(
     match action {
         A::ClearScreen => {
             let pane = s.tabs[s.active].active_pane();
-            pane.grid.lock().clear_history();
+            pane.grid.lock().clear_screen_and_history();
             pane.pty.write(b"\x0c");
             s.window.request_redraw();
         }
@@ -3117,7 +3136,7 @@ fn main() {
             std::process::exit(1);
         }
         if let Err(e) = hotkey::send_toggle() {
-            eprintln!("laplace: no running Laplace to toggle ({e})");
+            eprintln!("litty: no running Litty to toggle ({e})");
             std::process::exit(1);
         }
         return;
@@ -3135,7 +3154,7 @@ fn main() {
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)) },
+        waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)), window_id: None },
         windows: Vec::new(),
     };
     event_loop.run_app(&mut app).expect("run app");

@@ -742,29 +742,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
-name = "laplace-terminal"
-version = "0.4.0"
-dependencies = [
- "bytemuck",
- "fontdue",
- "libc",
- "memmap2",
- "mimalloc",
- "miniz_oxide 0.8.9",
- "parking_lot",
- "png",
- "pollster",
- "regex",
- "rustybuzz",
- "unicode-normalization",
- "unicode-width 0.2.2",
- "vte",
- "wgpu",
- "winit",
- "x11rb",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,6 +801,29 @@ name = "litrs"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
+
+[[package]]
+name = "litty"
+version = "0.4.0"
+dependencies = [
+ "bytemuck",
+ "fontdue",
+ "libc",
+ "memmap2",
+ "mimalloc",
+ "miniz_oxide 0.8.9",
+ "parking_lot",
+ "png",
+ "pollster",
+ "regex",
+ "rustybuzz",
+ "unicode-normalization",
+ "unicode-width 0.2.2",
+ "vte",
+ "wgpu",
+ "winit",
+ "x11rb",
+]
 
 [[package]]
 name = "lock_api"

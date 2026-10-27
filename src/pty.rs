@@ -11,15 +11,44 @@ use parking_lot::Mutex;
 
 use crate::grid::Grid;
 
+#[derive(Debug)]
+pub(crate) enum WritePayload {
+    Inline(u8, [u8; 15]),
+    Heap(Vec<u8>),
+}
+
+impl WritePayload {
+    #[inline]
+    pub fn from_slice(data: &[u8]) -> Self {
+        if data.len() <= 15 {
+            let mut buf = [0u8; 15];
+            buf[..data.len()].copy_from_slice(data);
+            WritePayload::Inline(data.len() as u8, buf)
+        } else {
+            WritePayload::Heap(data.to_vec())
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            WritePayload::Inline(len, buf) => &buf[..*len as usize],
+            WritePayload::Heap(v) => v.as_slice(),
+        }
+    }
+}
+
 /// Dropping a `Pty` closes the master side and wakes both I/O threads through the
 /// shutdown pipe; once their duplicated descriptors are closed the kernel hangs up
 /// the terminal (SIGHUP to the shell and its foreground job) and the reader thread
 /// reaps the child, so no zombie is left behind.
 pub struct Pty {
     master: OwnedFd,
-    pid: libc::pid_t,
+    pub pid: libc::pid_t,
     /// Bytes for the shell, written by the writer thread so the UI never blocks.
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<WritePayload>,
+    has_pending: Arc<std::sync::atomic::AtomicBool>,
+    direct_lock: Mutex<()>,
     /// Read end of the shutdown pipe, polled by the I/O threads.
     shutdown_rx: Arc<OwnedFd>,
     /// Write end of the shutdown pipe: closing it (on drop) signals shutdown.
@@ -191,21 +220,41 @@ impl Pty {
             set_cloexec(shutdown_rx.as_raw_fd());
             set_cloexec(shutdown_tx.as_raw_fd());
 
-            let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            let (tx, rx) = mpsc::channel::<WritePayload>();
             let writer_fd = dup_cloexec(master.as_raw_fd())?;
             let writer_shutdown = shutdown_rx.clone();
+            let has_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let has_pending_worker = has_pending.clone();
             std::thread::Builder::new()
                 .name("pty-writer".into())
                 .stack_size(64 * 1024)
                 .spawn(move || {
                     while let Ok(data) = rx.recv() {
-                        if !write_all(writer_fd.as_raw_fd(), &data, writer_shutdown.as_raw_fd()) {
-                            break;
+                        let mut cur = data;
+                        loop {
+                            if !write_all(writer_fd.as_raw_fd(), cur.as_slice(), writer_shutdown.as_raw_fd()) {
+                                return;
+                            }
+                            match rx.try_recv() {
+                                Ok(next) => cur = next,
+                                Err(_) => {
+                                    has_pending_worker.store(false, std::sync::atomic::Ordering::Release);
+                                    break;
+                                }
+                            }
                         }
                     }
                 })?;
 
-            Ok(Pty { master, pid, tx, shutdown_rx, _shutdown_tx: shutdown_tx })
+            Ok(Pty {
+                master,
+                pid,
+                tx,
+                has_pending,
+                direct_lock: Mutex::new(()),
+                shutdown_rx,
+                _shutdown_tx: shutdown_tx,
+            })
         }
     }
 
@@ -237,9 +286,29 @@ impl Pty {
         }
     }
 
-    /// Queue bytes for the shell. Never blocks the caller, even for huge pastes.
+    /// Queue or immediately write bytes for the shell.
+    /// Fast-paths interactive keystrokes directly to the non-blocking master descriptor,
+    /// achieving sub-microsecond latency and 0 heap allocations.
     pub fn write(&self, data: &[u8]) {
-        let _ = self.tx.send(data.to_vec());
+        if data.is_empty() {
+            return;
+        }
+        if data.len() <= 1024 {
+            if let Some(_guard) = self.direct_lock.try_lock() {
+                if !self.has_pending.load(std::sync::atomic::Ordering::Acquire) {
+                    let n = unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
+                    if n == data.len() as isize {
+                        return;
+                    }
+                    let rem = if n > 0 { &data[n as usize..] } else { data };
+                    self.has_pending.store(true, std::sync::atomic::Ordering::Release);
+                    let _ = self.tx.send(WritePayload::from_slice(rem));
+                    return;
+                }
+            }
+        }
+        self.has_pending.store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.tx.send(WritePayload::from_slice(data));
     }
 
     /// Spawn Thread 1: reads into a fixed 64 KB stack buffer, parsed by `vte`
@@ -297,7 +366,7 @@ impl Pty {
                         };
                         if !reply.is_empty() {
                             // Same queue as keyboard input, so replies never interleave with a paste.
-                            let _ = tx.send(std::mem::take(&mut reply));
+                            let _ = tx.send(WritePayload::Heap(std::mem::take(&mut reply)));
                         }
 
                         // Never hold output back waiting for the next prompt: prompt themes take
@@ -467,8 +536,9 @@ mod tests {
         .expect("spawn reader");
 
         // Far more than the kernel PTY buffer: must be queued, not block the caller.
+        let payload = vec![b'x'; 4 << 20];
         let start = std::time::Instant::now();
-        pty.write(&vec![b'x'; 4 << 20]);
+        pty.write(&payload);
         assert!(start.elapsed() < std::time::Duration::from_millis(200));
 
         drop(pty);

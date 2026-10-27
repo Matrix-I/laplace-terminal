@@ -1,11 +1,11 @@
 [package]
-name = "laplace-terminal"
+name = "litty"
 version = "0.4.0"
 edition = "2021"
 description = "Minimal GPU terminal: <15MB RAM, 0% idle CPU (Metal on macOS, Vulkan on Linux)"
 
 [[bin]]
-name = "laplace"
+name = "litty"
 path = "src/main.rs"
 
 [dependencies]

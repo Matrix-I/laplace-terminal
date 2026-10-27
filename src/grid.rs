@@ -925,6 +925,18 @@ impl Grid {
         self.all_dirty = true;
     }
 
+    /// Clear both scrollback history and visible screen rows, placing cursor at top-left.
+    /// Provides instant 0ms visual feedback on Cmd+K without waiting for shell roundtrip.
+    pub fn clear_screen_and_history(&mut self) {
+        self.clear_history();
+        let rows = self.rows;
+        self.clear_rows(0, rows);
+        self.cur.row = 0;
+        self.cur.col = 0;
+        self.wrap_pending = false;
+        self.all_dirty = true;
+    }
+
     /// Set the selection from visible `(row, col)` coordinates.
     pub fn set_selection(&mut self, sel: Option<Selection>) {
         let sel = sel.map(|s| Selection {

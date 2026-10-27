@@ -322,13 +322,60 @@ impl Atlas {
             clusters: Vec::new(),
             cluster_ids: HashMap::new(),
         };
-        // Clear slot 0 (texture contents start zeroed, but be explicit).
-        atlas.scratch.fill(0);
-        atlas.upload(queue, BLANK_SLOT);
-        for c in 33u32..=126 {
-            atlas.slot(queue, c);
-        }
+        atlas.preload_ascii(queue);
         atlas
+    }
+
+    fn preload_ascii(&mut self, queue: &wgpu::Queue) {
+        let total_slots = 95u32.min(self.n_slots);
+        let rows_needed = total_slots.div_ceil(self.slots_per_row);
+        let upload_height = (rows_needed * self.cell_h).min(self.size);
+        let mut staging = vec![0u8; (self.size * upload_height) as usize];
+        let bytes_per_row = self.size;
+
+        for c in 33u32..=126 {
+            if self.next_free >= self.n_slots {
+                break;
+            }
+            let s = self.next_free as u16;
+            self.next_free += 1;
+
+            self.rasterize(c);
+            let slot = s as u32;
+            let sx = (slot % self.slots_per_row) * self.cell_w;
+            let sy = (slot / self.slots_per_row) * self.cell_h;
+            if sy + self.cell_h <= upload_height && sx + self.cell_w <= self.size {
+                for y in 0..self.cell_h {
+                    let src_start = (y * self.cell_w) as usize;
+                    let src_end = src_start + self.cell_w as usize;
+                    let dst_start = ((sy + y) * bytes_per_row + sx) as usize;
+                    staging[dst_start..dst_start + self.cell_w as usize]
+                        .copy_from_slice(&self.scratch[src_start..src_end]);
+                }
+            } else {
+                self.upload(queue, s);
+            }
+            self.slot_color[s as usize] = false;
+            self.ascii[c as usize] = s;
+            self.slot_cp[s as usize] = c;
+            self.slot_used[s as usize] = self.frame;
+        }
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &staging,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(upload_height),
+            },
+            wgpu::Extent3d { width: self.size, height: upload_height, depth_or_array_layers: 1 },
+        );
     }
 
     /// Rebuild the atlas in place for a new pixel size (DPI or zoom change).

@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>laplace</string>
+    <string>litty</string>
     <key>CFBundleIconFile</key>
-    <string>Laplace.icns</string>
+    <string>Litty.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>com.laplace.terminal</string>
+    <string>com.litty.terminal</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Laplace</string>
+    <string>Litty</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
