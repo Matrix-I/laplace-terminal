@@ -372,7 +372,7 @@ impl Renderer {
             unfocused_fill: 0,
             min_contrast: 1.0,
             config_cursor_color: 0,
-            selection_colors: (0x3D59_A180, 0xFFFF_FFFF),
+            selection_colors: (0x3D59_A180, 0xFFFF_FF80),
         }
     }
 }
@@ -421,7 +421,7 @@ impl Renderer {
     pub fn set_colors(&mut self, cursor: Option<u32>, selection_bg: Option<u32>, selection_fg: Option<u32>) {
         self.config_cursor_color = cursor.map_or(0, |c| c | 1);
         // Instances mark explicit colors with the low-byte bits the shader checks.
-        self.selection_colors = (selection_bg.map_or(0x3D59_A180, |c| c | 0x80), selection_fg.map_or(0xFFFF_FFFF, |c| c | 0xFF));
+        self.selection_colors = (selection_bg.map_or(0x3D59_A180, |c| c | 0x80), selection_fg.map_or(0xFFFF_FF80, |c| c | 0x80));
         self.force_full = true;
     }
 
@@ -802,7 +802,7 @@ impl Renderer {
             // Naturally blend with terminal background without any background box or borders:
             // bit 4 is set so is_preview=true (suppresses cursor), while bit 7 is 0 so background matches default_bg.
             const PREVIEW_BG: u32 = 16;
-            const PREVIEW_FG: u32 = 0xF2F2_F7FF;
+            const PREVIEW_FG: u32 = 0xF2F2_F780;
             for (col, ch) in display_url.chars().enumerate() {
                 if col < cols {
                     let slot = self.atlas.slot(&self.queue, ch as u32);
@@ -1035,9 +1035,9 @@ impl Renderer {
     ) {
         let (sel_bg, sel_fg) = self.selection_colors;
         const MATCH_BG: u32 = 0x5C4D_2080; // Dim amber for every find match
-        const MATCH_FG: u32 = 0xF9E2_AFFF;
+        const MATCH_FG: u32 = 0xF9E2_AF80;
         const CURRENT_BG: u32 = 0xF9A8_2580; // Bright orange for the focused match
-        const CURRENT_FG: u32 = 0x1E1E_2EFF;
+        const CURRENT_FG: u32 = 0x1E1E_2E80;
         let row = g.display_row(src_row);
         let hits = g.search_hits(src_row);
         let start = dst_row * window_cols + dst_col;
@@ -1187,10 +1187,10 @@ impl Renderer {
     }
 
     fn build_tab_bar_row(&mut self, cols: usize, titles: &[String], active_idx: usize) {
-        const ACTIVE_FG: u32 = 0xF2F2_F7FF;
-        const ACTIVE_BADGE_FG: u32 = 0xA6A8_B3FF;
-        const INACTIVE_FG: u32 = 0x8E90_99FF;
-        const INACTIVE_BADGE_FG: u32 = 0x686A_73FF;
+        const ACTIVE_FG: u32 = 0xF2F2_F780;
+        const ACTIVE_BADGE_FG: u32 = 0xA6A8_B380;
+        const INACTIVE_FG: u32 = 0x8E90_9980;
+        const INACTIVE_BADGE_FG: u32 = 0x686A_7380;
         const BAR_BG: u32 = 0x1C1D_2080;
 
         for dst in &mut self.instances[0..cols] {
@@ -1265,10 +1265,10 @@ impl Renderer {
     /// the first of which is the title.
     fn build_inspector(&mut self, cols: usize, top_rows: usize, total_rows: usize, lines: &[String], lo: &mut usize, hi: &mut usize) {
         const BOX_BG: u32 = 0x1819_2480;
-        const BORDER_FG: u32 = 0x585B_70FF;
-        const TITLE_FG: u32 = 0x89DC_EBFF;
-        const LABEL_FG: u32 = 0xA6AD_C8FF;
-        const VALUE_FG: u32 = 0xF2F2_F7FF;
+        const BORDER_FG: u32 = 0x585B_7080;
+        const TITLE_FG: u32 = 0x89DC_EB80;
+        const LABEL_FG: u32 = 0xA6AD_C880;
+        const VALUE_FG: u32 = 0xF2F2_F780;
         const LABEL_COLS: usize = 10;
         let Some((title, body)) = lines.split_first() else { return };
         let width = body.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(title.chars().count() + 4) + 4;
@@ -1343,15 +1343,15 @@ impl Renderer {
             return;
         };
         const BOX_BG: u32 = 0x1819_2480;
-        const BORDER_FG: u32 = 0x585B_70FF;
-        const TITLE_FG: u32 = 0x89DC_EBFF;
-        const PROMPT_FG: u32 = 0xA6E3_A1FF;
-        const QUERY_FG: u32 = 0xF2F2_F7FF;
-        const DIM_FG: u32 = 0x6C70_86FF;
-        const CURSOR_FG: u32 = 0xCBA6_F7FF;
-        const COUNT_FG: u32 = 0xA6AD_C8FF;
-        const ERROR_FG: u32 = 0xF38B_A8FF;
-        const MODE_ON_FG: u32 = 0xCBA6_F7FF;
+        const BORDER_FG: u32 = 0x585B_7080;
+        const TITLE_FG: u32 = 0x89DC_EB80;
+        const PROMPT_FG: u32 = 0xA6E3_A180;
+        const QUERY_FG: u32 = 0xF2F2_F780;
+        const DIM_FG: u32 = 0x6C70_8680;
+        const CURSOR_FG: u32 = 0xCBA6_F780;
+        const COUNT_FG: u32 = 0xA6AD_C880;
+        const ERROR_FG: u32 = 0xF38B_A880;
+        const MODE_ON_FG: u32 = 0xCBA6_F780;
 
         let queue = &self.queue;
         let atlas = &mut self.atlas;
@@ -1488,23 +1488,23 @@ impl Renderer {
         };
 
         const POPUP_BG: u32 = 0x1819_2480;       // Catppuccin deep slate (#181924) with bit 7 set
-        const BORDER_FG: u32 = 0x585B_70FF;      // Slate gray border
-        const TITLE_FG: u32 = 0x89DC_EBFF;       // Cyan title
-        const BADGE_FG: u32 = 0xA6AD_C8FF;       // Lavender counter
-        const SORT_FG: u32 = 0xCBA6_F7FF;        // Purple sort mode badge
-        const PROMPT_FG: u32 = 0xA6E3_A1FF;      // Green prompt ❯
-        const QUERY_FG: u32 = 0xF2F2_F7FF;       // Crisp white query text
-        const DIM_FG: u32 = 0x6C70_86FF;         // Dim placeholder
-        const CURSOR_FG: u32 = 0xCBA6_F7FF;      // Lavender block cursor
+        const BORDER_FG: u32 = 0x585B_7080;      // Slate gray border
+        const TITLE_FG: u32 = 0x89DC_EB80;       // Cyan title
+        const BADGE_FG: u32 = 0xA6AD_C880;       // Lavender counter
+        const SORT_FG: u32 = 0xCBA6_F780;        // Purple sort mode badge
+        const PROMPT_FG: u32 = 0xA6E3_A180;      // Green prompt ❯
+        const QUERY_FG: u32 = 0xF2F2_F780;       // Crisp white query text
+        const DIM_FG: u32 = 0x6C70_8680;         // Dim placeholder
+        const CURSOR_FG: u32 = 0xCBA6_F780;      // Lavender block cursor
         const SEL_BG: u32 = 0x3134_4C80;         // Selection highlight background with bit 7 set
-        const SEL_ARROW_FG: u32 = 0x00BF_E3FF;   // Cyan selection arrow ➜
-        const SEL_TEXT_FG: u32 = 0xFFFF_FFFF;     // Bright white text for selected item
-        const TEXT_FG: u32 = 0xBAC2_DEFF;        // Soft text for unselected item
-        const MATCH_FG: u32 = 0xF9E2_AFFF;       // Warm gold for matched characters
-        const PREVIEW_TITLE_FG: u32 = 0x89DC_EBFF;
-        const PREVIEW_TEXT_FG: u32 = 0xCDD6_F4FF;
-        const FOOTER_FG: u32 = 0x7F84_9CFF;      // Subdued footer text
-        const KEY_FG: u32 = 0xCBA6_F7FF;         // Key indicator
+        const SEL_ARROW_FG: u32 = 0x00BF_E380;   // Cyan selection arrow ➜
+        const SEL_TEXT_FG: u32 = 0xFFFF_FF80;     // Bright white text for selected item
+        const TEXT_FG: u32 = 0xBAC2_DE80;        // Soft text for unselected item
+        const MATCH_FG: u32 = 0xF9E2_AF80;       // Warm gold for matched characters
+        const PREVIEW_TITLE_FG: u32 = 0x89DC_EB80;
+        const PREVIEW_TEXT_FG: u32 = 0xCDD6_F480;
+        const FOOTER_FG: u32 = 0x7F84_9C80;      // Subdued footer text
+        const KEY_FG: u32 = 0xCBA6_F780;         // Key indicator
 
         // 1. Fill popup bounding box with dark background
         for r in 0..popup_h {
