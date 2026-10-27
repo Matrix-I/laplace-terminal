@@ -46,6 +46,7 @@ pub enum Action {
     OpenConfig,
     ReloadConfig,
     NewTab,
+    NewWindow,
     CloseTab,
     SplitRight,
     SplitDown,
@@ -67,8 +68,18 @@ pub enum Action {
     ZoomReset,
     ScrollPageUp,
     ScrollPageDown,
-    #[allow(dead_code)]
+    /// Scroll to the previous (-1) or next (+1) shell prompt (OSC 133).
+    JumpToPrompt(isize),
+    /// Select (and copy) the output of the last command (OSC 133).
+    SelectLastOutput,
+    /// macOS Secure Keyboard Entry on / off.
+    ToggleSecureInput,
+    /// Terminal inspector overlay on / off.
+    ToggleInspector,
+    /// Check for updates (Ghostty `check_for_updates`).
     CheckUpdate,
+    /// Show / hide the Quick Terminal (bound globally, `keybind = global:...`).
+    ToggleQuickTerminal,
 }
 
 /// Resolve a key press to a shortcut. `alt_screen` is true while a full-screen
@@ -99,8 +110,13 @@ fn resolve_char(platform: Platform, ch: &str, m: Mods, alt_screen: bool) -> Opti
 
     let action = match ch {
         "k" if terminal_mod => Action::ClearScreen,
+        // Bare Ctrl+O is operate-and-get-next in bash.
+        "o" if mac && m.only(false, false, true, true) => Action::SelectLastOutput,
+        "o" if !mac && (m.only(true, false, true, false) || m.only(false, false, true, true)) => Action::SelectLastOutput,
         // Bare Ctrl+A is readline beginning-of-line, so Linux uses Ctrl+Shift+A / Super+A.
         "a" if terminal_mod => Action::SelectAll,
+        "i" if mac && m.only(false, true, false, true) => Action::ToggleInspector,
+        "i" if !mac && (m.only(true, false, true, false) || m.only(false, true, false, true)) => Action::ToggleInspector,
         // Bare Ctrl+F is readline forward-char, so Linux uses Ctrl+Shift+F / Super+F.
         "f" if terminal_mod => Action::Find,
         "r" if (m.only(true, false, false, false) && !alt_screen)
@@ -118,7 +134,8 @@ fn resolve_char(platform: Platform, ch: &str, m: Mods, alt_screen: bool) -> Opti
                 Action::OpenConfig
             }
         }
-        "t" | "n" if terminal_mod => Action::NewTab,
+        "t" if terminal_mod => Action::NewTab,
+        "n" if terminal_mod => Action::NewWindow,
         "d" if mac && m.only(false, false, false, true) => Action::SplitRight,
         "d" if mac && m.only(false, false, true, true) => Action::SplitDown,
         "d" if !mac && terminal_mod => Action::SplitRight,
@@ -178,6 +195,10 @@ fn resolve_named(platform: Platform, key: NamedKey, m: Mods) -> Option<Action> {
         if navigate {
             return Some(Action::Navigate(dir));
         }
+        let jump = if mac { m.only(false, false, true, true) } else { m.only(true, false, true, false) || m.only(false, false, true, true) };
+        if jump && matches!(dir, Direction::Up | Direction::Down) {
+            return Some(Action::JumpToPrompt(if dir == Direction::Up { -1 } else { 1 }));
+        }
         return None;
     }
     match key {
@@ -191,6 +212,316 @@ fn resolve_named(platform: Platform, key: NamedKey, m: Mods) -> Option<Action> {
         NamedKey::PageUp if m.shift && !m.sup => Some(Action::ScrollPageUp),
         NamedKey::PageDown if m.shift && !m.sup => Some(Action::ScrollPageDown),
         _ => None,
+    }
+}
+
+// ----------------------------------------------------------------------
+// User key bindings (`keybind = trigger=action`, Ghostty syntax)
+// ----------------------------------------------------------------------
+
+/// The key part of a binding trigger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TriggerKey {
+    Char(char),
+    Named(NamedKey),
+}
+
+/// `cmd+shift+t`: exact modifiers plus a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trigger {
+    pub mods: Mods,
+    pub key: TriggerKey,
+}
+
+/// What a user binding does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Binding {
+    Action(Action),
+    /// Bytes written to the shell (`text:`, `csi:`, `esc:`).
+    Text(Vec<u8>),
+    /// Remove a built-in shortcut so the key reaches the shell.
+    Unbind,
+    /// Swallow the key.
+    Ignore,
+}
+
+/// Parse a trigger such as `cmd+shift+t`, `ctrl+alt+left` or `super+comma`.
+/// macOS virtual key code (`kVK_*`) of a trigger key, for global hotkeys.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn mac_virtual_keycode(key: &TriggerKey) -> Option<u32> {
+    use NamedKey as N;
+    Some(match key {
+        TriggerKey::Char('`') => 0x32,
+        TriggerKey::Char(c) => {
+            // Indexed by key code; `\0` marks codes without a character.
+            const KEYS: &str = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.";
+            let c = c.to_ascii_lowercase();
+            KEYS.chars().position(|k| k == c && k != '\0')? as u32
+        }
+        TriggerKey::Named(n) => match n {
+            N::Enter => 0x24,
+            N::Tab => 0x30,
+            N::Space => 0x31,
+            N::Backspace => 0x33,
+            N::Escape => 0x35,
+            N::Delete => 0x75,
+            N::Home => 0x73,
+            N::End => 0x77,
+            N::PageUp => 0x74,
+            N::PageDown => 0x79,
+            N::ArrowLeft => 0x7B,
+            N::ArrowRight => 0x7C,
+            N::ArrowDown => 0x7D,
+            N::ArrowUp => 0x7E,
+            N::F1 => 0x7A,
+            N::F2 => 0x78,
+            N::F3 => 0x63,
+            N::F4 => 0x76,
+            N::F5 => 0x60,
+            N::F6 => 0x61,
+            N::F7 => 0x62,
+            N::F8 => 0x64,
+            N::F9 => 0x65,
+            N::F10 => 0x6D,
+            N::F11 => 0x67,
+            N::F12 => 0x6F,
+            _ => return None,
+        },
+    })
+}
+
+/// X11 keysym of a trigger key, for global hotkeys on Linux.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn x11_keysym(key: &TriggerKey) -> Option<u32> {
+    use NamedKey as N;
+    Some(match key {
+        // Latin-1 keysyms are the characters themselves (lowercase for letters).
+        TriggerKey::Char(c) if (' '..='~').contains(c) => c.to_ascii_lowercase() as u32,
+        TriggerKey::Char(_) => return None,
+        TriggerKey::Named(n) => match n {
+            N::Space => 0x20,
+            N::Backspace => 0xFF08,
+            N::Tab => 0xFF09,
+            N::Enter => 0xFF0D,
+            N::Escape => 0xFF1B,
+            N::Home => 0xFF50,
+            N::ArrowLeft => 0xFF51,
+            N::ArrowUp => 0xFF52,
+            N::ArrowRight => 0xFF53,
+            N::ArrowDown => 0xFF54,
+            N::PageUp => 0xFF55,
+            N::PageDown => 0xFF56,
+            N::End => 0xFF57,
+            N::Insert => 0xFF63,
+            N::Delete => 0xFFFF,
+            N::F1 => 0xFFBE,
+            N::F2 => 0xFFBF,
+            N::F3 => 0xFFC0,
+            N::F4 => 0xFFC1,
+            N::F5 => 0xFFC2,
+            N::F6 => 0xFFC3,
+            N::F7 => 0xFFC4,
+            N::F8 => 0xFFC5,
+            N::F9 => 0xFFC6,
+            N::F10 => 0xFFC7,
+            N::F11 => 0xFFC8,
+            N::F12 => 0xFFC9,
+            _ => return None,
+        },
+    })
+}
+
+pub fn parse_trigger(s: &str) -> Result<Trigger, String> {
+    let mut mods = Mods::default();
+    let mut key = None;
+    let parts: Vec<&str> = s.split('+').map(str::trim).collect();
+    // A trailing `+` means the plus key itself (`ctrl++`).
+    let (parts, plus) = match parts.as_slice() {
+        [rest @ .., "", ""] => (rest.to_vec(), true),
+        _ => (parts, false),
+    };
+    for (i, part) in parts.iter().enumerate() {
+        let lower = part.to_ascii_lowercase();
+        match lower.as_str() {
+            "ctrl" | "control" => mods.ctrl = true,
+            "shift" => mods.shift = true,
+            "alt" | "opt" | "option" => mods.alt = true,
+            "super" | "cmd" | "command" => mods.sup = true,
+            _ if i + 1 == parts.len() && !plus => key = Some(parse_trigger_key(&lower)?),
+            other => return Err(format!("unknown modifier `{other}`")),
+        }
+    }
+    let key = if plus { Some(TriggerKey::Char('+')) } else { key };
+    Ok(Trigger { mods, key: key.ok_or_else(|| format!("no key in `{s}`"))? })
+}
+
+fn parse_trigger_key(k: &str) -> Result<TriggerKey, String> {
+    use NamedKey as N;
+    let named = match k {
+        "enter" | "return" => N::Enter,
+        "tab" => N::Tab,
+        "escape" | "esc" => N::Escape,
+        "space" => N::Space,
+        "backspace" => N::Backspace,
+        "delete" => N::Delete,
+        "insert" => N::Insert,
+        "up" | "arrow_up" => N::ArrowUp,
+        "down" | "arrow_down" => N::ArrowDown,
+        "left" | "arrow_left" => N::ArrowLeft,
+        "right" | "arrow_right" => N::ArrowRight,
+        "home" => N::Home,
+        "end" => N::End,
+        "page_up" => N::PageUp,
+        "page_down" => N::PageDown,
+        "f1" => N::F1,
+        "f2" => N::F2,
+        "f3" => N::F3,
+        "f4" => N::F4,
+        "f5" => N::F5,
+        "f6" => N::F6,
+        "f7" => N::F7,
+        "f8" => N::F8,
+        "f9" => N::F9,
+        "f10" => N::F10,
+        "f11" => N::F11,
+        "f12" => N::F12,
+        _ => {
+            let c = match k {
+                "comma" => ',',
+                "period" => '.',
+                "slash" => '/',
+                "semicolon" => ';',
+                "quote" | "apostrophe" => '\'',
+                "backquote" | "grave" | "grave_accent" => '`',
+                "minus" => '-',
+                "equal" => '=',
+                "plus" => '+',
+                "bracket_left" | "left_bracket" => '[',
+                "bracket_right" | "right_bracket" => ']',
+                "backslash" => '\\',
+                _ => single_char(k).ok_or_else(|| format!("unknown key `{k}`"))?,
+            };
+            return Ok(TriggerKey::Char(c));
+        }
+    };
+    Ok(TriggerKey::Named(named))
+}
+
+/// Parse a binding action: Ghostty action names (`new_tab`, `goto_tab:3`,
+/// `text:\x1b[A`, `unbind`, ...).
+pub fn parse_binding(s: &str) -> Result<Binding, String> {
+    let (name, arg) = match s.split_once(':') {
+        Some((n, a)) => (n.trim(), Some(a)),
+        None => (s.trim(), None),
+    };
+    let num = |a: Option<&str>| a.and_then(|a| a.trim().parse::<i32>().ok());
+    let action = match name {
+        "unbind" => return Ok(Binding::Unbind),
+        "ignore" => return Ok(Binding::Ignore),
+        "text" => return Ok(Binding::Text(unescape(arg.unwrap_or_default())?)),
+        "csi" => return Ok(Binding::Text([b"\x1b[".as_slice(), arg.unwrap_or_default().as_bytes()].concat())),
+        "esc" => return Ok(Binding::Text([b"\x1b".as_slice(), arg.unwrap_or_default().as_bytes()].concat())),
+        "new_tab" => Action::NewTab,
+        "new_window" => Action::NewWindow,
+        "inspector" => Action::ToggleInspector,
+        "toggle_quick_terminal" => Action::ToggleQuickTerminal,
+        "close_surface" | "close_tab" => Action::CloseTab,
+        "quit" => Action::Quit,
+        "copy_to_clipboard" => Action::Copy,
+        "paste_from_clipboard" => Action::Paste,
+        "select_all" => Action::SelectAll,
+        "clear_screen" => Action::ClearScreen,
+        "start_search" | "search" => Action::Find,
+        "history_search" => Action::HistorySearch,
+        "open_config" => Action::OpenConfig,
+        "reload_config" => Action::ReloadConfig,
+        "toggle_minimize" | "minimize" => Action::Minimize,
+        "previous_tab" => Action::PrevTab,
+        "next_tab" => Action::NextTab,
+        "last_tab" => Action::SelectTab(8),
+        "goto_tab" => match num(arg) {
+            Some(n @ 1..=9) => Action::SelectTab(n as usize - 1),
+            _ => return Err(format!("goto_tab needs 1..9, got `{}`", arg.unwrap_or_default())),
+        },
+        "new_split" => match arg.map(str::trim) {
+            Some("right") | None => Action::SplitRight,
+            Some("down") => Action::SplitDown,
+            Some(d) => return Err(format!("unsupported split direction `{d}`")),
+        },
+        "goto_split" => match arg.map(str::trim) {
+            Some("previous") => Action::PrevSplit,
+            Some("next") => Action::NextSplit,
+            Some("left") => Action::Navigate(Direction::Left),
+            Some("right") => Action::Navigate(Direction::Right),
+            Some("up" | "top") => Action::Navigate(Direction::Up),
+            Some("down" | "bottom") => Action::Navigate(Direction::Down),
+            d => return Err(format!("unknown split target `{}`", d.unwrap_or_default())),
+        },
+        "resize_split" => match arg.and_then(|a| a.split(',').next()).map(str::trim) {
+            Some("left" | "up") => Action::ResizeSplit(-0.05),
+            Some("right" | "down") => Action::ResizeSplit(0.05),
+            d => return Err(format!("unknown resize direction `{}`", d.unwrap_or_default())),
+        },
+        "equalize_splits" => Action::EqualizeSplits,
+        "toggle_split_zoom" => Action::ToggleSplitZoom,
+        "increase_font_size" => Action::ZoomIn,
+        "decrease_font_size" => Action::ZoomOut,
+        "reset_font_size" => Action::ZoomReset,
+        "scroll_page_up" => Action::ScrollPageUp,
+        "scroll_page_down" => Action::ScrollPageDown,
+        "jump_to_prompt" => Action::JumpToPrompt(if num(arg).unwrap_or(-1) < 0 { -1 } else { 1 }),
+        "select_last_output" | "select_command_output" => Action::SelectLastOutput,
+        "toggle_secure_input" => Action::ToggleSecureInput,
+        "check_for_updates" | "check_update" => Action::CheckUpdate,
+        other => return Err(format!("unknown action `{other}`")),
+    };
+    Ok(Binding::Action(action))
+}
+
+/// Zig-style escapes in `text:` bindings: `\x1b`, `\n`, `\r`, `\t`, `\e`, `\\`, `\u{..}`.
+fn unescape(s: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push(b'\n'),
+            Some('r') => out.push(b'\r'),
+            Some('t') => out.push(b'\t'),
+            Some('e') => out.push(0x1b),
+            Some('\\') => out.push(b'\\'),
+            Some('x') => {
+                let hex: String = chars.by_ref().take(2).collect();
+                out.push(u8::from_str_radix(&hex, 16).map_err(|_| format!("bad escape `\\x{hex}`"))?);
+            }
+            Some('u') => {
+                let rest: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                let cp = rest.strip_prefix('{').and_then(|h| u32::from_str_radix(h, 16).ok()).and_then(char::from_u32);
+                let c = cp.ok_or_else(|| format!("bad escape `\\u{rest}}}`"))?;
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            other => return Err(format!("unknown escape `\\{}`", other.unwrap_or(' '))),
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a key event matches a trigger. Character keys compare the
+/// unshifted key, so `cmd+shift+[` matches whatever `[` produces with Shift.
+pub fn trigger_matches(t: &Trigger, unshifted: &Key, m: Mods) -> bool {
+    if t.mods != m {
+        return false;
+    }
+    match (&t.key, unshifted) {
+        (TriggerKey::Named(n), Key::Named(k)) => n == k,
+        (TriggerKey::Char(c), Key::Character(s)) => single_char(s).is_some_and(|k| k.to_lowercase().eq(c.to_lowercase())),
+        (TriggerKey::Char(' '), Key::Named(NamedKey::Space)) => true,
+        _ => false,
     }
 }
 
@@ -308,6 +639,45 @@ pub fn encode(platform: Platform, key: &Key, text: Option<&str>, m: Mods, app_cu
     Some(bytes)
 }
 
+/// Encode a key for xterm's `modifyOtherKeys` (`level` 1 or 2): modified keys the
+/// legacy encoding would lose become `CSI 27 ; mods ; code ~`. Level 1 keeps the
+/// well-known legacy bytes (`Ctrl+letter`, `Alt+key`, `Shift+Tab`); level 2 encodes
+/// every modified key except shifted text.
+pub fn encode_modify_other_keys(
+    platform: Platform,
+    key: &Key,
+    text: Option<&str>,
+    m: Mods,
+    level: u8,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
+    let legacy = || encode(platform, key, text, m, app_cursor);
+    let code = match key {
+        Key::Character(s) => single_char(s).map(|c| c as u32),
+        Key::Named(NamedKey::Enter) => Some(13),
+        Key::Named(NamedKey::Tab) => Some(9),
+        Key::Named(NamedKey::Backspace) => Some(127),
+        Key::Named(NamedKey::Escape) => Some(27),
+        Key::Named(NamedKey::Space) => Some(32),
+        _ => None,
+    };
+    let Some(code) = code else { return legacy() };
+    if !m.ctrl && !m.alt && (!m.shift || matches!(key, Key::Character(_) | Key::Named(NamedKey::Space))) {
+        return legacy();
+    }
+    if level < 2 {
+        let c = char::from_u32(code).unwrap_or('\0');
+        let ctrl_char = m.ctrl && !m.alt && !m.shift && (c.is_ascii_alphabetic() || "@[\\]^_ ".contains(c));
+        let meta = m.alt && !m.ctrl && !m.shift;
+        let back_tab = code == 9 && m == Mods { shift: true, ..Mods::default() };
+        if ctrl_char || meta || back_tab {
+            return legacy();
+        }
+    }
+    let mods = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8;
+    Some(format!("\x1b[27;{mods};{code}~").into_bytes())
+}
+
 // ----------------------------------------------------------------------
 // Kitty keyboard protocol
 // https://sw.kovidgoyal.net/kitty/keyboard-protocol/
@@ -343,6 +713,47 @@ pub struct KittyKey<'a> {
     pub location: KeyLocation,
     pub text: Option<&'a str>,
     pub kind: KeyKind,
+    /// Lock state: `KITTY_CAPS_LOCK` / `KITTY_NUM_LOCK` bits.
+    pub locks: u8,
+}
+
+/// Lock modifiers reported in Kitty escapes (as modifier bits 64 / 128).
+pub const KITTY_CAPS_LOCK: u8 = 1;
+pub const KITTY_NUM_LOCK: u8 = 2;
+
+/// Lock state inferred from a key press, where the platform does not report
+/// it (winit on Linux): a letter whose case disagrees with Shift means Caps
+/// Lock is on, a keypad digit means Num Lock is on and a keypad navigation key
+/// that it is off; the lock keys themselves toggle. Other keys keep `prev`.
+pub fn infer_locks(prev: u8, key: &Key, location: KeyLocation, shift: bool) -> u8 {
+    let set = |locks: u8, bit: u8, on: bool| if on { locks | bit } else { locks & !bit };
+    match key {
+        Key::Named(NamedKey::CapsLock) => prev ^ KITTY_CAPS_LOCK,
+        Key::Named(NamedKey::NumLock) => prev ^ KITTY_NUM_LOCK,
+        Key::Named(
+            NamedKey::ArrowUp
+            | NamedKey::ArrowDown
+            | NamedKey::ArrowLeft
+            | NamedKey::ArrowRight
+            | NamedKey::Home
+            | NamedKey::End
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Insert
+            | NamedKey::Delete
+            | NamedKey::Clear,
+        ) if location == KeyLocation::Numpad => prev & !KITTY_NUM_LOCK,
+        Key::Character(s) => {
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if location == KeyLocation::Numpad && c.is_ascii_digit() => prev | KITTY_NUM_LOCK,
+                // Only letters with case (not digits, punctuation or caseless scripts).
+                (Some(c), None) if c.is_lowercase() || c.is_uppercase() => set(prev, KITTY_CAPS_LOCK, c.is_uppercase() != shift),
+                _ => prev,
+            }
+        }
+        _ => prev,
+    }
 }
 
 /// How a key is spelled in a Kitty escape: `CSI number ... final`.
@@ -405,7 +816,9 @@ pub fn encode_kitty(platform: Platform, k: &KittyKey, mut m: Mods, flags: u8, ap
         }
     }
 
-    let mods = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8 + 8 * m.sup as u8;
+    // Lock states only travel with keys that are sent as escapes anyway.
+    let locks = 64 * (k.locks & KITTY_CAPS_LOCK != 0) as u8 + 128 * (k.locks & KITTY_NUM_LOCK != 0) as u8;
+    let mods = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8 + 8 * m.sup as u8 + locks;
     let event = match kind {
         KeyKind::Press => None,
         KeyKind::Repeat => Some(2),
@@ -662,7 +1075,7 @@ mod tests {
     fn terminal_actions_never_steal_bare_ctrl_letters_on_linux() {
         for (c, action) in [
             ("t", Action::NewTab),
-            ("n", Action::NewTab),
+            ("n", Action::NewWindow),
             ("w", Action::CloseTab),
             ("c", Action::Copy),
             ("v", Action::Paste),
@@ -752,6 +1165,87 @@ mod tests {
     }
 
     #[test]
+    fn prompt_navigation_and_output_shortcuts() {
+        let up = Key::Named(NamedKey::ArrowUp);
+        let down = Key::Named(NamedKey::ArrowDown);
+        assert_eq!(mac(&up, CMD_SHIFT), Some(Action::JumpToPrompt(-1)));
+        assert_eq!(mac(&down, CMD_SHIFT), Some(Action::JumpToPrompt(1)));
+        assert_eq!(linux(&up, CTRL_SHIFT), Some(Action::JumpToPrompt(-1)));
+        assert_eq!(mac(&up, CMD), Some(Action::Navigate(Direction::Up)), "Cmd+Up still navigates splits");
+        assert_eq!(mac(&ch("o"), CMD_SHIFT), Some(Action::SelectLastOutput));
+        assert_eq!(linux(&ch("O"), CTRL_SHIFT), Some(Action::SelectLastOutput));
+        assert_eq!(linux(&ch("o"), CTRL), None, "bare Ctrl+O reaches bash");
+        assert_eq!(parse_binding("jump_to_prompt:-1").unwrap(), Binding::Action(Action::JumpToPrompt(-1)));
+    }
+
+    #[test]
+    fn x11_keysyms() {
+        let sym = |s: &str| x11_keysym(&parse_trigger(s).unwrap().key);
+        assert_eq!(sym("ctrl+grave_accent"), Some(0x60));
+        assert_eq!(sym("super+A"), Some(0x61));
+        assert_eq!(sym("ctrl+f12"), Some(0xFFC9));
+        assert_eq!(sym("alt+space"), Some(0x20));
+    }
+
+    #[test]
+    fn mac_virtual_keycodes() {
+        let code = |s: &str| mac_virtual_keycode(&parse_trigger(s).unwrap().key);
+        assert_eq!(code("cmd+grave_accent"), Some(0x32));
+        assert_eq!(code("ctrl+a"), Some(0x00));
+        assert_eq!(code("ctrl+t"), Some(0x11));
+        assert_eq!(code("ctrl+5"), Some(0x17));
+        assert_eq!(code("ctrl+m"), Some(0x2E));
+        assert_eq!(code("ctrl+comma"), Some(0x2B));
+        assert_eq!(code("f12"), Some(0x6F));
+        assert_eq!(code("space"), Some(0x31));
+    }
+
+    #[test]
+    fn inspector_shortcut() {
+        let cmd_alt = Mods { sup: true, alt: true, ..NONE };
+        assert_eq!(mac(&ch("i"), cmd_alt), Some(Action::ToggleInspector));
+        assert_eq!(linux(&ch("I"), CTRL_SHIFT), Some(Action::ToggleInspector));
+        assert_eq!(linux(&ch("i"), cmd_alt), Some(Action::ToggleInspector));
+        assert_eq!(linux(&ch("i"), CTRL), None, "bare Ctrl+I is Tab");
+        assert_eq!(mac(&ch("i"), CMD), None);
+    }
+
+    #[test]
+    fn parses_user_key_bindings() {
+        let t = parse_trigger("cmd+shift+t").unwrap();
+        assert_eq!(t, Trigger { mods: CMD_SHIFT, key: TriggerKey::Char('t') });
+        assert_eq!(parse_trigger("ctrl+alt+left").unwrap().key, TriggerKey::Named(NamedKey::ArrowLeft));
+        assert_eq!(parse_trigger("super+comma").unwrap().key, TriggerKey::Char(','));
+        assert_eq!(parse_trigger("ctrl++").unwrap(), Trigger { mods: CTRL, key: TriggerKey::Char('+') });
+        assert!(parse_trigger("hyper+x").is_err());
+        assert!(parse_trigger("ctrl+shift").is_err());
+
+        assert_eq!(parse_binding("new_tab").unwrap(), Binding::Action(Action::NewTab));
+        assert_eq!(parse_binding("new_window").unwrap(), Binding::Action(Action::NewWindow));
+        assert_eq!(parse_binding("inspector:toggle").unwrap(), Binding::Action(Action::ToggleInspector));
+        assert_eq!(parse_binding("goto_tab:3").unwrap(), Binding::Action(Action::SelectTab(2)));
+        assert_eq!(parse_binding("new_split:down").unwrap(), Binding::Action(Action::SplitDown));
+        assert_eq!(parse_binding("goto_split:left").unwrap(), Binding::Action(Action::Navigate(Direction::Left)));
+        assert_eq!(parse_binding("text:\\x1b[A\\n").unwrap(), Binding::Text(b"\x1b[A\n".to_vec()));
+        assert_eq!(parse_binding("text:\\u{1f980}").unwrap(), Binding::Text("🦀".as_bytes().to_vec()));
+        assert_eq!(parse_binding("csi:A").unwrap(), Binding::Text(b"\x1b[A".to_vec()));
+        assert_eq!(parse_binding("unbind").unwrap(), Binding::Unbind);
+        assert!(parse_binding("fly_to_moon").is_err());
+        assert!(parse_binding("goto_tab:12").is_err());
+    }
+
+    #[test]
+    fn triggers_match_unshifted_keys_with_exact_modifiers() {
+        let t = parse_trigger("cmd+shift+bracket_left").unwrap();
+        assert!(trigger_matches(&t, &ch("["), CMD_SHIFT));
+        assert!(!trigger_matches(&t, &ch("["), CMD));
+        let t = parse_trigger("ctrl+K").unwrap();
+        assert!(trigger_matches(&t, &ch("k"), CTRL));
+        assert!(trigger_matches(&parse_trigger("ctrl+space").unwrap(), &Key::Named(NamedKey::Space), CTRL));
+        assert!(trigger_matches(&parse_trigger("alt+enter").unwrap(), &Key::Named(NamedKey::Enter), ALT));
+    }
+
+    #[test]
     fn modifier_keys_alone() {
         for k in [NamedKey::Shift, NamedKey::Control, NamedKey::Alt, NamedKey::Super, NamedKey::Meta] {
             assert!(is_modifier_key(&Key::Named(k)), "{k:?}");
@@ -818,6 +1312,7 @@ mod tests {
                 location: self.location,
                 text: self.text,
                 kind,
+                locks: 0,
             };
             encode_kitty(Platform::MacOs, &k, m, flags, false).map(|b| String::from_utf8(b).unwrap())
         }
@@ -829,6 +1324,44 @@ mod tests {
 
     const SHIFT: Mods = Mods { shift: true, ..NONE };
     const D: u8 = KITTY_DISAMBIGUATE;
+
+    #[test]
+    fn lock_state_is_inferred_from_key_presses() {
+        use KeyLocation::{Numpad, Standard};
+        let ch = |s: &str| Key::Character(s.into());
+        let named = Key::Named;
+        assert_eq!(infer_locks(0, &ch("A"), Standard, false), KITTY_CAPS_LOCK, "uppercase without Shift");
+        assert_eq!(infer_locks(KITTY_CAPS_LOCK, &ch("a"), Standard, true), KITTY_CAPS_LOCK, "Shift cancels Caps Lock");
+        assert_eq!(infer_locks(KITTY_CAPS_LOCK, &ch("A"), Standard, true), 0);
+        assert_eq!(infer_locks(KITTY_CAPS_LOCK, &ch("1"), Standard, false), KITTY_CAPS_LOCK, "digits say nothing");
+        assert_eq!(infer_locks(0, &named(NamedKey::CapsLock), Standard, false), KITTY_CAPS_LOCK);
+        assert_eq!(infer_locks(0, &ch("7"), Numpad, false), KITTY_NUM_LOCK);
+        assert_eq!(infer_locks(KITTY_NUM_LOCK, &named(NamedKey::Home), Numpad, false), 0);
+        assert_eq!(infer_locks(KITTY_NUM_LOCK, &named(NamedKey::Home), Standard, false), KITTY_NUM_LOCK);
+        assert_eq!(infer_locks(KITTY_NUM_LOCK, &named(NamedKey::NumLock), Numpad, false), 0);
+    }
+
+    #[test]
+    fn kitty_reports_lock_modifiers_on_escaped_keys() {
+        let a = ch("a");
+        let k = |flags: u8, m: Mods, locks: u8| {
+            let key = KittyKey {
+                key: &a,
+                unshifted: &a,
+                physical: Some(KeyCode::KeyA),
+                location: KeyLocation::Standard,
+                text: Some("a"),
+                kind: KeyKind::Press,
+                locks,
+            };
+            encode_kitty(Platform::MacOs, &key, m, flags, false).map(|b| String::from_utf8(b).unwrap())
+        };
+        // Text typed with Caps Lock in disambiguate mode is still plain text.
+        assert_eq!(k(D, NONE, KITTY_CAPS_LOCK).as_deref(), Some("a"));
+        // Escaped keys carry the lock bits: 1 + 4 (ctrl) + 64 (caps) = 69.
+        assert_eq!(k(D, CTRL, KITTY_CAPS_LOCK).as_deref(), Some("\x1b[97;69u"));
+        assert_eq!(k(D | KITTY_REPORT_ALL, NONE, KITTY_CAPS_LOCK | KITTY_NUM_LOCK).as_deref(), Some("\x1b[97;193u"));
+    }
 
     #[test]
     fn kitty_disambiguate_keeps_text_and_plain_editing_keys() {
@@ -913,6 +1446,31 @@ mod tests {
         // A non-US layout reports its own key plus the US key at the same position.
         assert_eq!(kc("ф", "ф", KeyCode::KeyA).press(alt, CTRL).as_deref(), Some("\x1b[1092::97;5u"));
         assert_eq!(kc("Ф", "ф", KeyCode::KeyA).press(alt, CTRL_SHIFT).as_deref(), Some("\x1b[1092:1060:97;6u"));
+    }
+
+    #[test]
+    fn modify_other_keys_levels() {
+        let enc = |k: &Key, t: Option<&str>, m, level| {
+            encode_modify_other_keys(Platform::MacOs, k, t, m, level, false).map(|b| String::from_utf8(b).unwrap())
+        };
+        let enter = Key::Named(NamedKey::Enter);
+        let tab = Key::Named(NamedKey::Tab);
+        // Level 2: every modified key that legacy would lose or blur.
+        assert_eq!(enc(&ch("a"), Some("a"), CTRL, 2).as_deref(), Some("\x1b[27;5;97~"));
+        assert_eq!(enc(&ch("A"), Some("A"), CTRL_SHIFT, 2).as_deref(), Some("\x1b[27;6;65~"));
+        assert_eq!(enc(&enter, None, SHIFT, 2).as_deref(), Some("\x1b[27;2;13~"));
+        assert_eq!(enc(&tab, None, CTRL, 2).as_deref(), Some("\x1b[27;5;9~"));
+        assert_eq!(enc(&ch("x"), Some("x"), ALT, 2).as_deref(), Some("\x1b[27;3;120~"));
+        // Plain and shifted text stay text; arrows keep their own modifier encoding.
+        assert_eq!(enc(&ch("A"), Some("A"), SHIFT, 2).as_deref(), Some("A"));
+        assert_eq!(enc(&enter, None, NONE, 2).as_deref(), Some("\r"));
+        assert_eq!(enc(&Key::Named(NamedKey::ArrowUp), None, CTRL, 2).as_deref(), Some("\x1b[1;5A"));
+        // Level 1 keeps the well-known legacy bytes.
+        assert_eq!(enc(&ch("a"), Some("a"), CTRL, 1).as_deref(), Some("\x01"));
+        assert_eq!(enc(&ch("x"), Some("x"), ALT, 1).as_deref(), Some("\x1bx"));
+        assert_eq!(enc(&tab, None, SHIFT, 1).as_deref(), Some("\x1b[Z"));
+        assert_eq!(enc(&ch("1"), Some("1"), CTRL, 1).as_deref(), Some("\x1b[27;5;49~"));
+        assert_eq!(enc(&enter, None, CTRL, 1).as_deref(), Some("\x1b[27;5;13~"));
     }
 
     #[test]

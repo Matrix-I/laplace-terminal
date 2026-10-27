@@ -39,6 +39,14 @@ fn cstr(s: impl Into<Vec<u8>>) -> CString {
     CString::new(s).unwrap_or_else(|_| CString::new("?").unwrap())
 }
 
+/// Shell integration for `shell_name`, unless disabled (`None`).
+fn shell_integration_for(
+    shell_name: &str,
+    kind: Option<crate::config::ShellIntegration>,
+) -> Option<crate::shell_integration::Injection> {
+    crate::shell_integration::prepare(shell_name, kind?, |k| std::env::var(k).ok())
+}
+
 impl Pty {
     pub fn spawn_in(
         cols: u16,
@@ -46,7 +54,7 @@ impl Pty {
         cell_w: u32,
         cell_h: u32,
         cwd: Option<&str>,
-        shell_features: Option<crate::config::ShellFeatures>,
+        integration: Option<(crate::config::ShellIntegration, crate::config::ShellFeatures)>,
     ) -> io::Result<Pty> {
         let shell = std::env::var("SHELL")
             .ok()
@@ -57,8 +65,15 @@ impl Pty {
         // Everything the child needs is prepared before fork(): after fork only
         // async-signal-safe calls are allowed.
         let path = cstr(shell.as_str());
-        let argv0 = cstr(format!("-{shell_name}")); // leading '-' = login shell
-        let argv = [argv0.as_ptr(), std::ptr::null()];
+        let injection = shell_integration_for(&shell_name, integration.map(|(kind, _)| kind));
+        // A leading '-' in argv[0] makes a login shell; injected bash emulates one.
+        let args: Vec<CString> = match injection.as_ref().and_then(|i| i.argv.as_ref()) {
+            Some(a) => a.iter().map(|s| cstr(s.as_str())).collect(),
+            None => vec![cstr(format!("-{shell_name}"))],
+        };
+        let mut argv: Vec<*const libc::c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        argv.push(std::ptr::null());
+        let injected_env = injection.map(|i| i.env).unwrap_or_default();
 
         let target_dir = cwd
             .filter(|d| !d.is_empty() && std::path::Path::new(d).is_dir())
@@ -70,7 +85,8 @@ impl Pty {
                 !matches!(
                     k.as_str(),
                     "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION" | "PWD" | "OLDPWD"
-                ) && !k.starts_with("GHOSTTY_")
+                ) && !injected_env.iter().any(|(ik, _)| ik == k)
+                    && !k.starts_with("GHOSTTY_")
                     && !k.starts_with("KITTY_")
                     && !k.starts_with("ITERM_")
                     && !k.starts_with("WEZTERM_")
@@ -81,7 +97,10 @@ impl Pty {
         env.push(cstr("COLORTERM=truecolor"));
         env.push(cstr("TERM_PROGRAM=laplace"));
         env.push(cstr(concat!("TERM_PROGRAM_VERSION=", env!("CARGO_PKG_VERSION"))));
-        if let Some(feats) = shell_features {
+        for (k, v) in &injected_env {
+            env.push(cstr(format!("{k}={v}")));
+        }
+        if let Some((_, feats)) = integration {
             env.push(cstr("LAPLACE_SHELL_INTEGRATION=1"));
             let mut list = Vec::new();
             if feats.cursor { list.push("cursor"); }
@@ -192,6 +211,14 @@ impl Pty {
 
     /// Query the current working directory of the foreground process group (or
     /// the login shell itself) directly from the OS kernel.
+    /// A program other than the shell owns the terminal (the foreground
+    /// process group is not the shell's).
+    pub fn has_running_process(&self) -> bool {
+        // SAFETY: `tcgetpgrp` only reads the terminal's foreground group.
+        let pgrp = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
+        pgrp > 0 && pgrp != self.pid
+    }
+
     pub fn cwd(&self) -> Option<String> {
         let pgrp = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
         if pgrp > 0 && pgrp != self.pid {
@@ -261,7 +288,7 @@ impl Pty {
                         let sync_active = {
                             let mut g = grid.lock();
                             for &b in &buf[..chunk_len] {
-                                parser.advance(&mut *g, b);
+                                g.feed_byte(&mut parser, b);
                             }
                             if !g.response.is_empty() {
                                 std::mem::swap(&mut g.response, &mut reply);

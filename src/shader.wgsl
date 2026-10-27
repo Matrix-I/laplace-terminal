@@ -18,11 +18,24 @@ struct Uniforms {
     bg_opacity: f32,
     underline_y: f32,       // underline top, px from the cell top
     strike_y: f32,          // strikethrough center, px from the cell top
+    cursor_color: u32,      // OSC 12 color as 0xRRGGBB00 | 1, or 0 for the built-in color
+    unfocused_dim: f32,     // 1 - unfocused-split-opacity
+    unfocused_fill: u32,    // 0xRRGGBB00 | 1, or 0 for the default background
+    min_contrast: f32,      // minimum-contrast ratio, 1 = off
+    progress: u32,          // OSC 9;4 of the active pane: state << 8 | percent, 0 = none
+    progress_row: u32,      // active pane's first instance row,
+    progress_col: u32,      // first column
+    progress_cols: u32,     // and width
+    bell_border: u32,       // 1 = outline the window (bell-features = border)
+    flip_y: u32,            // 1 = draw upside down (into a custom-shader texture)
+    layer: u32,             // 0 = everything, 1 = backgrounds only, 2 = text only (images under the text)
+    pad2: u32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var color_atlas: texture_2d<f32>;  // premultiplied RGBA emoji, same slots
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -31,14 +44,47 @@ struct VsOut {
     @location(2) @interpolate(flat) fg: vec3<f32>,
     @location(3) @interpolate(flat) bg: vec3<f32>,
     // bits 0..3 = underline style, bit 3 = strikethrough, bits 4..7 = dividers, bit 7 = tab_bar_row,
-    // bits 8..11 = cursor style, bits 16..31 = sxy.y
+    // bits 8..11 = cursor style, bit 11 = scrollbar thumb, bit 12 = unfocused split,
+    // bit 13 = color glyph, bits 16..31 = sxy.y
     @location(4) @interpolate(flat) flags: u32,
     @location(5) @interpolate(flat) col: u32,
     @location(6) @interpolate(flat) ul: vec3<f32>,
+    @location(7) @interpolate(flat) row: u32,
+    // Unstretched top-left of the cell in px and its atlas slot origin in uv:
+    // edge quads may be stretched over the padding (bell border).
+    @location(8) @interpolate(flat) origin: vec2<f32>,
+    @location(9) @interpolate(flat) uv0: vec2<f32>,
 };
 
 fn unpack(c: u32) -> vec3<f32> {
     return vec3<f32>(f32((c >> 24u) & 255u), f32((c >> 16u) & 255u), f32((c >> 8u) & 255u)) / 255.0;
+}
+
+// Cursor color: set by OSC 12, else Ghostty's slate-lavender.
+fn cursor_rgb() -> vec3<f32> {
+    return select(vec3<f32>(0.44, 0.47, 0.59), unpack(u.cursor_color), (u.cursor_color & 1u) != 0u);
+}
+
+// WCAG relative luminance and contrast ratio.
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(srgb_to_linear(c), vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn contrast(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let la = luminance(a);
+    let lb = luminance(b);
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05);
+}
+
+// Text color with at least `u.min_contrast` against `bg`: black or white,
+// whichever contrasts more, when the color itself falls short.
+fn ensure_contrast(fg: vec3<f32>, bg: vec3<f32>) -> vec3<f32> {
+    if (u.min_contrast <= 1.0 || contrast(fg, bg) >= u.min_contrast) {
+        return fg;
+    }
+    let white = contrast(vec3<f32>(1.0), bg);
+    let black = contrast(vec3<f32>(0.0), bg);
+    return select(vec3<f32>(0.0), vec3<f32>(1.0), white > black);
 }
 
 // Exact sRGB <-> Linear color conversions for gamma-correct alpha blending
@@ -64,17 +110,19 @@ fn underline_coverage(style: u32, px: vec2<f32>, t: f32) -> f32 {
         return 0.0;
     }
     // Room below the line: double needs two lines with a gap, curly needs its wave amplitude.
-    let amp = max(1.0, round(t * 1.5));
+    let amp = max(1.0, floor(t * 1.25));
+    let gap = max(2.0, 2.0 * t);
     var room = t;
     if (style == 2u) {
-        room = 3.0 * t;
+        room = 2.0 * t + gap;
     } else if (style == 3u) {
         room = 2.0 * amp + t;
     }
     let y0 = max(0.0, min(u.underline_y, u.cell.y - room));
     let in_line = px.y >= y0 && px.y < y0 + t;
     if (style == 2u) {
-        return select(0.0, 1.0, in_line || (px.y >= y0 + 2.0 * t && px.y < y0 + 3.0 * t));
+        let y1 = y0 + t + gap;
+        return select(0.0, 1.0, in_line || (px.y >= y1 && px.y < y1 + t));
     }
     if (style == 3u) {
         // One sine period per cell; distance to the curve, corrected for its slope, gives AA.
@@ -134,21 +182,44 @@ fn vs_main(
     } else {
         px = (vec2<f32>(f32(col), f32(row)) + corner) * u.cell + u.offset;
     }
+    let origin = px - corner * u.cell;
+    // Bell border: stretch the outermost cells over the padding so it can be drawn there.
+    if (u.bell_border != 0u && !is_tab_row && !is_preview) {
+        if (col == 0u && corner.x == 0.0) {
+            px.x = 0.0;
+        } else if (corner.x == 1.0 && px.x + u.cell.x > u.screen.x) {
+            px.x = u.screen.x;
+        }
+        if (row == 0u && corner.y == 0.0) {
+            px.y = 0.0;
+        } else if (corner.y == 1.0 && px.y + u.cell.y > u.screen.y) {
+            px.y = u.screen.y;
+        }
+    }
 
     var out: VsOut;
     out.pos = vec4<f32>(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0, 0.0, 1.0);
+    if (u.flip_y != 0u) {
+        out.pos.y = -out.pos.y;
+    }
     let slot = glyph & 0xFFFFu;
     let sxy = vec2<f32>(f32(slot % u.slots_per_row), f32(slot / u.slots_per_row));
     out.uv = (sxy + corner) * u.cell / u.atlas_size;
     out.local = corner;
+    out.origin = origin;
+    out.uv0 = sxy * u.cell / u.atlas_size;
 
-    // fg low byte: bit 7 = explicit color, bits 0-1 = bold / italic (atlas variants).
+    // fg low byte: bit 7 = explicit color, bits 0-1 = bold / italic (atlas variants),
+    // bit 2 = color glyph.
     var f = select(unpack(fg), unpack(u.default_fg), (fg & 0x80u) == 0u);
     var b = select(unpack(bg), unpack(u.default_bg), (bg & 0x80u) == 0u);
     let is_cursor = !is_tab_row && !is_preview && u.cursor_visible != 0u && col == u.cursor.x && row == u.cursor.y;
     if (is_cursor && u.cursor_style == 0u) {
         f = unpack(u.default_bg);
-        b = vec3<f32>(0.44, 0.47, 0.59); // Ghostty slate-lavender block cursor
+        b = cursor_rgb();
+    }
+    if (!is_tab_row && !is_preview) {
+        f = ensure_contrast(f, b);
     }
     out.fg = f;
     out.bg = b;
@@ -157,27 +228,42 @@ fn vs_main(
     out.ul = select(f, vec3<f32>(f32(ul >> 8u), f32((ul >> 4u) & 15u), f32(ul & 15u)) / 15.0, (glyph >> 31u) != 0u);
     let cursor_flag = select(0u, (u.cursor_style + 1u) << 8u, is_cursor);
     let divider_flags = (glyph >> 16u) & 7u;
-    out.flags = (bg & 15u) | (select(0u, 128u, is_tab_row)) | (divider_flags << 4u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
+    out.flags = (bg & 15u) | (select(0u, 2048u, (bg & 32u) != 0u)) | (select(0u, 4096u, (bg & 64u) != 0u)) | (select(0u, 8192u, (fg & 4u) != 0u)) | (select(0u, 128u, is_tab_row)) | (divider_flags << 4u) | cursor_flag | ((slot / u.slots_per_row) << 16u);
     out.col = col;
+    out.row = row;
     return out;
 }
 
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
+    // Pixel position in screen space, top-left origin, even when drawing flipped.
+    let fp = vec2<f32>(v.pos.x, select(v.pos.y, u.screen.y - v.pos.y, u.flip_y != 0u));
+    // Unseen bell: an amber outline around the window.
+    if (u.bell_border != 0u) {
+        let w = max(2.0, floor(u.cell.y / 8.0));
+        let p = fp;
+        if (p.x < w || p.y < w || p.x >= u.screen.x - w || p.y >= u.screen.y - w) {
+            return vec4<f32>(0.96, 0.69, 0.25, 1.0);
+        }
+    }
+
     if ((v.flags & 128u) != 0u) {
+        if (u.layer == 2u) {
+            discard;
+        }
         let tab_count = u.tab_info & 0xFFFFu;
         let active_tab = u.tab_info >> 16u;
         let bar_h = floor(u.cell.y * 1.56);
         let term_bg = unpack(u.default_bg);
 
         // Clean breathing gap between the bottom of the tab bar and the first terminal line.
-        if (v.pos.y >= bar_h) {
+        if (fp.y >= bar_h) {
             return vec4<f32>(term_bg, 1.0);
         }
 
         let bar_bg = vec3<f32>(0.110, 0.114, 0.125); // #1c1d20 Ghostty tab bar backdrop
         var col_rgb = bar_bg;
-        if (v.pos.y >= bar_h - 1.0) {
+        if (fp.y >= bar_h - 1.0) {
             return vec4<f32>(vec3<f32>(0.07, 0.075, 0.085), 1.0);
         }
 
@@ -187,7 +273,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         let plus_cx = u.offset.x + (f32(tab_cols_total) + 1.0) * u.cell.x;
 
         // Right-side circular (+) button.
-        let d_plus = length(v.pos.xy - vec2<f32>(plus_cx, cy)) - half_h;
+        let d_plus = length(fp - vec2<f32>(plus_cx, cy)) - half_h;
         if (d_plus < 1.0) {
             let fill_a = clamp(0.5 - d_plus, 0.0, 1.0);
             let border_a = clamp(1.0 - abs(d_plus + 0.6), 0.0, 1.0);
@@ -196,7 +282,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             var btn_col = mix(btn_fill, btn_border, border_a);
 
             // Crisp '+' icon inside the circular button.
-            let dp = abs(v.pos.xy - vec2<f32>(plus_cx, cy));
+            let dp = abs(fp - vec2<f32>(plus_cx, cy));
             let arm = floor(u.cell.y * 0.22);
             let thick = max(1.0, round(u.cell.y / 16.0)) * 0.55;
             if ((dp.x <= arm && dp.y <= thick) || (dp.y <= arm && dp.x <= thick)) {
@@ -222,7 +308,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             let pill_cx = (x0 + x1) * 0.5;
             let half_w = max((x1 - x0) * 0.5, half_h);
 
-            let q = abs(v.pos.xy - vec2<f32>(pill_cx, cy)) - vec2<f32>(max(half_w - half_h, 0.0), 0.0);
+            let q = abs(fp - vec2<f32>(pill_cx, cy)) - vec2<f32>(max(half_w - half_h, 0.0), 0.0);
             let d_pill = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - half_h;
 
             let is_active = tab_i == active_tab;
@@ -243,7 +329,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
             // Sample centered 1:1 glyph vertically inside the pill.
             let text_y0 = floor(cy - u.cell.y * 0.5);
-            let gy = v.pos.y - text_y0;
+            let gy = fp.y - text_y0;
             if (gy >= 0.0 && gy < u.cell.y && d_pill < -1.5) {
                 let slot_y = f32(v.flags >> 16u);
                 let uv = vec2<f32>(v.uv.x, (slot_y * u.cell.y + gy) / u.atlas_size.y);
@@ -262,25 +348,55 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(col_rgb, 1.0);
     }
 
-    var a = textureSampleLevel(atlas, samp, v.uv, 0.0).r;
-    let px = v.local * u.cell;
+    // Position inside the cell, from the fragment itself (edge quads may be stretched).
+    let local = (fp - v.origin) / u.cell;
+    if (any(local < vec2<f32>(0.0)) || any(local >= vec2<f32>(1.0))) {
+        // Padding covered by a stretched edge cell (the clear color already fills it in layers).
+        if (u.layer != 0u) {
+            discard;
+        }
+        return vec4<f32>(unpack(u.default_bg), u.bg_opacity);
+    }
+    let glyph_uv = v.uv0 + local * u.cell / u.atlas_size;
+    var a = textureSampleLevel(atlas, samp, glyph_uv, 0.0).r;
+    let is_color = (v.flags & 8192u) != 0u;
+    var emoji = vec4<f32>(0.0);
+    if (is_color) {
+        emoji = textureSampleLevel(color_atlas, samp, glyph_uv, 0.0);
+        a = emoji.a;
+    }
+    let px = local * u.cell;
     let thickness = max(1.0, floor(u.cell.y / 14.0));
     if ((v.flags & 8u) != 0u && abs(px.y - u.strike_y) <= thickness * 0.5) {
         a = 1.0;
     }
+    if (u.layer == 1u) {
+        a = 0.0;
+    }
+    // Text-only layer: the glyph is blended over what is already drawn, not over v.bg.
+    let base_bg = select(v.bg, v.fg, u.layer == 2u);
+    // Set by overlays that cover the pixel completely (cursor, dividers, bars).
+    var solid = false;
     var cell_color: vec3<f32>;
     if (a <= 0.0) {
-        cell_color = v.bg;
+        cell_color = base_bg;
     } else if (a >= 1.0) {
         cell_color = v.fg;
     } else {
         let fg_lin = srgb_to_linear(v.fg);
-        let bg_lin = srgb_to_linear(v.bg);
+        let bg_lin = srgb_to_linear(base_bg);
         let cell_lin = mix(bg_lin, fg_lin, a);
         cell_color = linear_to_srgb(cell_lin);
     }
+    if (is_color && a > 0.0) {
+        // Premultiplied over the background; the text layer blends it itself.
+        cell_color = select(emoji.rgb + base_bg * (1.0 - a), emoji.rgb / a, u.layer == 2u);
+    }
 
-    let ul_cov = underline_coverage(v.flags & 7u, px, thickness);
+    var ul_cov = 0.0;
+    if (u.layer != 1u) {
+        ul_cov = underline_coverage(v.flags & 7u, px, thickness);
+    }
     if (ul_cov > 0.0) {
         cell_color = linear_to_srgb(mix(srgb_to_linear(cell_color), srgb_to_linear(v.ul), ul_cov));
         a = max(a, ul_cov);
@@ -289,23 +405,26 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     // Non-block cursor styling (1=block handled in vs_main, 2=bar, 3=underline, 4=block_hollow)
     let c_style = (v.flags >> 8u) & 7u;
     if (c_style != 0u) {
-        let cursor_color = vec3<f32>(0.44, 0.47, 0.59);
+        let cursor_color = cursor_rgb();
         if (c_style == 2u) {
             // Bar cursor: vertical beam on left edge of cell
-            if (v.local.x * u.cell.x <= 2.0) {
+            if (local.x * u.cell.x <= 2.0) {
                 cell_color = cursor_color;
+                solid = true;
             }
         } else if (c_style == 3u) {
             // Underline cursor: horizontal line at bottom of cell
-            if (v.local.y * u.cell.y >= u.cell.y - 2.0) {
+            if (local.y * u.cell.y >= u.cell.y - 2.0) {
                 cell_color = cursor_color;
+                solid = true;
             }
         } else if (c_style == 4u) {
             // Block hollow: outline border
-            let lx = v.local.x * u.cell.x;
-            let ly = v.local.y * u.cell.y;
+            let lx = local.x * u.cell.x;
+            let ly = local.y * u.cell.y;
             if (lx <= 1.5 || lx >= u.cell.x - 1.5 || ly <= 1.5 || ly >= u.cell.y - 1.5) {
                 cell_color = cursor_color;
+                solid = true;
             }
         }
     }
@@ -321,8 +440,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             vec3<f32>(0.420, 0.451, 0.549), // #6b738c active pane divider
             is_div_act,
         );
-        let rx = v.local.x * u.cell.x;
-        let ry = v.local.y * u.cell.y;
+        let rx = local.x * u.cell.x;
+        let ry = local.y * u.cell.y;
         if (is_div_r && rx >= u.cell.x - 1.0) {
             cell_color = div_color;
             on_divider = true;
@@ -333,9 +452,58 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
+    // Overlay scrollbar thumb: a 3px bar inset from the right edge.
+    if ((v.flags & 2048u) != 0u) {
+        let rx = local.x * u.cell.x;
+        if (rx >= u.cell.x - 5.0 && rx < u.cell.x - 2.0) {
+            cell_color = mix(cell_color, vec3<f32>(0.62, 0.64, 0.70), 0.75);
+            solid = true;
+        }
+    }
+
+    // OSC 9;4 progress: a thin bar along the top of the active pane.
+    let p_state = u.progress >> 8u;
+    if (p_state != 0u && (v.flags & 128u) == 0u && v.row == u.progress_row
+        && v.col >= u.progress_col && v.col < u.progress_col + u.progress_cols
+        && local.y * u.cell.y < max(2.0, floor(u.cell.y / 8.0))) {
+        let x = (f32(v.col - u.progress_col) + local.x) / f32(u.progress_cols);
+        // Indeterminate (3) has no percentage: a full, dimmer bar (no animation, 0% idle CPU).
+        let filled = p_state == 3u || x * 100.0 < f32(u.progress & 255u);
+        var bar = vec3<f32>(0.36, 0.56, 0.98);
+        if (p_state == 2u) {
+            bar = vec3<f32>(0.93, 0.33, 0.36);
+        } else if (p_state == 4u) {
+            bar = vec3<f32>(0.95, 0.76, 0.30);
+        } else if (p_state == 3u) {
+            bar = vec3<f32>(0.30, 0.42, 0.68);
+        }
+        if (filled) {
+            cell_color = bar;
+            solid = true;
+        }
+    }
+
+    // Unfocused splits fade toward the fill color.
+    if ((v.flags & 4096u) != 0u && u.unfocused_dim > 0.0) {
+        let fill = select(unpack(u.default_bg), unpack(u.unfocused_fill), (u.unfocused_fill & 1u) != 0u);
+        cell_color = mix(cell_color, fill, u.unfocused_dim);
+    }
+
     var out_alpha = 1.0;
     let def_bg = unpack(u.default_bg);
-    if (!on_divider && (v.flags & 128u) == 0u && c_style != 1u && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002) {
+    let default_cell = !on_divider && (v.flags & 128u) == 0u && c_style != 1u
+        && abs(v.bg.r - def_bg.r) < 0.002 && abs(v.bg.g - def_bg.g) < 0.002 && abs(v.bg.b - def_bg.b) < 0.002;
+    if (u.layer == 2u) {
+        // Only ink: glyph coverage, or full for the overlays.
+        out_alpha = select(a, 1.0, solid || on_divider);
+        if (out_alpha <= 0.0) {
+            discard;
+        }
+    } else if (default_cell) {
+        if (u.layer == 1u && !solid) {
+            // The clear color is the default background; images below may show here.
+            discard;
+        }
         out_alpha = mix(u.bg_opacity, 1.0, a);
     }
 

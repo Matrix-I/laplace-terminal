@@ -20,13 +20,18 @@ memmap2 = "0.9"
 unicode-width = "0.2"
 unicode-normalization = "0.1"
 regex = "1"
+rustybuzz = "0.20.1"
+png = "0.18.1"
+miniz_oxide = "0.8"
 
 # Phase 5: only compile the one GPU backend each platform needs (no DX12 / GL / WebGPU).
 [target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { version = "24", default-features = false, features = ["wgsl", "metal"] }
+wgpu = { version = "24", default-features = false, features = ["wgsl", "glsl", "metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-wgpu = { version = "24", default-features = false, features = ["wgsl"] }
+wgpu = { version = "24", default-features = false, features = ["wgsl", "glsl"] }
+# Already built for winit's X11 backend; used for the Quick Terminal key grab.
+x11rb = "0.13"
 
 [profile.release]
 opt-level = 3

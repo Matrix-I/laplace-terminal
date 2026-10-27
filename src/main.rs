@@ -2,20 +2,27 @@
 //! coalesced PTY redraw wakeups, and keyboard-to-ANSI translation.
 
 mod atlas;
+mod bidi;
 mod config;
 mod fontdb;
+mod graphics;
 mod grid;
 mod history;
+mod hotkey;
+mod image_layer;
 mod keymap;
 mod macos;
 mod mouse;
+mod postfx;
 mod pty;
 mod renderer;
 mod search;
+mod shell_integration;
 mod split;
 mod update;
+mod x11colors;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -39,24 +46,10 @@ pub enum AppEvent {
     WakeUp,
     ChildExit(u64),
     Reopen,
+    /// A menu bar item (macOS) was chosen.
+    Menu(keymap::Action),
     UpdateCheckResult(Result<update::ReleaseInfo, String>),
     UpdateInstallResult(Result<update::Version, String>),
-}
-
-pub(crate) fn show_notification(title: &str, body: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            "display notification \"{}\" with title \"{}\"",
-            body.replace('\\', "\\\\").replace('"', "\\\""),
-            title.replace('\\', "\\\\").replace('"', "\\\"")
-        );
-        let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = std::process::Command::new("notify-send").args([title, body]).spawn();
-    }
 }
 
 struct Pane {
@@ -87,6 +80,8 @@ struct Tab {
     layout: SplitNode,
     active_pane_id: u64,
     zoomed_pane_id: Option<u64>,
+    /// A pane rang the bell while this tab was not in front.
+    bell: bool,
 }
 
 impl Tab {
@@ -98,6 +93,7 @@ impl Tab {
             layout: SplitNode::new_leaf(pane_id),
             active_pane_id: pane_id,
             zoomed_pane_id: None,
+            bell: false,
         }
     }
 
@@ -160,8 +156,6 @@ struct State {
     tabs: Vec<Tab>,
     tab_titles: Vec<String>,
     active: usize,
-    next_tab_id: u64,
-    next_pane_id: u64,
     mods: ModifiersState,
     font_pt: f32,
     mouse_pos: (f64, f64),
@@ -176,6 +170,14 @@ struct State {
     click_on_selected_block: bool,
     /// The current drag started with Shift+Click and moves only the selection end.
     extend_drag: bool,
+    /// Pane whose scrollbar thumb is being dragged.
+    scrollbar_drag: Option<u64>,
+    /// Mouse pointer outside links: the active pane's OSC 22 shape.
+    pointer_icon: CursorIcon,
+    /// Last desktop notification shown, to rate-limit OSC 9 / 777 floods.
+    last_notification: Option<std::time::Instant>,
+    /// Secure Keyboard Entry requested (macOS); held only while focused.
+    secure_input: bool,
     hovered_link: Option<HoveredPaneLink>,
     config: config::Config,
     config_mtime: Option<std::time::SystemTime>,
@@ -183,6 +185,9 @@ struct State {
     /// Keys whose press Laplace handled itself (shortcuts, search box), so their
     /// release is not reported to a Kitty-protocol application either.
     consumed_keys: Vec<PhysicalKey>,
+    /// Caps / Num Lock inferred from key presses (`keymap::infer_locks`), for
+    /// platforms that do not report them.
+    locks: u8,
     cursor_blink_epoch: std::time::Instant,
     focused: bool,
     history_search: HistorySearch,
@@ -201,6 +206,28 @@ struct State {
     sync_pending: bool,
     /// When tab titles were last recomputed (they also refresh on OSC 0/2/7).
     titles_refreshed_at: std::time::Instant,
+    /// The last tab closed; `App` removes the window (or hides the last one).
+    close_requested: bool,
+    /// A shortcut asked for a new window; `App` opens it after the event.
+    new_window_requested: bool,
+    /// New tab as a native macOS window tab (`macos-native-tabs`).
+    native_tab_requested: bool,
+    /// This is the Quick Terminal window.
+    quick: bool,
+    /// A binding asked to show / hide the Quick Terminal.
+    quick_terminal_requested: bool,
+    /// `Cmd+Q` / `Ctrl+Shift+Q`: `App` confirms across all windows, then exits.
+    quit_requested: bool,
+    /// Terminal inspector overlay is shown.
+    inspector: bool,
+    /// Last key sent to the terminal and its bytes, for the inspector.
+    inspector_key: String,
+}
+
+/// Tab and pane ids are unique across windows, so `ChildExit` finds its pane.
+fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Wakes the event loop from PTY reader threads, coalescing bursts of output
@@ -230,128 +257,283 @@ impl Waker {
 
 struct App {
     waker: Waker,
-    state: Option<State>,
+    /// One entry per window. On macOS a hidden window with no tabs stays here
+    /// after the last one closes, so a Dock click can reopen it.
+    windows: Vec<State>,
+}
+
+impl App {
+    fn window_mut(&mut self, id: WindowId) -> Option<&mut State> {
+        self.windows.iter_mut().find(|s| s.window.id() == id)
+    }
+
+    /// Show the Quick Terminal (creating it on first use) or hide it when it is
+    /// already in front.
+    fn toggle_quick_terminal(&mut self, event_loop: &ActiveEventLoop) {
+        let waker = self.waker.clone();
+        if let Some(i) = self.windows.iter().position(|s| s.quick) {
+            let s = &mut self.windows[i];
+            if s.tabs.is_empty() {
+                open_fresh_tab(s, &waker);
+            } else if s.window.is_visible().unwrap_or(true) && s.focused {
+                s.window.set_visible(false);
+                let others_visible = self.windows.iter().any(|w| !w.quick && !w.tabs.is_empty() && w.window.is_visible() != Some(false));
+                if !others_visible {
+                    macos::hide_app();
+                }
+                return;
+            }
+            place_quick_terminal(&self.windows[i]);
+            return;
+        }
+        match create_window(event_loop, &waker, None) {
+            Ok(mut s) => {
+                s.quick = true;
+                s.window.set_decorations(false);
+                s.window.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+                place_quick_terminal(&s);
+                self.windows.retain(|w| !w.tabs.is_empty());
+                self.windows.push(s);
+            }
+            Err(e) => eprintln!("laplace: failed to open the Quick Terminal: {e}"),
+        }
+    }
+
+    /// Apply what event handlers asked for: quit, open new windows, close emptied ones.
+    fn process_window_requests(&mut self, event_loop: &ActiveEventLoop) {
+        if self.windows.iter_mut().any(|s| std::mem::take(&mut s.quick_terminal_requested)) {
+            self.toggle_quick_terminal(event_loop);
+        }
+        if self.windows.iter_mut().any(|s| std::mem::take(&mut s.quit_requested)) {
+            let config = &self.windows[0].config;
+            let panes = self.windows.iter().flat_map(|s| s.tabs.iter().flat_map(|t| &t.panes));
+            if confirm_close(config, panes, "Laplace") {
+                event_loop.exit();
+                return;
+            }
+        }
+        // (cwd, window to attach the new one to as a native tab)
+        let mut requests = Vec::new();
+        for s in &mut self.windows {
+            let new_window = std::mem::take(&mut s.new_window_requested);
+            let native_tab = std::mem::take(&mut s.native_tab_requested);
+            if new_window || native_tab {
+                let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
+                requests.push((cwd, native_tab.then(|| s.window.id())));
+            }
+        }
+        for (cwd, parent) in requests {
+            match create_window(event_loop, &self.waker, cwd.as_deref()) {
+                // The hidden, tab-less window kept for the Dock is no longer needed.
+                Ok(s) => {
+                    if let Some(p) = parent.and_then(|id| self.windows.iter().find(|w| w.window.id() == id)) {
+                        macos::add_tabbed_window(&p.window, &s.window);
+                    }
+                    self.windows.retain(|w| !w.tabs.is_empty());
+                    self.windows.push(s);
+                }
+                Err(e) => eprintln!("laplace: failed to open window: {e}"),
+            }
+        }
+
+        while let Some(pos) = self.windows.iter().position(|s| s.close_requested) {
+            if self.windows.len() > 1 {
+                // Dropping the state closes the window and hangs up its shells.
+                self.windows.remove(pos);
+                continue;
+            }
+            let s = &mut self.windows[pos];
+            s.close_requested = false;
+            hide_or_exit_last_window(s, event_loop);
+        }
+    }
+}
+
+/// Drop the Quick Terminal from the top of its screen: full width, 40% height,
+/// then bring it to the front.
+fn place_quick_terminal(s: &State) {
+    if let Some(m) = s.window.current_monitor() {
+        let (pos, size) = (m.position(), m.size());
+        s.window.set_outer_position(pos);
+        let _ = s.window.request_inner_size(PhysicalSize::new(size.width, size.height * 2 / 5));
+    }
+    s.window.set_visible(true);
+    s.window.focus_window();
+    #[cfg(target_os = "macos")]
+    macos::activate_app();
+}
+
+/// `font-feature` values as shaper features (validated when the config was parsed).
+fn font_features(cfg: &config::Config) -> Vec<rustybuzz::Feature> {
+    cfg.font_features.iter().filter_map(|f| atlas::parse_font_feature(f).ok()).collect()
+}
+
+/// Create a window with one tab whose shell starts in `cwd`.
+fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>) -> std::io::Result<State> {
+    let cfg = config::Config::load();
+    grid::set_default_colors(cfg.foreground, cfg.background);
+    grid::set_palette(&cfg.palette);
+    grid::set_scrollback_limit(cfg.scrollback_limit);
+    grid::set_grapheme_default(cfg.grapheme_unicode);
+
+    let attrs = Window::default_attributes()
+        .with_title("Laplace")
+        .with_transparent(cfg.background_opacity < 1.0)
+        .with_inner_size(LogicalSize::new(960.0, 600.0));
+    // Laplace windows group into one native tab bar (`macos-native-tabs`, or
+    // the system "Prefer tabs" setting).
+    #[cfg(target_os = "macos")]
+    let attrs = {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs.with_tabbing_identifier("laplace")
+    };
+    let window = Arc::new(event_loop.create_window(attrs).map_err(std::io::Error::other)?);
+    // Composed input (Vietnamese Telex/VNI, CJK) arrives as `WindowEvent::Ime`.
+    window.set_ime_allowed(true);
+    let dark = window.theme() != Some(winit::window::Theme::Light);
+    grid::set_color_scheme_dark(dark);
+    // `theme = light:X,dark:Y` was parsed before the appearance was known.
+    let cfg = if !dark && cfg.theme.as_deref().is_some_and(config::theme_is_conditional) {
+        let cfg = config::Config::load();
+        grid::set_default_colors(cfg.foreground, cfg.background);
+        grid::set_palette(&cfg.palette);
+        cfg
+    } else {
+        cfg
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::apply_macos_window_config(&window, &cfg);
+        macos::set_dock_icon();
+    }
+
+    atlas::set_font_tweaks(cfg.adjust_cell_width, cfg.adjust_cell_height, cfg.font_thicken);
+    atlas::set_font_features(&font_features(&cfg));
+    let font = atlas::load_font(&cfg.font_family);
+    let font_pt = cfg.font_size.clamp(6.0, 72.0);
+    let font_px = (font_pt * window.scale_factor() as f32).round();
+
+    let mut renderer = Renderer::new(
+        window.clone(),
+        font,
+        font_px,
+        cfg.background_opacity,
+        cfg.cursor_style.shader_id(),
+    );
+    renderer.set_padding(cfg.window_padding_x, cfg.window_padding_y, cfg.window_padding_balance);
+    renderer.set_colors(cfg.cursor_color, cfg.selection_background, cfg.selection_foreground);
+    renderer.set_contrast(cfg.unfocused_split_opacity, cfg.unfocused_split_fill, cfg.minimum_contrast);
+    if !cfg.custom_shaders.is_empty() {
+        renderer.set_custom_shaders(&cfg.custom_shaders, cfg.custom_shader_animation);
+    }
+
+    if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
+        let (cw, ch) = renderer.cell_size();
+        let (pad_x, pad_y) = renderer.pad();
+        let sf = window.scale_factor();
+        let inner_w = (w_cols * cw + 2 * pad_x) as f64 / sf;
+        let inner_h = (w_rows * ch + 2 * pad_y) as f64 / sf;
+        let _ = window.request_inner_size(LogicalSize::new(inner_w, inner_h));
+        let sz = window.inner_size();
+        renderer.resize(sz.width, sz.height);
+    }
+
+    let (cols, rows) = renderer.grid_size_for_tabs(false);
+    let (cw, ch) = renderer.cell_size();
+
+    let pane = spawn_pane(
+        next_id(),
+        cols,
+        rows,
+        (cw, ch),
+        cwd,
+        Some((cfg.shell_integration, cfg.shell_integration_features)),
+        waker,
+    )?;
+    let mut tab = Tab::new(next_id(), pane);
+    let title = tab_title(&mut tab);
+
+    let config_mtime = config::config_mtime();
+    Ok(State {
+        window,
+        renderer,
+        tabs: vec![tab],
+        tab_titles: vec![title],
+        active: 0,
+        mods: ModifiersState::default(),
+        font_pt,
+        mouse_pos: (0.0, 0.0),
+        selecting: false,
+        drag_moved: false,
+        last_click_time: None,
+        last_click_cell: None,
+        active_click_pane_id: None,
+        click_count: 0,
+        click_on_selected_block: false,
+        extend_drag: false,
+        scrollbar_drag: None,
+        pointer_icon: CursorIcon::Default,
+        last_notification: None,
+        secure_input: false,
+        hovered_link: None,
+        config: cfg,
+        config_mtime,
+        mouse_hidden: false,
+        consumed_keys: Vec::new(),
+        locks: 0,
+        cursor_blink_epoch: std::time::Instant::now(),
+        focused: true,
+        history_search: HistorySearch::new(),
+        search: SearchBar::new(),
+        first_frame: true,
+        ime_preedit: String::new(),
+        ime_cursor_cell: None,
+        mouse_button_down: None,
+        last_mouse_report: None,
+        sync_pending: false,
+        titles_refreshed_at: std::time::Instant::now(),
+        close_requested: false,
+        new_window_requested: false,
+        native_tab_requested: false,
+        quick: false,
+        quick_terminal_requested: false,
+        quit_requested: false,
+        inspector: false,
+        inspector_key: String::new(),
+    })
 }
 
 impl ApplicationHandler<AppEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
-            if let Some(s) = &self.state {
-                if !s.tabs.is_empty() {
-                    s.window.request_redraw();
-                }
+            for s in self.windows.iter().filter(|s| !s.tabs.is_empty()) {
+                s.window.request_redraw();
             }
         }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
+        if !self.windows.is_empty() {
             return;
         }
-        let cfg = config::Config::load();
-        grid::set_default_colors(cfg.foreground, cfg.background);
-        grid::set_palette(&cfg.palette);
-
-        let attrs = Window::default_attributes()
-            .with_title("Laplace")
-            .with_transparent(cfg.background_opacity < 1.0)
-            .with_inner_size(LogicalSize::new(960.0, 600.0));
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        // Composed input (Vietnamese Telex/VNI, CJK) arrives as `WindowEvent::Ime`.
-        window.set_ime_allowed(true);
+        let state = create_window(event_loop, &self.waker, None).expect("spawn initial PTY");
+        self.windows.push(state);
 
         #[cfg(target_os = "macos")]
         {
-            macos::apply_macos_window_config(&window, &cfg);
-            macos::set_dock_icon();
+            macos::register_reopen_handler(self.waker.proxy.clone());
+            macos::install_menu();
+            macos::set_global_hotkey(self.windows[0].config.quick_terminal_hotkey.as_ref());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            hotkey::listen(self.waker.proxy.clone());
+            hotkey::set_global_hotkey(self.windows[0].config.quick_terminal_hotkey.as_ref());
         }
 
-        let font = atlas::load_font(&cfg.font_family);
-        let font_pt = cfg.font_size.clamp(6.0, 72.0);
-        let font_px = (font_pt * window.scale_factor() as f32).round();
-
-        let mut renderer = Renderer::new(
-            window.clone(),
-            font,
-            font_px,
-            cfg.background_opacity,
-            cfg.cursor_style.shader_id(),
-        );
-
-
-        if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
-            let (cw, ch) = renderer.cell_size();
-            let pad = renderer.pad();
-            let sf = window.scale_factor();
-            let inner_w = (w_cols * cw + 2 * pad) as f64 / sf;
-            let inner_h = (w_rows * ch + 2 * pad) as f64 / sf;
-            let _ = window.request_inner_size(LogicalSize::new(inner_w, inner_h));
-            let sz = window.inner_size();
-            renderer.resize(sz.width, sz.height);
-        }
-
-        let (cols, rows) = renderer.grid_size_for_tabs(false);
-        let (cw, ch) = renderer.cell_size();
-
-        let tab_id = 1;
-        let pane_id = 1;
-        let pane = spawn_pane(
-            pane_id,
-            cols,
-            rows,
-            (cw, ch),
-            None,
-            Some(cfg.shell_integration_features),
-            &self.waker,
-        )
-        .expect("spawn initial PTY");
-        let mut tab = Tab::new(tab_id, pane);
-        let title = tab_title(&mut tab);
-
-        let config_mtime = config::config_mtime();
-        self.state = Some(State {
-            window,
-            renderer,
-            tabs: vec![tab],
-            tab_titles: vec![title],
-            active: 0,
-            next_tab_id: 2,
-            next_pane_id: 2,
-            mods: ModifiersState::default(),
-            font_pt,
-            mouse_pos: (0.0, 0.0),
-            selecting: false,
-            drag_moved: false,
-            last_click_time: None,
-            last_click_cell: None,
-            active_click_pane_id: None,
-            click_count: 0,
-            click_on_selected_block: false,
-            extend_drag: false,
-            hovered_link: None,
-            config: cfg,
-            config_mtime,
-            mouse_hidden: false,
-            consumed_keys: Vec::new(),
-            cursor_blink_epoch: std::time::Instant::now(),
-            focused: true,
-            history_search: HistorySearch::new(),
-            search: SearchBar::new(),
-            first_frame: true,
-            ime_preedit: String::new(),
-            ime_cursor_cell: None,
-            mouse_button_down: None,
-            last_mouse_report: None,
-            sync_pending: false,
-            titles_refreshed_at: std::time::Instant::now(),
-        });
-
-        #[cfg(target_os = "macos")]
-        macos::register_reopen_handler(self.waker.proxy.clone());
-
-        if let Some(s) = &self.state {
-            update::check_on_startup(s.config.auto_update, s.config.auto_update_channel);
-        }
+        let cfg = &self.windows[0].config;
+        update::check_on_startup(cfg.auto_update, cfg.auto_update_channel);
 
         macos::release_free_memory();
     }
@@ -360,7 +542,7 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::WakeUp => {
                 self.waker.rearm();
-                if let Some(s) = &mut self.state {
+                for s in &mut self.windows {
                     // OSC 52: applications (e.g. vim/tmux over ssh) setting the clipboard.
                     for pane in s.tabs.iter().flat_map(|t| &t.panes) {
                         let request = pane.grid.lock().clipboard_request.take();
@@ -368,14 +550,19 @@ impl ApplicationHandler<AppEvent> for App {
                             copy_to_clipboard(&text);
                         }
                     }
+                    handle_terminal_requests(s);
                     if !s.tabs.is_empty() {
                         render_active(s);
                     }
                 }
             }
             AppEvent::ChildExit(exited_id) => {
-                let Some(s) = &mut self.state else {
-                    event_loop.exit();
+                // A pane of a window that was already closed: nothing to do.
+                let Some(s) = self
+                    .windows
+                    .iter_mut()
+                    .find(|s| s.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == exited_id)))
+                else {
                     return;
                 };
                 if let Some(tab_pos) = s.tabs.iter().position(|t| t.panes.iter().any(|p| p.id == exited_id)) {
@@ -415,7 +602,8 @@ impl ApplicationHandler<AppEvent> for App {
 
                     s.tabs.remove(tab_pos);
                     if s.tabs.is_empty() {
-                        close_last_window(s, event_loop);
+                        s.close_requested = true;
+                        self.process_window_requests(event_loop);
                         return;
                     }
                     if s.active >= s.tabs.len() {
@@ -429,8 +617,24 @@ impl ApplicationHandler<AppEvent> for App {
                     s.window.request_redraw();
                 }
             }
+            AppEvent::Menu(action) => {
+                // The focused window, else any window with tabs, else the hidden one.
+                let target = self
+                    .windows
+                    .iter()
+                    .position(|s| s.focused && !s.tabs.is_empty())
+                    .or_else(|| self.windows.iter().position(|s| !s.tabs.is_empty()))
+                    .unwrap_or(0);
+                let waker = self.waker.clone();
+                if let Some(s) = self.windows.get_mut(target) {
+                    run_action(s, action, &waker);
+                }
+                self.process_window_requests(event_loop);
+            }
             AppEvent::Reopen => {
-                if let Some(s) = &mut self.state {
+                // Bring the windows back; with none left, reopen the hidden one.
+                let visible = self.windows.iter().position(|s| !s.tabs.is_empty());
+                if let Some(s) = self.windows.get_mut(visible.unwrap_or(0)) {
                     if s.tabs.is_empty() {
                         open_fresh_tab(s, &self.waker);
                     } else {
@@ -503,12 +707,57 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(s) = &mut self.state else { return };
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.handle_window_event(id, event);
+        self.process_window_requests(event_loop);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.waker.is_queued() {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
+        let mut deadline: Option<std::time::Instant> = None;
+        let now = std::time::Instant::now();
+        for s in &self.windows {
+            if s.sync_pending {
+                let sync = now + std::time::Duration::from_millis(16);
+                deadline = Some(deadline.map_or(sync, |d| d.min(sync)));
+            }
+            // An animated custom shader: about 60 frames per second.
+            let always = s.config.custom_shader_animation == Some(true);
+            if !s.tabs.is_empty() && s.renderer.animating() && (s.focused || always) {
+                let frame = now + std::time::Duration::from_millis(16);
+                deadline = Some(deadline.map_or(frame, |d| d.min(frame)));
+            }
+            // Kitty animations on screen: wake for their next frame.
+            if crate::graphics::any_animation() {
+                let panes = s.tabs.get(s.active).into_iter().flat_map(|t| &t.panes);
+                if let Some(next) = panes.filter_map(|p| p.grid.lock().next_image_frame(now)).min() {
+                    deadline = Some(deadline.map_or(next, |d| d.min(next)));
+                }
+            }
+            if !s.tabs.is_empty() && s.focused && cursor_blinks(s) {
+                let elapsed_ms = s.cursor_blink_epoch.elapsed().as_millis();
+                let next_boundary_ms = ((elapsed_ms / 500) + 1) * 500;
+                let blink = now + std::time::Duration::from_millis((next_boundary_ms - elapsed_ms) as u64);
+                deadline = Some(deadline.map_or(blink, |d| d.min(blink)));
+            }
+        }
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+}
+
+impl App {
+    fn handle_window_event(&mut self, id: WindowId, event: WindowEvent) {
+        let waker = self.waker.clone();
+        let Some(s) = self.window_mut(id) else { return };
         match event {
             WindowEvent::CloseRequested => {
-                s.tabs.clear();
-                close_last_window(s, event_loop);
+                if confirm_close(&s.config, s.tabs.iter().flat_map(|t| &t.panes), "this window") {
+                    s.tabs.clear();
+                    close_last_window(s);
+                }
             }
 
             WindowEvent::ModifiersChanged(m) => {
@@ -524,6 +773,14 @@ impl ApplicationHandler<AppEvent> for App {
                 if s.mouse_hidden {
                     s.window.set_cursor_visible(true);
                     s.mouse_hidden = false;
+                }
+                if s.inspector {
+                    s.window.request_redraw();
+                }
+                s.renderer.set_mouse(position.x, position.y);
+                if let Some(pane_id) = s.scrollbar_drag {
+                    drag_scrollbar(s, pane_id);
+                    return;
                 }
                 if !s.selecting && !s.history_search.is_open {
                     let button = s.mouse_button_down.unwrap_or(mouse::Button::None);
@@ -541,6 +798,7 @@ impl ApplicationHandler<AppEvent> for App {
                             if let Some(target) = rects.iter().find(|r| r.id == pane_id) {
                                 let pane_row = cell_row.saturating_sub(target.row).min(target.rows.saturating_sub(1));
                                 let pane_col = cell_col.saturating_sub(target.col).min(target.cols.saturating_sub(1));
+                                let pane_col = tab.pane(pane_id).map_or(pane_col, |p| p.grid.lock().logical_col(pane_row, pane_col));
                                 let end = (pane_row, pane_col);
                                 if s.extend_drag {
                                     if let Some(pane) = tab.pane(pane_id) {
@@ -572,6 +830,18 @@ impl ApplicationHandler<AppEvent> for App {
                     MouseButton::Right => Some(mouse::Button::Right),
                     _ => None,
                 };
+                if button == MouseButton::Left {
+                    if btn_state == ElementState::Released && s.scrollbar_drag.take().is_some() {
+                        return;
+                    }
+                    if btn_state == ElementState::Pressed && !s.history_search.is_open {
+                        if let Some(pane_id) = scrollbar_at_mouse(s) {
+                            s.scrollbar_drag = Some(pane_id);
+                            drag_scrollbar(s, pane_id);
+                            return;
+                        }
+                    }
+                }
                 if let (Some(b), false) = (reported, s.history_search.is_open || s.selecting) {
                     let action = if btn_state == ElementState::Pressed { mouse::Action::Press } else { mouse::Action::Release };
                     if report_mouse(s, b, action) {
@@ -662,7 +932,7 @@ impl ApplicationHandler<AppEvent> for App {
                         if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
                             match action {
                                 TabBarAction::Select(idx) => select_tab(s, idx),
-                                TabBarAction::NewTab => duplicate_active_tab(s, &self.waker),
+                                TabBarAction::NewTab => duplicate_active_tab(s, &waker),
                             }
                             return;
                         }
@@ -716,7 +986,7 @@ impl ApplicationHandler<AppEvent> for App {
                                                     g.select_block(pane_row, pane_col)
                                                 }
                                             };
-                                            if !line_text.is_empty() {
+                                            if !line_text.is_empty() && s.config.copy_on_select {
                                                 copy_to_clipboard(&line_text);
                                             }
                                             s.selecting = false;
@@ -725,7 +995,7 @@ impl ApplicationHandler<AppEvent> for App {
                                         }
                                         3 => {
                                             let line_text = pane.grid.lock().select_line(pane_row);
-                                            if !line_text.is_empty() {
+                                            if !line_text.is_empty() && s.config.copy_on_select {
                                                 copy_to_clipboard(&line_text);
                                             }
                                             s.selecting = false;
@@ -757,7 +1027,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 if let Some(pane_id) = s.active_click_pane_id {
                                     if let Some(pane) = s.tabs.get(s.active).and_then(|t| t.pane(pane_id)) {
                                         let text = pane.grid.lock().selected_text();
-                                        if let Some(t) = text {
+                                        if let Some(t) = text.filter(|_| s.config.copy_on_select) {
                                             copy_to_clipboard(&t);
                                         }
                                     }
@@ -860,15 +1130,57 @@ impl ApplicationHandler<AppEvent> for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed && s.renderer.set_bell_border(false) {
+                    s.window.request_redraw();
+                }
                 if s.ime_preedit.is_empty() {
-                    handle_key(s, &event, event_loop, &self.waker);
+                    handle_key(s, &event, &waker);
                 }
             }
 
             WindowEvent::Ime(ime) => handle_ime(s, ime),
 
+            // Dropped files paste their shell-quoted paths, separated by spaces.
+            WindowEvent::DroppedFile(path) => {
+                if let Some(tab) = s.tabs.get(s.active) {
+                    let pane = tab.active_pane();
+                    let bracketed = pane.grid.lock().bracketed_paste;
+                    let text = format!("{} ", shell_quote(&path.to_string_lossy()));
+                    pane.pty.write(&paste_payload(&text, bracketed));
+                }
+            }
+
+            WindowEvent::ThemeChanged(theme) => {
+                grid::set_color_scheme_dark(theme == winit::window::Theme::Dark);
+                if s.config.theme.as_deref().is_some_and(config::theme_is_conditional) {
+                    reload_config(s);
+                }
+                // DECSET 2031: tell applications that asked about the new appearance.
+                for pane in s.tabs.iter().flat_map(|t| &t.panes) {
+                    if pane.grid.lock().color_scheme_reports {
+                        pane.pty.write(grid::color_scheme_report());
+                    }
+                }
+            }
+
             WindowEvent::Focused(focused) => {
                 s.focused = focused;
+                if focused {
+                    s.renderer.set_bell_border(false);
+                }
+                // Secure input is system-wide; release it while another app is in front.
+                if s.secure_input {
+                    macos::set_secure_input(focused);
+                }
+                if focused {
+                    macos::set_secure_input_menu_state(s.secure_input);
+                } else if s.quick && s.config.quick_terminal_autohide {
+                    s.window.set_visible(false);
+                }
+                if let Some(tab) = s.tabs.get_mut(s.active).filter(|t| focused && t.bell) {
+                    tab.bell = false;
+                    refresh_tab_titles(s);
+                }
                 if let Some(tab) = s.tabs.get(s.active) {
                     let pane = tab.active_pane();
                     if pane.grid.lock().focus_events {
@@ -889,33 +1201,12 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 // Re-arm before rendering so any PTY write during the draw schedules the next frame.
-                self.waker.rearm();
+                waker.rearm();
                 render_active(s);
             }
 
             _ => {}
         }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.waker.is_queued() {
-            event_loop.set_control_flow(ControlFlow::Poll);
-            return;
-        }
-        let mut deadline: Option<std::time::Instant> = None;
-        if let Some(s) = &self.state {
-            let now = std::time::Instant::now();
-            if s.sync_pending {
-                deadline = Some(now + std::time::Duration::from_millis(16));
-            }
-            if !s.tabs.is_empty() && s.focused && cursor_blinks(s) {
-                let elapsed_ms = s.cursor_blink_epoch.elapsed().as_millis();
-                let next_boundary_ms = ((elapsed_ms / 500) + 1) * 500;
-                let blink = now + std::time::Duration::from_millis((next_boundary_ms - elapsed_ms) as u64);
-                deadline = Some(deadline.map_or(blink, |d| d.min(blink)));
-            }
-        }
-        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
 
@@ -925,11 +1216,11 @@ fn spawn_pane(
     rows: usize,
     (cw, ch): (u32, u32),
     cwd: Option<&str>,
-    shell_features: Option<crate::config::ShellFeatures>,
+    shell: Option<(crate::config::ShellIntegration, crate::config::ShellFeatures)>,
     waker: &Waker,
 ) -> std::io::Result<Pane> {
     let grid = Arc::new(Mutex::new(Grid::new(cols, rows)));
-    let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd, shell_features)?;
+    let pty = Pty::spawn_in(cols as u16, rows as u16, cw, ch, cwd, shell)?;
     let on_output = waker.clone();
     let proxy = waker.proxy.clone();
     pty.spawn_reader(grid.clone(), move || on_output.wake(), move || {
@@ -988,7 +1279,135 @@ fn tab_title(tab: &mut Tab) -> String {
     if tab.zoomed_pane_id.is_some() {
         title.push_str(" [Z]");
     }
-    title
+    // OSC 9;4 progress and an unseen bell show in front of the title.
+    let progress = tab.active_pane().grid.lock().progress;
+    let prefix = match progress {
+        Some((2, pct)) => format!("✖ {pct}% "),
+        Some((3, _)) => "⋯ ".to_string(),
+        Some((4, pct)) => format!("⏸ {pct}% "),
+        Some((_, pct)) => format!("{pct}% "),
+        None => String::new(),
+    };
+    let bell = if tab.bell { "🔔 " } else { "" };
+    format!("{bell}{prefix}{title}")
+}
+
+/// Act on what applications asked for since the last wake-up: desktop
+/// notifications (OSC 9 / 777), the bell, and the mouse pointer shape (OSC 22).
+fn handle_terminal_requests(s: &mut State) {
+    let mut titles_dirty = false;
+    let mut attention = false;
+    let mut ring = false;
+    let mut audio = false;
+    let mut border = false;
+    for (i, tab) in s.tabs.iter_mut().enumerate() {
+        let in_front = s.focused && i == s.active;
+        for pane in &tab.panes {
+            let (notification, bell) = {
+                let mut g = pane.grid.lock();
+                (g.notification.take(), std::mem::take(&mut g.bell))
+            };
+            if let Some((title, body)) = notification {
+                // At most one per second, so a runaway loop cannot flood the desktop.
+                if s.last_notification.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+                    s.last_notification = Some(std::time::Instant::now());
+                    let title = if title.is_empty() { "Laplace".to_string() } else { title };
+                    show_notification(&title, &body);
+                }
+            }
+            if bell {
+                ring |= s.config.bell_features.system;
+                audio |= s.config.bell_features.audio;
+                border |= s.config.bell_features.border;
+                if !in_front && s.config.bell_features.title {
+                    titles_dirty |= !tab.bell;
+                    tab.bell = true;
+                }
+                attention |= !s.focused && s.config.bell_features.attention;
+            }
+        }
+    }
+    if attention {
+        s.window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+    }
+    if ring {
+        macos::beep();
+    }
+    if audio {
+        if let Some(path) = &s.config.bell_audio_path {
+            play_sound(path, s.config.bell_audio_volume);
+        }
+    }
+    if border {
+        s.renderer.set_bell_border(true);
+        s.window.request_redraw();
+    }
+    if titles_dirty {
+        refresh_tab_titles(s);
+    }
+
+    let shape = s.tabs.get(s.active).map(|t| pointer_icon(&t.active_pane().grid.lock().pointer_shape));
+    if let Some(icon) = shape.filter(|&icon| icon != s.pointer_icon) {
+        s.pointer_icon = icon;
+        if s.hovered_link.is_none() {
+            s.window.set_cursor(icon);
+        }
+    }
+}
+
+/// Play a sound file in the background (`afplay` on macOS, PulseAudio's
+/// `paplay` elsewhere); the path is a single argument, never parsed by a shell.
+fn play_sound(path: &std::path::Path, volume: f32) {
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("/usr/bin/afplay").arg("-v").arg(volume.to_string()).arg(path).spawn();
+    #[cfg(not(target_os = "macos"))]
+    let spawned = std::process::Command::new("paplay")
+        .arg(format!("--volume={}", (volume * 65536.0) as u32))
+        .arg(path)
+        .spawn();
+    match spawned {
+        // Reap the player when it finishes, without blocking the event loop.
+        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+        Err(e) => eprintln!("laplace: cannot play {}: {e}", path.display()),
+    }
+}
+
+/// Map an OSC 22 pointer name (CSS, or the X11 names xterm uses) to a cursor.
+fn pointer_icon(name: &str) -> CursorIcon {
+    let css = match name {
+        "" | "left_ptr" | "arrow" => "default",
+        "xterm" | "ibeam" => "text",
+        "hand" | "hand1" | "hand2" => "pointer",
+        "watch" => "wait",
+        "question_arrow" => "help",
+        "fleur" => "move",
+        "cross" | "tcross" => "crosshair",
+        "sb_h_double_arrow" => "ew-resize",
+        "sb_v_double_arrow" => "ns-resize",
+        other => other,
+    };
+    css.parse().unwrap_or(CursorIcon::Default)
+}
+
+/// Show a desktop notification. Text from the terminal is passed as separate
+/// arguments (never through a shell), with leading `-` stripped so it cannot be
+/// read as an option.
+pub(crate) fn show_notification(title: &str, body: &str) {
+    let title = title.trim_start_matches('-');
+    let body = body.trim_start_matches('-');
+    #[cfg(target_os = "macos")]
+    let res = spawn_detached(
+        std::process::Command::new("osascript")
+            .args(["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)"])
+            .args(["-e", "end run"])
+            .arg(title)
+            .arg(body),
+    );
+    #[cfg(not(target_os = "macos"))]
+    let res = spawn_detached(std::process::Command::new("notify-send").arg("--").arg(title).arg(body));
+    if let Err(e) = res {
+        eprintln!("laplace: failed to show notification: {e}");
+    }
 }
 
 fn refresh_tab_titles(s: &mut State) {
@@ -1007,7 +1426,9 @@ fn refresh_tab_titles(s: &mut State) {
             s.renderer.invalidate();
         }
         if let Some(active_title) = s.tab_titles.get(s.active) {
-            s.window.set_title(active_title);
+            let title = s.config.title.as_deref().unwrap_or(active_title);
+            let lock = if s.secure_input { "🔒 " } else { "" };
+            s.window.set_title(&format!("{lock}{title}"));
             #[cfg(target_os = "macos")]
             if let Some(tab) = s.tabs.get_mut(s.active) {
                 if let Some(cwd) = tab.active_pane_mut().cwd() {
@@ -1060,10 +1481,32 @@ fn reload_config(s: &mut State) {
 
     s.renderer.set_bg_opacity(new.background_opacity);
     s.renderer.set_cursor_style(new.cursor_style.shader_id());
+    s.renderer.set_colors(new.cursor_color, new.selection_background, new.selection_foreground);
+    s.renderer.set_contrast(new.unfocused_split_opacity, new.unfocused_split_fill, new.minimum_contrast);
+    if (&new.custom_shaders, new.custom_shader_animation) != (&old.custom_shaders, old.custom_shader_animation) {
+        s.renderer.set_custom_shaders(&new.custom_shaders, new.custom_shader_animation);
+    }
+    // Applies to terminals created or resized from now on.
+    grid::set_scrollback_limit(new.scrollback_limit);
+    grid::set_grapheme_default(new.grapheme_unicode);
+    let padding = (new.window_padding_x, new.window_padding_y, new.window_padding_balance);
+    if padding != (old.window_padding_x, old.window_padding_y, old.window_padding_balance) {
+        s.renderer.set_padding(padding.0, padding.1, padding.2);
+        sync_size(s);
+    }
 
     let font_changed = new.font_family != old.font_family;
     let size_changed = (new.font_size - old.font_size).abs() > 0.001;
-    if font_changed || size_changed {
+    // Compared per window: another window may already have set the new tweaks.
+    atlas::set_font_tweaks(new.adjust_cell_width, new.adjust_cell_height, new.font_thicken);
+    atlas::set_font_features(&font_features(&new));
+    if new.quick_terminal_hotkey != old.quick_terminal_hotkey {
+        macos::set_global_hotkey(new.quick_terminal_hotkey.as_ref());
+        hotkey::set_global_hotkey(new.quick_terminal_hotkey.as_ref());
+    }
+    let tweaks_changed = (new.adjust_cell_width, new.adjust_cell_height, new.font_thicken, &new.font_features)
+        != (old.adjust_cell_width, old.adjust_cell_height, old.font_thicken, &old.font_features);
+    if font_changed || size_changed || tweaks_changed {
         s.font_pt = new.font_size;
         let font = atlas::load_font(&new.font_family);
         let sf = s.window.scale_factor();
@@ -1133,6 +1576,7 @@ fn render_active(s: &mut State) {
         .collect();
 
     let hovered_link = s.hovered_link.as_ref().map(|l| (l.pane_id, &l.link));
+    let inspector = s.inspector.then(|| inspector_lines(s));
 
     s.renderer.render_panes(
         &render_panes,
@@ -1142,6 +1586,7 @@ fn render_active(s: &mut State) {
         Some(&s.history_search),
         &s.search,
         &s.ime_preedit,
+        inspector.as_deref(),
     );
 
     // Keep the IME candidate window next to the text cursor.
@@ -1228,6 +1673,41 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
 }
 
 /// Pane under the mouse pointer and the pane-relative `(row, col)` cell.
+/// Pane whose visible scrollbar (shown while scrolled back) is under the mouse.
+fn scrollbar_at_mouse(s: &State) -> Option<u64> {
+    const GRAB_PX: f64 = 12.0;
+    let show_tabs = s.tabs.len() > 1;
+    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+    let tab = s.tabs.get(s.active)?;
+    let (mx, my) = s.mouse_pos;
+    tab.compute_pane_rects(cols, rows).into_iter().find_map(|r| {
+        let (_, top) = s.renderer.cell_origin_px(r.row, r.col, show_tabs);
+        let (right, bottom) = s.renderer.cell_origin_px(r.row + r.rows, r.col + r.cols, show_tabs);
+        let over = mx <= right && mx >= right - GRAB_PX && my >= top && my < bottom;
+        let scrolled = tab.pane(r.id).is_some_and(|p| p.grid.lock().scroll_position().1 > 0);
+        (over && scrolled).then_some(r.id)
+    })
+}
+
+/// Scroll the dragged pane so the thumb is centered on the mouse.
+fn drag_scrollbar(s: &mut State, pane_id: u64) {
+    let show_tabs = s.tabs.len() > 1;
+    let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
+    let Some(tab) = s.tabs.get(s.active) else { return };
+    let Some(rect) = tab.compute_pane_rects(cols, rows).into_iter().find(|r| r.id == pane_id) else { return };
+    let Some(pane) = tab.pane(pane_id) else { return };
+    let (_, top) = s.renderer.cell_origin_px(rect.row, rect.col, show_tabs);
+    let (_, bottom) = s.renderer.cell_origin_px(rect.row + rect.rows, rect.col, show_tabs);
+    let frac = ((s.mouse_pos.1 - top) / (bottom - top).max(1.0)).clamp(0.0, 1.0);
+    let mut g = pane.grid.lock();
+    let (history, offset) = g.scroll_position();
+    let total = (history + g.rows) as f64;
+    let top_line = (frac * total - g.rows as f64 / 2.0).round().clamp(0.0, history as f64) as usize;
+    g.scroll_display((history - top_line) as isize - offset as isize);
+    drop(g);
+    s.window.request_redraw();
+}
+
 fn pane_cell_at_mouse(s: &State) -> Option<(u64, usize, usize)> {
     let show_tabs = s.tabs.len() > 1;
     let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
@@ -1236,7 +1716,12 @@ fn pane_cell_at_mouse(s: &State) -> Option<(u64, usize, usize)> {
     tab.compute_pane_rects(cols, rows)
         .into_iter()
         .find(|r| col >= r.col && col < r.col + r.cols && row >= r.row && row < r.row + r.rows)
-        .map(|r| (r.id, row - r.row, col - r.col))
+        .map(|r| {
+            // Right-to-left rows are drawn reordered: hit-test the logical cell.
+            let (row, col) = (row - r.row, col - r.col);
+            let col = tab.pane(r.id).map_or(col, |p| p.grid.lock().logical_col(row, col));
+            (r.id, row, col)
+        })
 }
 
 /// Forward a mouse event to the application in the pane under the pointer if it
@@ -1251,13 +1736,23 @@ fn report_mouse(s: &mut State, button: mouse::Button, action: mouse::Action) -> 
     let Some((pane_id, row, col)) = pane_cell_at_mouse(s) else { return false };
     let tab = &mut s.tabs[s.active];
     let Some(pane) = tab.pane(pane_id) else { return false };
-    let (tracking, sgr) = {
+    let (tracking, sgr, pixels) = {
         let g = pane.grid.lock();
-        (g.mouse_tracking, g.mouse_sgr)
+        (g.mouse_tracking, g.mouse_sgr, g.mouse_sgr_pixels)
     };
     if tracking == MouseTracking::Off {
         return false;
     }
+    // SGR-Pixels (DECSET 1016): the same report with pane-relative pixel coordinates.
+    let (row, col) = if pixels {
+        let (cw, ch) = s.renderer.cell_size();
+        let (dx, dy) = s.renderer.offset_in_cell(s.mouse_pos.0, s.mouse_pos.1, s.tabs.len() > 1);
+        (row * ch as usize + dy, col * cw as usize + dx)
+    } else {
+        (row, col)
+    };
+    let tab = &mut s.tabs[s.active];
+    let Some(pane) = tab.pane(pane_id) else { return false };
     let wanted = match action {
         mouse::Action::Press | mouse::Action::Release => true,
         mouse::Action::Motion => {
@@ -1269,7 +1764,7 @@ fn report_mouse(s: &mut State, button: mouse::Button, action: mouse::Action) -> 
     };
     if wanted {
         let mods = mouse::Mods { shift: false, alt: s.mods.alt_key(), ctrl: s.mods.control_key() };
-        if let Some(bytes) = mouse::encode(button, action, mods, row, col, sgr) {
+        if let Some(bytes) = mouse::encode(button, action, mods, row, col, sgr || pixels) {
             pane.pty.write(&bytes);
         }
         s.last_mouse_report = Some((pane_id, row, col));
@@ -1380,8 +1875,8 @@ fn update_hovered_link(s: &mut State) {
                     let cwd = pane.cached_cwd.clone().or_else(|| pane.pty.cwd());
                     let cwd_path = cwd.as_deref().map(std::path::Path::new);
                     let pane_row = cell_row - target.row;
-                    let pane_col = cell_col - target.col;
                     let g = pane.grid.lock();
+                    let pane_col = g.logical_col(pane_row, cell_col - target.col);
                     g.find_hyperlink_at(pane_row, pane_col, cwd_path).map(|link| HoveredPaneLink {
                         pane_id: target.id,
                         link,
@@ -1404,7 +1899,7 @@ fn update_hovered_link(s: &mut State) {
         if s.hovered_link.is_some() {
             s.window.set_cursor(CursorIcon::Pointer);
         } else {
-            s.window.set_cursor(CursorIcon::Default);
+            s.window.set_cursor(s.pointer_icon);
         }
         s.renderer.invalidate();
         s.window.request_redraw();
@@ -1417,17 +1912,15 @@ fn open_fresh_tab(
 ) {
     let (cols, rows) = s.renderer.grid_size_for_tabs(false);
     let (cw, ch) = s.renderer.cell_size();
-    let tab_id = s.next_tab_id;
-    s.next_tab_id += 1;
-    let pane_id = s.next_pane_id;
-    s.next_pane_id += 1;
+    let tab_id = next_id();
+    let pane_id = next_id();
     match spawn_pane(
         pane_id,
         cols,
         rows,
         (cw, ch),
         None,
-        Some(s.config.shell_integration_features),
+        Some((s.config.shell_integration, s.config.shell_integration_features)),
         waker,
     ) {
         Ok(pane) => {
@@ -1466,17 +1959,15 @@ fn duplicate_active_tab(
     let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
     let (cols, rows) = s.renderer.grid_size_for_tabs(true);
     let (cw, ch) = s.renderer.cell_size();
-    let id = s.next_tab_id;
-    s.next_tab_id += 1;
-    let pane_id = s.next_pane_id;
-    s.next_pane_id += 1;
+    let id = next_id();
+    let pane_id = next_id();
     match spawn_pane(
         pane_id,
         cols,
         rows,
         (cw, ch),
         cwd.as_deref(),
-        Some(s.config.shell_integration_features),
+        Some((s.config.shell_integration, s.config.shell_integration_features)),
         waker,
     ) {
         Ok(pane) => {
@@ -1494,9 +1985,39 @@ fn duplicate_active_tab(
     }
 }
 
-/// The last tab is gone. On macOS the app keeps running in the Dock (at 0% CPU)
-/// and a Dock click reopens a fresh tab; elsewhere the process exits.
-fn close_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
+/// Ask before closing `panes` per `confirm-close-surface`; `true` = go ahead.
+fn confirm_close<'a>(cfg: &config::Config, mut panes: impl Iterator<Item = &'a Pane>, what: &str) -> bool {
+    use config::ConfirmClose;
+    if cfg.confirm_close_surface == ConfirmClose::Never {
+        return true;
+    }
+    let running = panes.any(|p| p.pty.has_running_process());
+    if !running && cfg.confirm_close_surface == ConfirmClose::Running {
+        return true;
+    }
+    let text = if running { "A program is still running. Closing will end it." } else { "The terminal will be closed." };
+    let (title, button) = match what {
+        "Laplace" => ("Quit Laplace?".to_string(), "Quit"),
+        _ => (format!("Close {what}?"), "Close"),
+    };
+    #[cfg(target_os = "macos")]
+    return macos::confirm(&title, text, button);
+    // Linux: zenity when installed; without a dialog tool, close as asked.
+    #[cfg(not(target_os = "macos"))]
+    std::process::Command::new("zenity")
+        .args(["--question", "--title", &title, "--text", text, "--ok-label", button])
+        .status()
+        .map_or(true, |status| status.success())
+}
+
+/// The window's last tab is gone: `App` closes the window, or this was the last
+/// window. On macOS the app keeps running in the Dock (at 0% CPU) and a Dock
+/// click reopens a fresh tab; elsewhere the process exits.
+fn close_last_window(s: &mut State) {
+    s.close_requested = true;
+}
+
+fn hide_or_exit_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
     if cfg!(target_os = "macos") {
         s.tab_titles.clear();
         s.hovered_link = None;
@@ -1512,20 +2033,21 @@ fn close_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
 fn select_tab(s: &mut State, idx: usize) {
     if idx < s.tabs.len() && idx != s.active {
         s.active = idx;
+        s.tabs[idx].bell = false;
         refresh_tab_titles(s);
         s.renderer.invalidate();
         s.window.request_redraw();
     }
 }
 
-fn close_active_tab(s: &mut State, event_loop: &ActiveEventLoop) {
+fn close_active_tab(s: &mut State) {
     if s.tabs.is_empty() {
-        close_last_window(s, event_loop);
+        close_last_window(s);
         return;
     }
     s.tabs.remove(s.active);
     if s.tabs.is_empty() {
-        close_last_window(s, event_loop);
+        close_last_window(s);
         return;
     }
     if s.active >= s.tabs.len() {
@@ -1552,8 +2074,7 @@ fn split_active_pane(
     tab.zoomed_pane_id = None;
 
     let target_id = tab.active_pane_id;
-    let new_id = s.next_pane_id;
-    s.next_pane_id += 1;
+    let new_id = next_id();
 
     let cwd = tab.pane(target_id).and_then(|p| p.pty.cwd());
 
@@ -1576,7 +2097,7 @@ fn split_active_pane(
         new_rect.rows,
         (cw, ch),
         cwd.as_deref(),
-        Some(s.config.shell_integration_features),
+        Some((s.config.shell_integration, s.config.shell_integration_features)),
         waker,
     ) {
         Ok(new_pane) => {
@@ -1591,18 +2112,14 @@ fn split_active_pane(
     }
 }
 
-fn close_active_pane_or_tab(s: &mut State, event_loop: &ActiveEventLoop) {
+fn close_active_pane_or_tab(s: &mut State) {
     if s.tabs.is_empty() {
-        #[cfg(target_os = "macos")]
-        {
-            s.window.set_visible(false);
-            return;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            event_loop.exit();
-            return;
-        }
+        close_last_window(s);
+        return;
+    }
+    let pane = s.tabs[s.active].active_pane();
+    if !confirm_close(&s.config, std::iter::once(pane), "this terminal") {
+        return;
     }
     let (total_cols, total_rows) = s.renderer.grid_size_for_tabs(s.tabs.len() > 1);
     let tab = &mut s.tabs[s.active];
@@ -1644,7 +2161,7 @@ fn close_active_pane_or_tab(s: &mut State, event_loop: &ActiveEventLoop) {
         s.renderer.invalidate();
         s.window.request_redraw();
     } else {
-        close_active_tab(s, event_loop);
+        close_active_tab(s);
     }
 }
 
@@ -1758,6 +2275,7 @@ fn sync_size(s: &mut State) {
             if let Some(p) = tab.panes.iter().find(|p| p.id == rect.id) {
                 let changed = {
                     let mut g = p.grid.lock();
+                    g.cell_px = (cw as u16, ch as u16);
                     if (g.cols, g.rows) == (rect.cols, rect.rows) {
                         false
                     } else {
@@ -1792,7 +2310,6 @@ fn zoom(s: &mut State, delta_pt: f32) {
 fn handle_key(
     s: &mut State,
     ev: &KeyEvent,
-    event_loop: &ActiveEventLoop,
     waker: &Waker,
 ) {
     let m = keymap::Mods {
@@ -1805,6 +2322,7 @@ fn handle_key(
         handle_key_release(s, ev, m);
         return;
     }
+    s.locks = keymap::infer_locks(s.locks, &ev.logical_key, ev.location, m.shift);
 
     let is_modifier = keymap::is_modifier_key(&ev.logical_key);
     if !is_modifier && s.config.mouse_hide_while_typing && !s.mouse_hidden {
@@ -1825,33 +2343,67 @@ fn handle_key(
         consume_key(s, ev);
         if !handle_search_key(s, &ev.logical_key, m) {
             if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
-                run_action(s, action, event_loop, waker);
+                run_action(s, action, waker);
             }
         }
         return;
     }
-    if let Some(action) = keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen) {
-        if run_action(s, action, event_loop, waker) {
+    // User `keybind` entries come first; the last matching one wins.
+    let unshifted_key = ev.key_without_modifiers();
+    let user_binding = s
+        .config
+        .keybinds
+        .iter()
+        .rev()
+        .find(|(t, _)| keymap::trigger_matches(t, &unshifted_key, m))
+        .map(|(_, b)| b.clone());
+    let builtin = match user_binding {
+        Some(keymap::Binding::Action(action)) => {
+            run_action(s, action, waker);
+            consume_key(s, ev);
+            return;
+        }
+        Some(keymap::Binding::Text(bytes)) => {
+            if let Some(tab) = s.tabs.get(s.active) {
+                tab.active_pane().pty.write(&bytes);
+            }
+            consume_key(s, ev);
+            return;
+        }
+        Some(keymap::Binding::Ignore) => {
+            consume_key(s, ev);
+            return;
+        }
+        Some(keymap::Binding::Unbind) => None,
+        None => keymap::resolve(keymap::PLATFORM, &ev.logical_key, m, alt_screen),
+    };
+    if let Some(action) = builtin {
+        if run_action(s, action, waker) {
             consume_key(s, ev);
             return;
         }
     }
-    // Unbound Cmd/Super combinations never reach the shell.
-    if s.tabs.is_empty() || (m.sup && !is_modifier) {
+    if s.tabs.is_empty() {
         consume_key(s, ev);
         return;
     }
 
     let pane = s.tabs[s.active].active_pane();
-    let (app_cursor, kitty_flags) = {
-        let mut g = pane.grid.lock();
-        // A lone modifier (Cmd before C, Shift before a click) keeps the selection
-        // and the scrollback position; only real keys snap back to the prompt.
-        if !is_modifier {
-            g.reset_display();
-        }
-        (g.app_cursor, g.kitty_keyboard_flags())
+    let (app_cursor, kitty_flags, modify_other_keys) = {
+        let g = pane.grid.lock();
+        (g.app_cursor, g.kitty_keyboard_flags(), g.modify_other_keys)
     };
+    // Unbound Cmd/Super combinations only reach applications that speak the Kitty
+    // protocol (which can encode Super); a shell would just see the bare key.
+    if m.sup && !is_modifier && kitty_flags == 0 {
+        consume_key(s, ev);
+        return;
+    }
+    // A lone modifier (Cmd before C, Shift before a click) keeps the selection
+    // and the scrollback position; only real keys snap back to the prompt.
+    if !is_modifier {
+        pane.grid.lock().reset_display();
+    }
 
     match &ev.logical_key {
         // Ctrl+U at a prompt: delete back to the prompt only (vim keeps its half-page scroll).
@@ -1884,13 +2436,104 @@ fn handle_key(
     let bytes = if kitty_flags != 0 {
         let kind = if ev.repeat { keymap::KeyKind::Repeat } else { keymap::KeyKind::Press };
         let unshifted = ev.key_without_modifiers();
-        keymap::encode_kitty(keymap::PLATFORM, &kitty_key(ev, &unshifted, kind), m, kitty_flags, app_cursor)
+        keymap::encode_kitty(keymap::PLATFORM, &kitty_key(ev, &unshifted, kind, s.locks), m, kitty_flags, app_cursor)
+    } else if modify_other_keys != 0 {
+        let text = ev.text.as_deref();
+        keymap::encode_modify_other_keys(keymap::PLATFORM, &ev.logical_key, text, m, modify_other_keys, app_cursor)
     } else {
         keymap::encode(keymap::PLATFORM, &ev.logical_key, ev.text.as_deref(), m, app_cursor)
     };
-    if let Some(bytes) = bytes {
-        pane.pty.write(&bytes);
+    if let Some(bytes) = &bytes {
+        pane.pty.write(bytes);
     }
+    if s.inspector {
+        s.inspector_key = describe_key(&ev.logical_key, m, bytes.as_deref());
+        s.window.request_redraw();
+    }
+}
+
+/// `Ctrl+Shift+A → "\e[97;6u"` for the inspector.
+fn describe_key(key: &Key, m: keymap::Mods, bytes: Option<&[u8]>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (on, name) in [(m.ctrl, "Ctrl+"), (m.alt, "Alt+"), (m.shift, "Shift+"), (m.sup, "Super+")] {
+        if on {
+            out.push_str(name);
+        }
+    }
+    match key {
+        Key::Character(c) => out.push_str(c),
+        other => {
+            let _ = write!(out, "{other:?}");
+        }
+    }
+    out.push_str(" → ");
+    match bytes {
+        None => out.push_str("(nothing)"),
+        Some(bytes) => {
+            out.push('"');
+            for &b in bytes {
+                match b {
+                    0x1b => out.push_str("\\e"),
+                    0x20..=0x7e => out.push(b as char),
+                    _ => {
+                        let _ = write!(out, "\\x{b:02x}");
+                    }
+                }
+            }
+            out.push('"');
+        }
+    }
+    out
+}
+
+/// What the terminal inspector shows about the active pane.
+fn inspector_lines(s: &State) -> Vec<String> {
+    let Some(tab) = s.tabs.get(s.active) else { return Vec::new() };
+    let pane = tab.active_pane();
+    let mouse_cell = pane_cell_at_mouse(s).filter(|&(id, _, _)| id == pane.id);
+    let running = pane.pty.has_running_process();
+    let cwd = pane.pty.cwd().unwrap_or_default();
+    let g = pane.grid.lock();
+    let on = |b: bool| if b { "on" } else { "off" };
+    let hex = |c: u32| format!("#{:06x}", c >> 8);
+    let (history, offset) = g.scroll_position();
+    let cursor = g.cursor_pos().map_or("hidden".to_string(), |(c, r)| format!("row {r} col {c}"));
+    let shape = match g.cursor_shape {
+        0 => "default",
+        1 | 2 => "block",
+        3 | 4 => "underline",
+        _ => "bar",
+    };
+    let cell = mouse_cell
+        .and_then(|(_, r, c)| g.describe_cell(r, c).map(|d| format!("{r},{c}  {d}")))
+        .unwrap_or_else(|| "(move the mouse over this pane)".to_string());
+    vec![
+        "Terminal Inspector".to_string(),
+        format!("Grid      {}x{}  scrollback {history} lines, {offset} up", g.cols, g.rows),
+        format!("Cursor    {cursor}  {shape}  {}", if g.cursor_visible { "visible" } else { "invisible" }),
+        format!(
+            "Screen    {}  app-cursor {}  bracketed-paste {}  sync {}",
+            if g.alt_active { "alternate" } else { "main" },
+            on(g.app_cursor),
+            on(g.bracketed_paste),
+            on(g.sync_output)
+        ),
+        format!(
+            "Mouse     {:?}  sgr {}  pixels {}  focus {}  alt-scroll {}",
+            g.mouse_tracking,
+            on(g.mouse_sgr),
+            on(g.mouse_sgr_pixels),
+            on(g.focus_events),
+            on(g.alt_scroll)
+        ),
+        format!("Keyboard  kitty flags {}  modifyOtherKeys {}", g.kitty_keyboard_flags(), g.modify_other_keys),
+        format!("Colors    fg {}  bg {}", hex(g.fg_color()), hex(g.bg_color())),
+        format!("Process   {}  cwd {cwd}", if running { "running" } else { "shell at prompt" }),
+        format!("Title     {:?}", g.title),
+        format!("Cell      {cell}"),
+        format!("Last key  {}", s.inspector_key),
+    ]
 }
 
 /// Remember that Laplace handled this key press itself.
@@ -1922,13 +2565,13 @@ fn handle_key_release(s: &mut State, ev: &KeyEvent, m: keymap::Mods) {
         return;
     }
     let unshifted = ev.key_without_modifiers();
-    let key = kitty_key(ev, &unshifted, keymap::KeyKind::Release);
+    let key = kitty_key(ev, &unshifted, keymap::KeyKind::Release, s.locks);
     if let Some(bytes) = keymap::encode_kitty(keymap::PLATFORM, &key, m, kitty_flags, app_cursor) {
         pane.pty.write(&bytes);
     }
 }
 
-fn kitty_key<'a>(ev: &'a KeyEvent, unshifted: &'a Key, kind: keymap::KeyKind) -> keymap::KittyKey<'a> {
+fn kitty_key<'a>(ev: &'a KeyEvent, unshifted: &'a Key, kind: keymap::KeyKind, inferred: u8) -> keymap::KittyKey<'a> {
     keymap::KittyKey {
         key: &ev.logical_key,
         unshifted,
@@ -1939,6 +2582,13 @@ fn kitty_key<'a>(ev: &'a KeyEvent, unshifted: &'a Key, kind: keymap::KeyKind) ->
         location: ev.location,
         text: ev.text.as_deref(),
         kind,
+        // winit has no lock state: macOS reads Caps Lock from AppKit (and has no
+        // Num Lock), elsewhere it is inferred from the keys typed.
+        locks: if cfg!(target_os = "macos") {
+            if macos::caps_lock() { keymap::KITTY_CAPS_LOCK } else { 0 }
+        } else {
+            inferred
+        },
     }
 }
 
@@ -2101,25 +2751,27 @@ fn close_search(s: &mut State) {
 fn run_action(
     s: &mut State,
     action: keymap::Action,
-    event_loop: &ActiveEventLoop,
     waker: &Waker,
 ) -> bool {
     use keymap::Action as A;
 
     // These work even with no open tab (macOS keeps running without windows).
     match action {
-        A::Quit => event_loop.exit(),
+        A::Quit => s.quit_requested = true,
         A::Minimize => s.window.set_minimized(true),
         A::OpenConfig => config::open_config_in_editor(),
         A::ReloadConfig => reload_config(s),
+        A::NewWindow => s.new_window_requested = true,
+        A::ToggleQuickTerminal => s.quick_terminal_requested = true,
         A::NewTab if s.tabs.is_empty() => open_fresh_tab(s, waker),
+        A::NewTab if cfg!(target_os = "macos") && s.config.macos_native_tabs => s.native_tab_requested = true,
         A::NewTab => duplicate_active_tab(s, waker),
         A::CheckUpdate => {
             macos::show_progress_dialog("Checking for Updates…", "Checking for new releases of Laplace…");
             update::start_interactive_check(waker.proxy.clone());
         }
         _ if s.tabs.is_empty() => {}
-        _ => return run_tab_action(s, action, event_loop, waker),
+        _ => return run_tab_action(s, action, waker),
     }
     true
 }
@@ -2127,7 +2779,6 @@ fn run_action(
 fn run_tab_action(
     s: &mut State,
     action: keymap::Action,
-    event_loop: &ActiveEventLoop,
     waker: &Waker,
 ) -> bool {
     use keymap::Action as A;
@@ -2154,11 +2805,40 @@ fn run_tab_action(
             s.renderer.invalidate();
             s.window.request_redraw();
         }
-        A::CloseTab => close_active_pane_or_tab(s, event_loop),
+        A::CloseTab => close_active_pane_or_tab(s),
         A::SplitRight => split_active_pane(s, SplitDirection::Vertical, waker),
         A::SplitDown => split_active_pane(s, SplitDirection::Horizontal, waker),
         A::EqualizeSplits => equalize_splits(s),
         A::ToggleSplitZoom => toggle_split_zoom(s),
+        A::JumpToPrompt(delta) => {
+            if !s.tabs[s.active].active_pane().grid.lock().jump_to_prompt(delta) {
+                return false;
+            }
+            s.window.request_redraw();
+        }
+        A::SelectLastOutput => {
+            let text = s.tabs[s.active].active_pane().grid.lock().select_last_output();
+            match text {
+                Some(t) => copy_to_clipboard(&t),
+                None => return false,
+            }
+            s.window.request_redraw();
+        }
+        A::ToggleInspector => {
+            s.inspector = !s.inspector;
+            s.renderer.invalidate();
+            s.window.request_redraw();
+        }
+        A::ToggleSecureInput => {
+            s.secure_input = !s.secure_input;
+            if s.focused {
+                macos::set_secure_input(s.secure_input);
+            }
+            macos::set_secure_input_menu_state(s.secure_input);
+            // Force the window title (and its 🔒) to be rewritten.
+            s.tab_titles.clear();
+            refresh_tab_titles(s);
+        }
         A::SelectAll => {
             s.tabs[s.active].active_pane().grid.lock().select_all();
             s.window.request_redraw();
@@ -2186,7 +2866,10 @@ fn run_tab_action(
                 s.window.request_redraw();
             }
         }
-        A::PrevTab | A::NextTab | A::SelectTab(_) if tabs < 2 => return false,
+        // A single in-window tab: move between native macOS tabs, if any.
+        A::PrevTab if tabs < 2 => return macos::select_native_tab(&s.window, -1, None),
+        A::NextTab if tabs < 2 => return macos::select_native_tab(&s.window, 1, None),
+        A::SelectTab(n) if tabs < 2 => return macos::select_native_tab(&s.window, 0, Some(n)),
         A::PrevTab => select_tab(s, (s.active + tabs - 1) % tabs),
         A::NextTab => select_tab(s, (s.active + 1) % tabs),
         A::SelectTab(n) => select_tab(s, if n == 8 { tabs - 1 } else { n }),
@@ -2214,7 +2897,7 @@ fn run_tab_action(
             drop(g);
             s.window.request_redraw();
         }
-        A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab | A::CheckUpdate => {}
+        A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab | A::NewWindow | A::CheckUpdate | A::ToggleQuickTerminal => {}
     }
     true
 }
@@ -2254,6 +2937,16 @@ fn copy_to_clipboard(text: &str) {
 /// ESC (and the 8-bit C1 CSI, U+009B) is stripped so clipboard content can never
 /// smuggle in `\x1b[201~` to terminate bracketed paste early and execute the rest
 /// as typed input, nor inject escape sequences into programs without bracketed paste.
+/// Quote a path for a POSIX shell: bare when it only has safe characters,
+/// otherwise in single quotes (with `'` written as `'\''`).
+fn shell_quote(s: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-~".contains(c);
+    if !s.is_empty() && s.chars().all(safe) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     let mut payload = Vec::with_capacity(text.len() + 12);
     if bracketed {
@@ -2299,7 +2992,25 @@ fn paste_from_clipboard() -> Option<String> {
 }
 
 fn main() {
+    // `laplace +list-themes` (Ghostty's spelling) or `--list-themes`.
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+list-themes" || a == "--list-themes") {
+        for name in config::bundled_theme_names() {
+            println!("{name}");
+        }
+        return;
+    }
     // `laplace +check-update` or `--check-update`.
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+toggle-quick-terminal") {
+        if cfg!(target_os = "macos") {
+            eprintln!("laplace: on macOS, use `keybind = global:<trigger>=toggle_quick_terminal`");
+            std::process::exit(1);
+        }
+        if let Err(e) = hotkey::send_toggle() {
+            eprintln!("laplace: no running Laplace to toggle ({e})");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+check-update" || a == "--check-update") {
         update::cli_check_update();
         return;
@@ -2314,14 +3025,22 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
         waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)) },
-        state: None,
+        windows: Vec::new(),
     };
     event_loop.run_app(&mut app).expect("run app");
 }
 
 #[cfg(test)]
 mod paste_tests {
-    use super::paste_payload;
+    use super::{paste_payload, shell_quote};
+
+    #[test]
+    fn dropped_paths_are_shell_quoted() {
+        assert_eq!(shell_quote("/Users/me/notes.txt"), "/Users/me/notes.txt");
+        assert_eq!(shell_quote("/tmp/My File (1).png"), "'/tmp/My File (1).png'");
+        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+        assert_eq!(shell_quote("/tmp/$(rm -rf ~)"), "'/tmp/$(rm -rf ~)'");
+    }
 
     #[test]
     fn bracketed_paste_wraps_plain_text() {

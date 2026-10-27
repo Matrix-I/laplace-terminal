@@ -1,0 +1,18 @@
+# Laplace injects this file by pointing ZDOTDIR here. Restore the user's
+# ZDOTDIR, load their .zshenv, then the integration for interactive shells.
+if [[ -n "${LAPLACE_ZDOTDIR+x}" ]]; then
+  ZDOTDIR=$LAPLACE_ZDOTDIR
+  unset LAPLACE_ZDOTDIR
+else
+  unset ZDOTDIR
+fi
+
+{
+  typeset _laplace_file=${ZDOTDIR-$HOME}/.zshenv
+  [[ ! -r $_laplace_file ]] || builtin source -- $_laplace_file
+} always {
+  if [[ -o interactive && -n $LAPLACE_SHELL_INTEGRATION_DIR ]]; then
+    builtin source -- "$LAPLACE_SHELL_INTEGRATION_DIR/zsh/laplace-integration.zsh"
+  fi
+  builtin unset _laplace_file
+}

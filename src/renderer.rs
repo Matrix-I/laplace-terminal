@@ -10,8 +10,8 @@ use winit::window::Window;
 
 use crate::atlas::{Atlas, FontSet, GlyphStyle};
 use crate::grid::{
-    char_width, default_bg, default_fg, Grid, Hyperlink, SearchHit, BG_EXTRA, BG_STRIKE, BG_UNDERLINE,
-    BG_UNDERLINE_MASK, FG_BOLD, FG_EXTRA, FG_ITALIC, UNDERLINE_SINGLE,
+    char_width, Grid, Hyperlink, SearchHit, BG_EXTRA, BG_SET, BG_STRIKE, BG_UNDERLINE, BG_UNDERLINE_MASK, FG_BOLD,
+    FG_EXTRA, FG_ITALIC, FG_SET, UNDERLINE_SINGLE,
 };
 use crate::history::HistorySearch;
 use crate::search::SearchBar;
@@ -25,11 +25,19 @@ pub struct RenderPane<'a> {
     pub is_active: bool,
 }
 
+/// Instance `bg` bit: draw the scrollbar thumb at the right edge of this cell.
+const SCROLLBAR_THUMB: u32 = 0x20;
+/// Instance `bg` bit: the cell belongs to an unfocused split.
+const UNFOCUSED: u32 = 0x40;
+/// Instance `fg` bit: the slot is a color glyph (emoji) in the color atlas.
+const COLOR_GLYPH: u32 = 0x04;
+
 /// Per-cell GPU instance: 12 bytes, mirrors `Cell` with codepoint → atlas slot.
 ///
 /// `glyph`: bits 0..16 atlas slot, 16..19 pane divider flags, 19..31 underline
 /// color as 4-bit RGB, bit 31 set when that color is used. `bg` low byte: bits 0..3
-/// underline style, bit 3 strikethrough, bit 4 preview row, bit 7 explicit color.
+/// underline style, bit 3 strikethrough, bit 4 preview row, bit 5 scrollbar thumb,
+/// bit 7 explicit color.
 #[repr(C)]
 #[derive(Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
@@ -57,9 +65,30 @@ struct Uniforms {
     /// Underline top and strikethrough center, in px from the cell top.
     underline_y: f32,
     strike_y: f32,
+    /// OSC 12 cursor color as `0xRRGGBB00 | 1`, or 0 for the built-in color.
+    cursor_color: u32,
+    /// How much unfocused splits fade toward `unfocused_fill` (`1 - unfocused-split-opacity`).
+    unfocused_dim: f32,
+    /// `unfocused-split-fill` as `0xRRGGBB00 | 1`, or 0 for the default background.
+    unfocused_fill: u32,
+    /// `minimum-contrast` ratio between text and its background (1 = off).
+    min_contrast: f32,
+    /// Active pane's OSC 9;4 progress: `state << 8 | percent`, 0 = none.
+    progress: u32,
+    /// Active pane's first instance row, first column and width, for the progress bar.
+    progress_row: u32,
+    progress_col: u32,
+    progress_cols: u32,
+    /// `bell-features = border`: outline the window.
+    bell_border: u32,
+    /// 1 while drawing into a custom-shader texture (stored bottom row first).
+    flip_y: u32,
+    /// 0 = draw everything, 1 = backgrounds only, 2 = text only (images under the text).
+    layer: u32,
+    _pad: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 80);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 128);
 const _: () = assert!(std::mem::size_of::<Instance>() == 12);
 
 pub struct Renderer {
@@ -72,11 +101,19 @@ pub struct Renderer {
     bgl: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniform_buf: wgpu::Buffer,
+    /// Same as `bind_group` / `uniform_buf` for the text layer drawn over images with `z < 0`.
+    text_bind_group: wgpu::BindGroup,
+    text_uniform_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     instance_buf: wgpu::Buffer,
     instances: Vec<Instance>,
     atlas: Atlas,
-    pad: u32,
+    /// Window padding in physical pixels `(x, y)`, from `window-padding-x/y` points.
+    pad: (u32, u32),
+    pad_pt: (f32, f32),
+    /// `window-padding-balance`: spread the leftover pixels evenly around the grid.
+    pad_balance: bool,
+    scale_factor: f64,
     bg_opacity: f32,
     cursor_style: u32,
     force_full: bool,
@@ -86,6 +123,39 @@ pub struct Renderer {
     last_hovered_link: Option<(u64, Hyperlink)>,
     /// IME composition text drawn at the cursor on the last frame.
     last_preedit: String,
+    /// `cursor-color` (`0xRRGGBB00 | 1`, 0 = built-in), used when no OSC 12 is set.
+    config_cursor_color: u32,
+    /// `selection-background` / `selection-foreground` as instance colors.
+    selection_colors: (u32, u32),
+    /// Default fg / bg the instances were built against (the active pane's, which
+    /// may come from OSC 10 / 11); a change rebuilds every row.
+    last_defaults: (u32, u32),
+    /// Pane drawn as focused on the last frame; a change rebuilds every row.
+    last_active_pane: u64,
+    /// Active pane's OSC 9;4 progress on the last frame.
+    last_progress: Option<(u8, u8)>,
+    /// A bell rang (`bell-features = border`) and has not been seen yet.
+    bell_border: bool,
+    /// Shaped slot keys of the row being built (reused buffer).
+    shaped: Vec<u32>,
+    /// Bidi scratch of the row being built: its characters, levels and visual order.
+    bidi_chars: Vec<char>,
+    bidi_levels: Vec<u8>,
+    bidi_order: Vec<u16>,
+    /// Inline images and this frame's placements (reused buffers).
+    images: crate::image_layer::ImageLayer,
+    image_draws: Vec<crate::graphics::ImageDraw>,
+    placed: Vec<crate::image_layer::Placed>,
+    /// `custom-shader` passes, if any.
+    postfx: Option<crate::postfx::PostFx>,
+    /// Shaders animate (`iTime`) and `custom-shader-animation` allows it.
+    animate: bool,
+    /// Mouse position in px, for the shaders' `iMouse`.
+    mouse_px: (f32, f32),
+    /// `unfocused-split-opacity`, `unfocused-split-fill`, `minimum-contrast`.
+    unfocused_dim: f32,
+    unfocused_fill: u32,
+    min_contrast: f32,
 }
 
 impl Renderer {
@@ -183,6 +253,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -235,9 +315,18 @@ impl Renderer {
             ..Default::default()
         });
         let bind_group = make_bind_group(&device, &bgl, &uniform_buf, &atlas, &sampler);
+        let text_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("text uniforms"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let text_bind_group = make_bind_group(&device, &bgl, &text_uniform_buf, &atlas, &sampler);
         let instance_buf = make_instance_buf(&device, 1);
-        let pad = (window.scale_factor() * 4.0).round() as u32;
+        let scale_factor = window.scale_factor();
+        let pad_px = (scale_factor * 4.0).round() as u32;
 
+        let images = crate::image_layer::ImageLayer::new(&device, format);
         Renderer {
             surface,
             device,
@@ -248,11 +337,16 @@ impl Renderer {
             bgl,
             bind_group,
             uniform_buf,
+            text_bind_group,
+            text_uniform_buf,
             sampler,
             instance_buf,
             instances: Vec::new(),
             atlas,
-            pad,
+            pad: (pad_px, pad_px),
+            pad_pt: (4.0, 4.0),
+            pad_balance: false,
+            scale_factor,
             bg_opacity: bg_opacity.clamp(0.0, 1.0),
             cursor_style,
             force_full: true,
@@ -260,6 +354,25 @@ impl Renderer {
             last_cursor_visible: true,
             last_hovered_link: None,
             last_preedit: String::new(),
+            last_defaults: (0, 0),
+            last_active_pane: 0,
+            last_progress: None,
+            bell_border: false,
+            shaped: Vec::new(),
+            bidi_chars: Vec::new(),
+            bidi_levels: Vec::new(),
+            bidi_order: Vec::new(),
+            images,
+            image_draws: Vec::new(),
+            placed: Vec::new(),
+            postfx: None,
+            animate: false,
+            mouse_px: (0.0, 0.0),
+            unfocused_dim: 0.3,
+            unfocused_fill: 0,
+            min_contrast: 1.0,
+            config_cursor_color: 0,
+            selection_colors: (0x3D59_A180, 0xFFFF_FFFF),
         }
     }
 }
@@ -271,15 +384,92 @@ pub enum TabBarAction {
 }
 
 impl Renderer {
+    /// Offset in pixels of a window position inside the cell under it (for SGR
+    /// pixel mouse reports).
+    pub fn offset_in_cell(&self, x_px: f64, y_px: f64, show_tab_bar: bool) -> (usize, usize) {
+        let (ox, oy) = self.origin();
+        let top_y = if show_tab_bar { (oy + self.atlas.cell_h * 2) as f64 } else { oy as f64 };
+        let rel_x = (x_px - ox as f64).max(0.0) as u32;
+        let rel_y = (y_px - top_y).max(0.0) as u32;
+        ((rel_x % self.atlas.cell_w.max(1)) as usize, (rel_y % self.atlas.cell_h.max(1)) as usize)
+    }
+
     pub fn cell_size(&self) -> (u32, u32) {
         (self.atlas.cell_w, self.atlas.cell_h)
     }
 
     /// Columns and rows that fit in the current surface.
     pub fn grid_size(&self) -> (usize, usize) {
-        let w = self.config.width.saturating_sub(2 * self.pad);
-        let h = self.config.height.saturating_sub(2 * self.pad);
+        let w = self.config.width.saturating_sub(2 * self.pad.0);
+        let h = self.config.height.saturating_sub(2 * self.pad.1);
         ((w / self.atlas.cell_w).max(1) as usize, (h / self.atlas.cell_h).max(1) as usize)
+    }
+
+    /// Top-left pixel of the cell grid: the padding, plus half of the leftover
+    /// space on each axis with `window-padding-balance`.
+    fn origin(&self) -> (u32, u32) {
+        if !self.pad_balance {
+            return self.pad;
+        }
+        let (cols, rows) = self.grid_size();
+        let spare_x = self.config.width.saturating_sub(2 * self.pad.0 + cols as u32 * self.atlas.cell_w);
+        let spare_y = self.config.height.saturating_sub(2 * self.pad.1 + rows as u32 * self.atlas.cell_h);
+        (self.pad.0 + spare_x / 2, self.pad.1 + spare_y / 2)
+    }
+
+    /// `cursor-color`, `selection-background` and `selection-foreground` (`0xRRGGBB00`).
+    pub fn set_colors(&mut self, cursor: Option<u32>, selection_bg: Option<u32>, selection_fg: Option<u32>) {
+        self.config_cursor_color = cursor.map_or(0, |c| c | 1);
+        // Instances mark explicit colors with the low-byte bits the shader checks.
+        self.selection_colors = (selection_bg.map_or(0x3D59_A180, |c| c | 0x80), selection_fg.map_or(0xFFFF_FFFF, |c| c | 0xFF));
+        self.force_full = true;
+    }
+
+    /// Load `custom-shader` files (checked, broken ones reported and skipped).
+    /// `animation`: `None` never, `Some(false)` when a shader uses time,
+    /// `Some(true)` always.
+    pub fn set_custom_shaders(&mut self, paths: &[std::path::PathBuf], animation: Option<bool>) {
+        let (sources, uses_time) = crate::postfx::load(paths);
+        self.postfx = crate::postfx::PostFx::new(&self.device, self.config.format, &sources);
+        self.animate = self.postfx.is_some() && animation.is_some_and(|always| always || uses_time);
+        self.force_full = true;
+    }
+
+    /// A custom shader wants a new frame on its own (`iTime`).
+    pub fn animating(&self) -> bool {
+        self.animate
+    }
+
+    pub fn set_mouse(&mut self, x: f64, y: f64) {
+        self.mouse_px = (x as f32, y as f32);
+    }
+
+    /// Show or hide the bell border; returns whether it changed.
+    pub fn set_bell_border(&mut self, on: bool) -> bool {
+        let changed = self.bell_border != on;
+        self.bell_border = on;
+        self.force_full |= changed;
+        changed
+    }
+
+    /// `unfocused-split-opacity` (0.15..=1), `unfocused-split-fill` and `minimum-contrast` (1..=21).
+    pub fn set_contrast(&mut self, split_opacity: f32, split_fill: Option<u32>, min_contrast: f32) {
+        self.unfocused_dim = 1.0 - split_opacity.clamp(0.15, 1.0);
+        self.unfocused_fill = split_fill.map_or(0, |c| c | 1);
+        self.min_contrast = min_contrast.clamp(1.0, 21.0);
+    }
+
+    /// `window-padding-x` / `window-padding-y` in points and `window-padding-balance`.
+    pub fn set_padding(&mut self, x_pt: f32, y_pt: f32, balance: bool) {
+        self.pad_pt = (x_pt, y_pt);
+        self.pad_balance = balance;
+        self.update_pad();
+    }
+
+    fn update_pad(&mut self) {
+        let px = |pt: f32| (pt as f64 * self.scale_factor).round().max(0.0) as u32;
+        self.pad = (px(self.pad_pt.0), px(self.pad_pt.1));
+        self.force_full = true;
     }
 
     /// Columns and terminal PTY rows when accounting for the top tab bar + gap
@@ -308,7 +498,7 @@ impl Renderer {
         self.force_full = true;
     }
 
-    pub fn pad(&self) -> u32 {
+    pub fn pad(&self) -> (u32, u32) {
         self.pad
     }
 
@@ -338,17 +528,23 @@ impl Renderer {
         }
     }
 
+    fn rebind_atlas(&mut self) {
+        self.bind_group = make_bind_group(&self.device, &self.bgl, &self.uniform_buf, &self.atlas, &self.sampler);
+        self.text_bind_group =
+            make_bind_group(&self.device, &self.bgl, &self.text_uniform_buf, &self.atlas, &self.sampler);
+    }
+
     pub fn set_fonts(&mut self, fonts: Arc<FontSet>, px: f32) {
         self.atlas.set_fonts(&self.device, &self.queue, fonts, px);
-        self.bind_group = make_bind_group(&self.device, &self.bgl, &self.uniform_buf, &self.atlas, &self.sampler);
+        self.rebind_atlas();
         self.force_full = true;
     }
 
     pub fn set_font_px(&mut self, px: f32, scale_factor: f64) {
         self.atlas.set_px(&self.device, &self.queue, px);
-        self.bind_group = make_bind_group(&self.device, &self.bgl, &self.uniform_buf, &self.atlas, &self.sampler);
-        self.pad = (scale_factor * 4.0).round() as u32;
-        self.force_full = true;
+        self.rebind_atlas();
+        self.scale_factor = scale_factor;
+        self.update_pad();
     }
 
     pub fn hit_test_tab_bar(&self, x_px: f64, y_px: f64, titles: &[String]) -> Option<TabBarAction> {
@@ -361,7 +557,7 @@ impl Renderer {
         }
         let (cols, _) = self.grid_size();
         let tab_cols_total = cols.saturating_sub(2).max(1);
-        let col = ((x_px - self.pad as f64).max(0.0) as u32 / self.atlas.cell_w.max(1)) as usize;
+        let col = ((x_px - self.origin().0 as f64).max(0.0) as u32 / self.atlas.cell_w.max(1)) as usize;
         if col >= tab_cols_total {
             return Some(TabBarAction::NewTab);
         }
@@ -377,8 +573,9 @@ impl Renderer {
     /// Physical pixel position of the top-left corner of terminal cell `(row, col)`
     /// (the inverse of [`Renderer::pixel_to_cell`]).
     pub fn cell_origin_px(&self, row: usize, col: usize, show_tab_bar: bool) -> (f64, f64) {
-        let top_y = if show_tab_bar { self.pad + self.atlas.cell_h * 2 } else { self.pad };
-        let x = self.pad as f64 + (col as u32 * self.atlas.cell_w) as f64;
+        let (ox, oy) = self.origin();
+        let top_y = if show_tab_bar { oy + self.atlas.cell_h * 2 } else { oy };
+        let x = ox as f64 + (col as u32 * self.atlas.cell_w) as f64;
         let y = top_y as f64 + (row as u32 * self.atlas.cell_h) as f64;
         (x, y)
     }
@@ -400,11 +597,11 @@ impl Renderer {
             return None;
         }
         let top_y = if show_tab_bar {
-            (self.pad + self.atlas.cell_h * 2) as f64
+            (self.origin().1 + self.atlas.cell_h * 2) as f64
         } else {
-            self.pad as f64
+            self.origin().1 as f64
         };
-        let rel_x = (x_px - self.pad as f64).max(0.0);
+        let rel_x = (x_px - self.origin().0 as f64).max(0.0);
         let rel_y = (y_px - top_y).max(0.0);
         let col = ((rel_x as u32) / self.atlas.cell_w.max(1)) as usize;
         let row = ((rel_y as u32) / self.atlas.cell_h.max(1)) as usize;
@@ -421,10 +618,13 @@ impl Renderer {
         history_search: Option<&HistorySearch>,
         search: &SearchBar,
         preedit: &str,
+        inspector: Option<&[String]>,
     ) {
         if panes.is_empty() {
             return;
         }
+        // The inspector's content changes without the grid changing.
+        self.force_full |= inspector.is_some();
         if self.last_preedit != preedit {
             // Repaint the cells the previous composition covered.
             self.force_full = true;
@@ -444,16 +644,33 @@ impl Renderer {
         let n = cols * total_rows;
 
         let active_pane = panes.iter().find(|p| p.is_active).unwrap_or(&panes[0]);
-        let (active_cur, active_dirty) = {
+        let (active_cur, active_dirty, defaults, cursor_color, progress) = {
             let g = active_pane.grid.lock();
-            let cur = g.cursor_pos().map(|(cx, cy)| (active_pane.rect.col + cx, active_pane.rect.row + cy + top_rows));
+            let cur = g
+                .cursor_pos()
+                .map(|(cx, cy)| (active_pane.rect.col + g.visual_col(cy, cx), active_pane.rect.row + cy + top_rows));
             let dirty = g.all_dirty || g.dirty.iter().any(|&d| d);
-            (cur, dirty)
+            let cursor_color = g.cursor_color().map_or(self.config_cursor_color, |c| c | 1);
+            (cur, dirty, (g.fg_color(), g.bg_color()), cursor_color, g.progress)
         };
+        if progress != self.last_progress {
+            self.last_progress = progress;
+            self.force_full = true;
+        }
+        // The active pane's default colors go to the shader; other panes whose
+        // defaults differ get explicit colors per cell (see `build_pane_row`).
+        if defaults != self.last_defaults {
+            self.last_defaults = defaults;
+            self.force_full = true;
+        }
+        if active_pane.id != self.last_active_pane {
+            self.last_active_pane = active_pane.id;
+            self.force_full = true;
+        }
         let effective_visible = active_cur.is_some() && cursor_blink_on;
 
         // Fast check before acquiring a Metal/Vulkan swapchain drawable
-        if !self.force_full && !is_search_open {
+        if !self.force_full && !is_search_open && !self.animate {
             let any_dirty = active_dirty || panes.iter().filter(|p| p.id != active_pane.id).any(|p| {
                 let g = p.grid.lock();
                 g.all_dirty || g.dirty.iter().any(|&d| d)
@@ -506,6 +723,7 @@ impl Renderer {
             let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
             let mut g = pane.grid.lock();
             let pane_full = full || g.all_dirty;
+            let pane_defaults = Some((g.fg_color(), g.bg_color())).filter(|&d| d != defaults);
             let p_cols = pane.rect.cols.min(g.cols);
             let p_rows = pane.rect.rows.min(g.rows);
 
@@ -524,6 +742,7 @@ impl Renderer {
                             pane.is_active,
                             active_rect.as_ref(),
                             pane_link,
+                            pane_defaults,
                         );
                         lo = lo.min(dst_row);
                         hi = hi.max(dst_row);
@@ -541,6 +760,7 @@ impl Renderer {
             for pane in panes {
                 let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
                 let g = pane.grid.lock();
+                let pane_defaults = Some((g.fg_color(), g.bg_color())).filter(|&d| d != defaults);
                 let p_cols = pane.rect.cols.min(g.cols);
                 let p_rows = pane.rect.rows.min(g.rows);
                 for r in 0..p_rows {
@@ -557,6 +777,7 @@ impl Renderer {
                             pane.is_active,
                             active_rect.as_ref(),
                             pane_link,
+                            pane_defaults,
                         );
                     }
                 }
@@ -640,6 +861,10 @@ impl Renderer {
             }
         }
 
+        if let Some(lines) = inspector {
+            self.build_inspector(cols, top_rows, total_rows, lines, &mut lo, &mut hi);
+        }
+
         if lo <= hi {
             let a = lo * cols;
             let b = (hi + 1) * cols;
@@ -676,25 +901,77 @@ impl Renderer {
             screen: [self.config.width as f32, self.config.height as f32],
             cell: [self.atlas.cell_w as f32, self.atlas.cell_h as f32],
             atlas_size: [self.atlas.size as f32; 2],
-            offset: [self.pad as f32; 2],
+            offset: {
+                let (ox, oy) = self.origin();
+                [ox as f32, oy as f32]
+            },
             cols: cols as u32,
             slots_per_row: self.atlas.slots_per_row,
             cursor: [cx as u32, cy as u32],
             cursor_visible: effective_cursor_visible as u32,
             cursor_style: active_cursor_style,
-            default_fg: default_fg(),
-            default_bg: default_bg(),
+            default_fg: defaults.0,
+            default_bg: defaults.1,
             tab_info,
             bg_opacity: self.bg_opacity,
             underline_y,
             strike_y,
+            cursor_color,
+            unfocused_dim: self.unfocused_dim,
+            unfocused_fill: self.unfocused_fill,
+            min_contrast: self.min_contrast,
+            progress: progress.map_or(0, |(state, pct)| (state as u32) << 8 | pct.min(100) as u32),
+            progress_row: (active_pane.rect.row + top_rows) as u32,
+            progress_col: active_pane.rect.col as u32,
+            progress_cols: active_pane.rect.cols as u32,
+            bell_border: self.bell_border as u32,
+            flip_y: self.postfx.is_some() as u32,
+            layer: 0,
+            _pad: 0,
         };
-        self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
-        let view = frame.texture.create_view(&Default::default());
+        // Inline images of every pane, in px, clipped to their pane.
+        self.placed.clear();
+        let (cw, ch) = (self.atlas.cell_w, self.atlas.cell_h);
+        for pane in panes {
+            pane.grid.lock().visible_images(&mut self.image_draws);
+            let (px0, py0) = self.cell_origin_px(pane.rect.row, pane.rect.col, tab_bar.is_some());
+            let clip = [px0 as u32, py0 as u32, pane.rect.cols as u32 * cw, pane.rect.rows as u32 * ch];
+            for draw in self.image_draws.drain(..) {
+                let x = px0 as f32 + (draw.col as u32 * cw) as f32;
+                let y = py0 as f32 + draw.row as f32 * ch as f32;
+                let rect = match draw.px {
+                    Some([dx, dy, w, h]) => [x + dx, y + dy, w, h],
+                    None if draw.fit => [x, y, (draw.cols as u32 * cw) as f32, (draw.rows as u32 * ch) as f32],
+                    None => [x, y, draw.src[2], draw.src[3]],
+                };
+                self.placed.push(crate::image_layer::Placed { draw, rect, clip });
+            }
+        }
+        // Lower z first; equal z keeps the placement order.
+        self.placed.sort_by_key(|p| p.draw.z);
+        // Images under the text split the cells into a background and a text layer.
+        let layered = self.placed.first().is_some_and(|p| p.draw.z < 0);
+        if layered {
+            let text = Uniforms { layer: 2, ..u };
+            self.queue.write_buffer(&self.text_uniform_buf, 0, bytemuck::bytes_of(&text));
+        }
+        let u = Uniforms { layer: layered as u32, ..u };
+        self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        let flip = self.postfx.is_some();
+        let target = (self.config.width, self.config.height);
+        self.images.prepare(&self.device, &self.queue, &self.placed, target, flip);
+
+        let screen = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        // With custom shaders the cells go to a texture the shaders read.
+        let (width, height) = (self.config.width, self.config.height);
+        let view = match &mut self.postfx {
+            Some(fx) => fx.cell_target(&self.device, width, height).clone(),
+            None => screen.clone(),
+        };
         {
-            let bg = default_bg();
+            let bg = defaults.1;
             let c = |s: u32| ((bg >> s) & 0xFF) as f64 / 255.0;
             let clear_a = if self.bg_opacity < 1.0 { self.bg_opacity as f64 } else { 1.0 };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -711,10 +988,31 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.instance_buf.slice(..));
-            pass.draw(0..4, 0..(cols * total_rows) as u32);
+            let instances = 0..(cols * total_rows) as u32;
+            if layered {
+                // Kitty z order: below cell backgrounds, below the text, above it.
+                use crate::graphics::Z_BELOW_BG;
+                self.images.draw(&mut pass, flip, target.1, i32::MIN..Z_BELOW_BG);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+                pass.draw(0..4, instances.clone());
+                self.images.draw(&mut pass, flip, target.1, Z_BELOW_BG..0);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.text_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+                pass.draw(0..4, instances);
+                self.images.draw(&mut pass, flip, target.1, 0..i32::MAX);
+            } else {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.instance_buf.slice(..));
+                pass.draw(0..4, instances);
+                self.images.draw(&mut pass, flip, target.1, i32::MIN..i32::MAX);
+            }
+        }
+        if let Some(fx) = &mut self.postfx {
+            fx.run(&self.device, &self.queue, &mut encoder, &screen, self.mouse_px);
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -733,9 +1031,9 @@ impl Renderer {
         is_active: bool,
         active_rect: Option<&PaneRect>,
         hovered_link: Option<&Hyperlink>,
+        pane_defaults: Option<(u32, u32)>,
     ) {
-        const SEL_BG: u32 = 0x3D59_A180;
-        const SEL_FG: u32 = 0xFFFF_FFFF;
+        let (sel_bg, sel_fg) = self.selection_colors;
         const MATCH_BG: u32 = 0x5C4D_2080; // Dim amber for every find match
         const MATCH_FG: u32 = 0xF9E2_AFFF;
         const CURRENT_BG: u32 = 0xF9A8_2580; // Bright orange for the focused match
@@ -743,8 +1041,15 @@ impl Renderer {
         let row = g.display_row(src_row);
         let hits = g.search_hits(src_row);
         let start = dst_row * window_cols + dst_col;
-        let out = &mut self.instances[start..start + p_cols];
         let is_link_row = hovered_link.is_some_and(|l| l.row == src_row);
+        // Overlay scrollbar thumb in the last column while scrolled back.
+        let (history, offset) = g.scroll_position();
+        let on_thumb = offset > 0 && {
+            let total = history + g.rows;
+            let len = (g.rows * g.rows / total).max(1);
+            let start = (history - offset) * g.rows / total;
+            src_row >= start && src_row < start + len
+        };
         let is_last_row = src_row + 1 == rect.rows;
 
         let is_border_right_active = is_active
@@ -761,12 +1066,56 @@ impl Renderer {
                     && ar.col + ar.cols > rect.col
             });
 
+        // Right-to-left text: cells are drawn in visual order (`col` is the
+        // logical column, `v` where it is drawn) and Arabic letters joined.
+        let (mut chars, mut levels, mut order) =
+            (std::mem::take(&mut self.bidi_chars), std::mem::take(&mut self.bidi_levels), std::mem::take(&mut self.bidi_order));
+        let bidi = g.bidi_order(src_row, &mut chars, &mut levels, &mut order);
+        // Ligatures / `font-feature` substitutions for this row (not mixed with bidi).
+        let mut shaped = std::mem::take(&mut self.shaped);
+        let any_shaped = !bidi && self.atlas.shape_row(row, &mut shaped);
+        let out = &mut self.instances[start..start + p_cols];
         // Right half of a double-width glyph, drawn in the placeholder cell after it.
         let mut wide_right: Option<u16> = None;
-        for (col, (dst, cell)) in out.iter_mut().zip(row).enumerate() {
+        for (v, dst) in out.iter_mut().enumerate().take(row.len()) {
+            let col = if bidi { order[v] as usize } else { v };
+            let cell = &row[col];
+            let shaped_key = if any_shaped { shaped[col] } else { 0 };
+            // Arabic contextual form from the logical neighbours.
+            let form = if bidi {
+                let c = chars[col];
+                let joined = crate::bidi::arabic_form(col.checked_sub(1).map(|i| chars[i]), c, chars.get(col + 1).copied());
+                (joined != c).then_some(joined)
+            } else {
+                None
+            };
             let slot = match (cell.codepoint, wide_right.take()) {
+                _ if shaped_key == crate::atlas::SHAPED_BLANK => crate::atlas::BLANK_SLOT,
+                _ if shaped_key != 0 => self.atlas.slot(&self.queue, shaped_key),
                 (0, Some(right)) => right,
+                // Kitty unicode placeholder: the image is drawn over it.
+                (cp, _) if cp & crate::grid::PH_FLAG != 0 => crate::atlas::BLANK_SLOT,
+                (cp, _) if cp & crate::grid::CLUSTER_FLAG != 0 => {
+                    let width = if crate::grid::is_wide_cp(cp) { 2 } else { 1 };
+                    let style = GlyphStyle { bold: cell.fg & FG_BOLD != 0, italic: cell.fg & FG_ITALIC != 0 };
+                    let text = g.cluster(cp).unwrap_or("");
+                    // A joined Arabic letter keeps its marks.
+                    let joined: String;
+                    let text = match form {
+                        Some(f) => {
+                            joined = std::iter::once(f).chain(text.chars().skip(1)).collect();
+                            joined.as_str()
+                        }
+                        None => text,
+                    };
+                    let (left, right) = self.atlas.cluster_slots(&self.queue, text, width, style);
+                    if width == 2 {
+                        wide_right = Some(right);
+                    }
+                    left
+                }
                 (cp, _) => {
+                    let cp = form.map_or(cp, |f| f as u32);
                     let width = char::from_u32(cp).map_or(1, char_width);
                     let style = GlyphStyle { bold: cell.fg & FG_BOLD != 0, italic: cell.fg & FG_ITALIC != 0 };
                     let (left, right) = self.atlas.glyph_slots(&self.queue, cp, width, style);
@@ -785,7 +1134,7 @@ impl Renderer {
 
             // Divider flags (bit 0: right, bit 1: bottom, bit 2: active) packed into high 16 bits of glyph
             let mut div_flags = 0u32;
-            if rect.has_border_right && col + 1 == rect.cols {
+            if rect.has_border_right && v + 1 == rect.cols {
                 div_flags |= 1;
                 if is_border_right_active {
                     div_flags |= 4;
@@ -805,15 +1154,36 @@ impl Renderer {
 
             let hit = hits.at(col);
             if g.is_selected(src_row, col) {
-                *dst = Instance { glyph: glyph_with_div, fg: SEL_FG, bg: SEL_BG | deco };
+                *dst = Instance { glyph: glyph_with_div, fg: sel_fg, bg: sel_bg | deco };
             } else if hit != SearchHit::None {
                 let (fg, bg) = if hit == SearchHit::Current { (CURRENT_FG, CURRENT_BG) } else { (MATCH_FG, MATCH_BG) };
                 *dst = Instance { glyph: glyph_with_div, fg, bg: bg | deco };
             } else {
-                let bg = (cell.bg & !(BG_EXTRA | BG_UNDERLINE_MASK | BG_STRIKE)) | deco;
-                *dst = Instance { glyph: glyph_with_div, fg: cell.fg & !FG_EXTRA, bg };
+                let mut fg = cell.fg & !FG_EXTRA;
+                let mut bg = (cell.bg & !(BG_EXTRA | BG_UNDERLINE_MASK | BG_STRIKE)) | deco;
+                // This pane's OSC 10 / 11 defaults differ from the shader's.
+                if let Some((pane_fg, pane_bg)) = pane_defaults {
+                    if fg & FG_SET == 0 {
+                        fg |= pane_fg | FG_SET;
+                    }
+                    if bg & BG_SET == 0 {
+                        bg |= pane_bg | BG_SET;
+                    }
+                }
+                *dst = Instance { glyph: glyph_with_div, fg, bg };
+            }
+            if self.atlas.is_color(slot) {
+                dst.fg |= COLOR_GLYPH;
+            }
+            if on_thumb && v + 1 == p_cols {
+                dst.bg |= SCROLLBAR_THUMB;
+            }
+            if !is_active {
+                dst.bg |= UNFOCUSED;
             }
         }
+        self.shaped = shaped;
+        (self.bidi_chars, self.bidi_levels, self.bidi_order) = (chars, levels, order);
     }
 
     fn build_tab_bar_row(&mut self, cols: usize, titles: &[String], active_idx: usize) {
@@ -889,6 +1259,75 @@ impl Renderer {
     fn search_box_geometry(cols: usize, top_rows: usize, total_rows: usize) -> Option<(usize, usize, usize)> {
         let w = 46.min(cols.saturating_sub(2));
         (w >= 24 && total_rows >= top_rows + 4).then(|| (cols - w - 1, top_rows, w))
+    }
+
+    /// Inspector panel in the bottom-right corner: a frame around `lines`,
+    /// the first of which is the title.
+    fn build_inspector(&mut self, cols: usize, top_rows: usize, total_rows: usize, lines: &[String], lo: &mut usize, hi: &mut usize) {
+        const BOX_BG: u32 = 0x1819_2480;
+        const BORDER_FG: u32 = 0x585B_70FF;
+        const TITLE_FG: u32 = 0x89DC_EBFF;
+        const LABEL_FG: u32 = 0xA6AD_C8FF;
+        const VALUE_FG: u32 = 0xF2F2_F7FF;
+        const LABEL_COLS: usize = 10;
+        let Some((title, body)) = lines.split_first() else { return };
+        let width = body.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(title.chars().count() + 4) + 4;
+        let w = width.min(cols);
+        let h = body.len() + 2;
+        if w < 8 || h + top_rows > total_rows {
+            return;
+        }
+        let (x0, y0) = (cols - w, total_rows - h);
+
+        let queue = &self.queue;
+        let atlas = &mut self.atlas;
+        let instances = &mut self.instances;
+        let mut put = |row: usize, col: usize, ch: char, fg: u32| {
+            if col >= w {
+                return;
+            }
+            let width = char_width(ch).max(1);
+            if col + width > w {
+                return;
+            }
+            let (left, right) = atlas.glyph_slots(queue, ch as u32, width, GlyphStyle::default());
+            let i = (y0 + row) * cols + x0 + col;
+            instances[i] = Instance { glyph: left as u32, fg, bg: BOX_BG };
+            if width == 2 {
+                instances[i + 1] = Instance { glyph: right as u32, fg, bg: BOX_BG };
+            }
+        };
+        for row in 0..h {
+            for c in 0..w {
+                let ch = match (row, c) {
+                    (0, 0) => '╭',
+                    (0, _) if c == w - 1 => '╮',
+                    (_, 0) if row == h - 1 => '╰',
+                    (_, _) if row == h - 1 && c == w - 1 => '╯',
+                    (0, _) => '─',
+                    (_, _) if row == h - 1 => '─',
+                    (_, 0) => '│',
+                    (_, _) if c == w - 1 => '│',
+                    _ => ' ',
+                };
+                put(row, c, ch, BORDER_FG);
+            }
+        }
+        for (i, ch) in format!(" {title} ").chars().enumerate() {
+            put(0, 2 + i, ch, TITLE_FG);
+        }
+        for (r, line) in body.iter().enumerate() {
+            let mut col = 2;
+            for (i, ch) in line.chars().enumerate() {
+                if col + 2 >= w {
+                    break;
+                }
+                put(r + 1, col, ch, if i < LABEL_COLS { LABEL_FG } else { VALUE_FG });
+                col += char_width(ch).max(1);
+            }
+        }
+        *lo = (*lo).min(y0);
+        *hi = (*hi).max(y0 + h - 1);
     }
 
     fn build_search_box(
@@ -1366,6 +1805,7 @@ fn make_bind_group(
             wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas.view) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas.color_view) },
         ],
     })
 }

@@ -14,6 +14,8 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+pub use crate::update::{AutoUpdateChannel, AutoUpdateMode};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
     Block,
@@ -46,6 +48,33 @@ pub enum ShellIntegration {
     None,
     Zsh,
     Bash,
+    Fish,
+    Nushell,
+    Elvish,
+}
+
+/// What a BEL does (`bell-features`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BellFeatures {
+    /// Play the system alert sound.
+    pub system: bool,
+    /// Bounce the Dock icon / request attention while unfocused.
+    pub attention: bool,
+    /// Mark the tab title with 🔔 until it is seen.
+    pub title: bool,
+    /// Play `bell-audio-path`.
+    pub audio: bool,
+    /// Outline the window until it is focused or a key is pressed.
+    pub border: bool,
+}
+
+/// `confirm-close-surface`: when to ask before closing a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmClose {
+    Never,
+    /// Only while a program other than the shell is running.
+    Running,
+    Always,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,8 +83,6 @@ pub struct ShellFeatures {
     pub sudo: bool,
     pub title: bool,
 }
-
-pub use crate::update::{AutoUpdateChannel, AutoUpdateMode};
 
 pub const DEFAULT_PALETTE: [u32; 16] = [
     0x121316, 0xF38BA8, 0xA6E3A1, 0xF5A97F, 0x00BFE3, 0xCBA6F7, 0x89DCEB, 0xD9E0EE,
@@ -95,7 +122,59 @@ pub struct Config {
     pub cursor_style_blink: Option<bool>,
     pub shell_integration: ShellIntegration,
     pub shell_integration_features: ShellFeatures,
+    /// Horizontal / vertical window padding in points.
+    pub window_padding_x: f32,
+    pub window_padding_y: f32,
+    /// Spread leftover pixels evenly around the grid.
+    pub window_padding_balance: bool,
+    /// Cursor color `0xRRGGBB00` (OSC 12 still overrides it per terminal).
+    pub cursor_color: Option<u32>,
+    /// Selection colors `0xRRGGBB00`.
+    pub selection_background: Option<u32>,
+    pub selection_foreground: Option<u32>,
+    /// Copy a mouse selection to the clipboard as soon as it is made.
+    pub copy_on_select: bool,
+    /// Fixed window title instead of the running program's.
+    pub title: Option<String>,
+    pub bell_features: BellFeatures,
+    /// Sound file for `bell-features = audio`, and its volume `0..=1`.
+    pub bell_audio_path: Option<PathBuf>,
+    pub bell_audio_volume: f32,
+    pub confirm_close_surface: ConfirmClose,
+    /// macOS: new tabs are native window tabs (NSWindow tabbing) instead of
+    /// Laplace's own tab bar.
+    pub macos_native_tabs: bool,
+    /// `custom-shader` files, applied in order (Shadertoy-style GLSL).
+    pub custom_shaders: Vec<PathBuf>,
+    /// `custom-shader-animation`: `None` = never, `Some(false)` = while
+    /// focused (`true`), `Some(true)` = `always`.
+    pub custom_shader_animation: Option<bool>,
+    /// `keybind = global:<trigger>=toggle_quick_terminal` (macOS).
+    pub quick_terminal_hotkey: Option<crate::keymap::Trigger>,
+    /// Hide the Quick Terminal when it loses focus.
+    pub quick_terminal_autohide: bool,
+    /// `scrollback-limit` in bytes (Ghostty semantics); `None` = 5000 lines.
+    pub scrollback_limit: Option<usize>,
+    /// `grapheme-width-method = unicode` (true, default) starts terminals with
+    /// DEC mode 2027 on; `legacy` gives every codepoint its own width.
+    pub grapheme_unicode: bool,
+    /// Opacity of unfocused splits, `0.15..=1.0`, faded toward `unfocused_split_fill`.
+    pub unfocused_split_opacity: f32,
+    /// Color unfocused splits fade toward (`0xRRGGBB00`); `None` = the background.
+    pub unfocused_split_fill: Option<u32>,
+    /// Minimum WCAG contrast ratio between text and its background, `1..=21`.
+    pub minimum_contrast: f32,
+    /// `adjust-cell-width` / `adjust-cell-height` and `font-thicken`.
+    pub adjust_cell_width: crate::atlas::MetricAdjust,
+    pub adjust_cell_height: crate::atlas::MetricAdjust,
+    pub font_thicken: bool,
+    /// `font-feature` (`-calt`, `ss01`, ...); ligatures are on unless disabled.
+    pub font_features: Vec<String>,
+    /// `keybind = trigger=action` entries in file order (later ones win).
+    pub keybinds: Vec<(crate::keymap::Trigger, crate::keymap::Binding)>,
+    /// Auto update checking mode (`check`, `download`, `off`).
     pub auto_update: AutoUpdateMode,
+    /// Channel for auto updates (`stable`, `tip`).
     pub auto_update_channel: AutoUpdateChannel,
 }
 
@@ -127,8 +206,35 @@ impl Default for Config {
             cursor_style_blink: None,
             shell_integration: ShellIntegration::Detect,
             shell_integration_features: ShellFeatures { cursor: true, sudo: false, title: true },
-            auto_update: AutoUpdateMode::default(),
-            auto_update_channel: AutoUpdateChannel::default(),
+            window_padding_x: 4.0,
+            window_padding_y: 4.0,
+            window_padding_balance: false,
+            keybinds: Vec::new(),
+            cursor_color: None,
+            selection_background: None,
+            selection_foreground: None,
+            copy_on_select: true,
+            title: None,
+            bell_features: BellFeatures { system: false, attention: true, title: true, audio: false, border: false },
+            bell_audio_path: None,
+            bell_audio_volume: 0.5,
+            scrollback_limit: None,
+            grapheme_unicode: true,
+            confirm_close_surface: ConfirmClose::Running,
+            macos_native_tabs: false,
+            custom_shaders: Vec::new(),
+            custom_shader_animation: Some(false),
+            quick_terminal_hotkey: None,
+            quick_terminal_autohide: true,
+            unfocused_split_opacity: 0.7,
+            unfocused_split_fill: None,
+            minimum_contrast: 1.0,
+            adjust_cell_width: crate::atlas::MetricAdjust::None,
+            adjust_cell_height: crate::atlas::MetricAdjust::None,
+            font_thicken: false,
+            font_features: Vec::new(),
+            auto_update: AutoUpdateMode::Check,
+            auto_update_channel: AutoUpdateChannel::Stable,
         }
     }
 }
@@ -193,22 +299,25 @@ impl Config {
     pub fn parse(text: &str) -> (Config, Vec<String>) {
         let mut cfg = Config::default();
         let mut errors = Vec::new();
+        let mut entries = Vec::new();
         for (i, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+            match parse_line(raw) {
+                Some(Ok(entry)) => entries.push((i + 1, entry)),
+                Some(Err(line)) => errors.push(format!("line {}: expected `key = value`, got `{line}`", i + 1)),
+                None => {}
             }
-            let Some((key, value)) = line.split_once('=') else {
-                errors.push(format!("line {}: expected `key = value`, got `{line}`", i + 1));
-                continue;
-            };
-            let key = key.trim();
-            let mut value = value.trim();
-            if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-                value = &value[1..value.len() - 1];
+        }
+        // As in Ghostty, the theme is applied first, so every other setting in
+        // the file wins over it wherever it appears.
+        if let Some(&(n, (_, value))) = entries.iter().rev().find(|(_, (k, _))| *k == "theme") {
+            let name = theme_variant(value, crate::grid::color_scheme_is_dark());
+            if !value.is_empty() && !cfg.apply_theme(name) {
+                errors.push(format!("line {n}: theme: unknown theme `{value}`"));
             }
+        }
+        for (n, (key, value)) in entries {
             if let Err(e) = cfg.set(key, value) {
-                errors.push(format!("line {}: {key}: {e}", i + 1));
+                errors.push(format!("line {n}: {key}: {e}"));
             }
         }
         if cfg.window_width.is_some() != cfg.window_height.is_some() {
@@ -319,7 +428,10 @@ impl Config {
                     "none" => ShellIntegration::None,
                     "zsh" => ShellIntegration::Zsh,
                     "bash" => ShellIntegration::Bash,
-                    v => return Err(format!("expected detect, none, zsh or bash, got `{v}`")),
+                    "fish" => ShellIntegration::Fish,
+                    "nushell" | "nu" => ShellIntegration::Nushell,
+                    "elvish" => ShellIntegration::Elvish,
+                    v => return Err(format!("expected detect, none, zsh, bash, fish, nushell or elvish, got `{v}`")),
                 }
             }
             "shell-integration-features" => {
@@ -347,20 +459,8 @@ impl Config {
                     }
                 }
             }
-            "theme" => {
-                if empty {
-                    self.theme = None;
-                } else {
-                    self.theme = Some(value.to_string());
-                    if let Some(t) = lookup_theme(value).or_else(|| load_theme_file(value)) {
-                        self.background = t.background;
-                        self.foreground = t.foreground;
-                        self.palette = t.palette;
-                    } else {
-                        return Err(format!("unknown theme `{value}`"));
-                    }
-                }
-            }
+            // Applied before the rest of the file (see `parse`).
+            "theme" => self.theme = (!empty).then(|| value.to_string()),
             "palette" => {
                 if empty {
                     self.palette = DEFAULT_PALETTE;
@@ -379,44 +479,212 @@ impl Config {
                     self.palette[idx] = col;
                 }
             }
-            "auto-update" => {
+            "window-padding-x" => self.window_padding_x = if empty { d.window_padding_x } else { parse_padding(value)? },
+            "window-padding-y" => self.window_padding_y = if empty { d.window_padding_y } else { parse_padding(value)? },
+            "cursor-color" => self.cursor_color = if empty { None } else { Some(parse_color(value)?) },
+            "selection-background" => self.selection_background = if empty { None } else { Some(parse_color(value)?) },
+            "selection-foreground" => self.selection_foreground = if empty { None } else { Some(parse_color(value)?) },
+            // Ghostty also accepts `clipboard` (copy to the system clipboard, as Laplace does).
+            "copy-on-select" => {
+                self.copy_on_select = match value {
+                    "" | "true" | "clipboard" => true,
+                    "false" => false,
+                    v => return Err(format!("expected true, false or clipboard, got `{v}`")),
+                }
+            }
+            "title" => self.title = (!empty).then(|| value.to_string()),
+            "adjust-cell-width" => {
+                self.adjust_cell_width = if empty { d.adjust_cell_width } else { crate::atlas::MetricAdjust::parse(value)? }
+            }
+            "adjust-cell-height" => {
+                self.adjust_cell_height = if empty { d.adjust_cell_height } else { crate::atlas::MetricAdjust::parse(value)? }
+            }
+            "font-feature" => {
                 if empty {
-                    self.auto_update = AutoUpdateMode::default();
+                    self.font_features.clear();
+                }
+                for f in value.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                    crate::atlas::parse_font_feature(f)?;
+                    self.font_features.push(f.to_string());
+                }
+            }
+            "font-thicken" => self.font_thicken = if empty { d.font_thicken } else { parse_bool(value)? },
+            "quick-terminal-autohide" => {
+                self.quick_terminal_autohide = if empty { d.quick_terminal_autohide } else { parse_bool(value)? }
+            }
+            "custom-shader" => {
+                if empty {
+                    self.custom_shaders.clear();
                 } else {
-                    match value.to_ascii_lowercase().as_str() {
-                        "check" => self.auto_update = AutoUpdateMode::Check,
-                        "download" => self.auto_update = AutoUpdateMode::Download,
-                        "off" => self.auto_update = AutoUpdateMode::Off,
-                        _ => return Err(format!("invalid auto-update `{value}`, expected check, download, or off")),
+                    self.custom_shaders.push(expand_home(value));
+                }
+            }
+            "custom-shader-animation" => {
+                self.custom_shader_animation = match value {
+                    "" | "true" => Some(false),
+                    "false" => None,
+                    "always" => Some(true),
+                    v => return Err(format!("expected true, false or always, got `{v}`")),
+                }
+            }
+            "macos-native-tabs" => self.macos_native_tabs = if empty { d.macos_native_tabs } else { parse_bool(value)? },
+            "confirm-close-surface" => {
+                self.confirm_close_surface = match value {
+                    "" | "true" => ConfirmClose::Running,
+                    "false" => ConfirmClose::Never,
+                    "always" => ConfirmClose::Always,
+                    v => return Err(format!("expected true, false or always, got `{v}`")),
+                }
+            }
+            "grapheme-width-method" => {
+                self.grapheme_unicode = match value {
+                    "" | "unicode" => true,
+                    "legacy" | "wcswidth" => false,
+                    _ => return Err(format!("expected `unicode` or `legacy`, got `{value}`")),
+                }
+            }
+            "scrollback-limit" => self.scrollback_limit = if empty { None } else { Some(value.parse::<usize>().map_err(|_| format!("invalid integer `{value}`"))?) },
+            "unfocused-split-opacity" => {
+                self.unfocused_split_opacity = if empty { d.unfocused_split_opacity } else { parse_f32(value)?.clamp(0.15, 1.0) }
+            }
+            "unfocused-split-fill" => self.unfocused_split_fill = if empty { None } else { Some(parse_color(value)?) },
+            "minimum-contrast" => {
+                self.minimum_contrast = if empty { d.minimum_contrast } else { parse_f32(value)?.clamp(1.0, 21.0) }
+            }
+            "bell-features" => {
+                if empty {
+                    self.bell_features = d.bell_features;
+                    return Ok(());
+                }
+                let f = &mut self.bell_features;
+                for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let (on, name) = match item.strip_prefix("no-") {
+                        Some(n) => (false, n),
+                        None => (true, item),
+                    };
+                    match name {
+                        "system" => f.system = on,
+                        "attention" => f.attention = on,
+                        "title" => f.title = on,
+                        "audio" => f.audio = on,
+                        "border" => f.border = on,
+                        other => return Err(format!("unknown bell feature `{other}`")),
                     }
                 }
+            }
+            "bell-audio-path" => self.bell_audio_path = (!empty).then(|| expand_home(value)),
+            "bell-audio-volume" => {
+                self.bell_audio_volume = if empty { d.bell_audio_volume } else { parse_f32(value)?.clamp(0.0, 1.0) }
+            }
+            "keybind" => {
+                if empty || value == "clear" {
+                    self.keybinds.clear();
+                } else if let Some(rest) = value.strip_prefix("global:") {
+                    // System-wide hotkeys exist for the Quick Terminal only.
+                    match parse_keybind(rest)? {
+                        (t, crate::keymap::Binding::Action(crate::keymap::Action::ToggleQuickTerminal)) => {
+                            self.quick_terminal_hotkey = Some(t)
+                        }
+                        _ => return Err("only toggle_quick_terminal can be bound globally".into()),
+                    }
+                } else {
+                    self.keybinds.push(parse_keybind(value)?);
+                }
+            }
+            "window-padding-balance" => {
+                self.window_padding_balance = if empty { d.window_padding_balance } else { parse_bool(value)? }
+            }
+            "auto-update" => {
+                self.auto_update = if empty {
+                    d.auto_update
+                } else {
+                    match value {
+                        "check" => AutoUpdateMode::Check,
+                        "download" => AutoUpdateMode::Download,
+                        "off" | "false" => AutoUpdateMode::Off,
+                        "true" => AutoUpdateMode::Check,
+                        _ => return Err(format!("expected 'check', 'download', or 'off', got '{value}'")),
+                    }
+                };
             }
             "auto-update-channel" => {
-                if empty {
-                    self.auto_update_channel = AutoUpdateChannel::default();
+                self.auto_update_channel = if empty {
+                    d.auto_update_channel
                 } else {
-                    match value.to_ascii_lowercase().as_str() {
-                        "stable" => self.auto_update_channel = AutoUpdateChannel::Stable,
-                        "tip" => self.auto_update_channel = AutoUpdateChannel::Tip,
-                        _ => return Err(format!("invalid auto-update-channel `{value}`, expected stable or tip")),
+                    match value {
+                        "stable" => AutoUpdateChannel::Stable,
+                        "tip" => AutoUpdateChannel::Tip,
+                        _ => return Err(format!("expected 'stable' or 'tip', got '{value}'")),
                     }
-                }
+                };
             }
-            "font-thicken"
-            | "minimum-contrast"
-            | "link-url"
-            | "copy-on-select"
+            "link-url"
             | "adjust-cursor-thickness"
             | "window-inherit-working-directory"
-            | "unfocused-split-opacity"
-            | "confirm-close-surface"
-            | "alpha-blending"
-            | "cursor-color" => {
+            | "alpha-blending" => {
                 // Ghostty-compatible configuration keys accepted cleanly.
             }
             _ => return Err("unknown option".into()),
         }
         Ok(())
+    }
+}
+
+/// `key = value` of one config line (quotes around the value dropped), `None`
+/// for blank lines and comments, `Err(line)` when there is no `=`.
+fn parse_line(raw: &str) -> Option<Result<(&str, &str), &str>> {
+    let line = raw.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let Some((key, value)) = line.split_once('=') else { return Some(Err(line)) };
+    let mut value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value = &value[1..value.len() - 1];
+    }
+    Some(Ok((key.trim(), value)))
+}
+
+/// Themes from iTerm2-Color-Schemes, `[Name]` sections in Ghostty syntax.
+const BUNDLED_THEMES: &str = include_str!("../assets/themes.txt");
+
+/// Names of the bundled themes, in order.
+pub fn bundled_theme_names() -> impl Iterator<Item = &'static str> {
+    BUNDLED_THEMES.lines().filter_map(|l| l.strip_prefix('[')?.strip_suffix(']'))
+}
+
+/// Body of the bundled theme `name` (case-insensitive).
+fn bundled_theme(name: &str) -> Option<&'static str> {
+    let mut rest = BUNDLED_THEMES;
+    while let Some(start) = rest.find("\n[") {
+        rest = &rest[start + 2..];
+        let (header, body) = rest.split_once('\n')?;
+        let title = header.strip_suffix(']')?;
+        if title.eq_ignore_ascii_case(name) {
+            return Some(body.split("\n[").next().unwrap_or(body));
+        }
+    }
+    None
+}
+
+impl Config {
+    /// Apply theme `name`: a file in a themes directory, a bundled theme, or a
+    /// built-in alias. Unsupported keys in a theme (e.g. `cursor-text`) are skipped.
+    fn apply_theme(&mut self, name: &str) -> bool {
+        let text = theme_file_text(name).map(std::borrow::Cow::Owned).or_else(|| bundled_theme(name).map(Into::into));
+        if let Some(text) = text {
+            for (key, value) in text.lines().filter_map(parse_line).filter_map(Result::ok) {
+                let _ = self.set(key, value);
+            }
+            return true;
+        }
+        if let Some(t) = lookup_theme(name) {
+            self.background = t.background;
+            self.foreground = t.foreground;
+            self.palette = t.palette;
+            return true;
+        }
+        false
     }
 }
 
@@ -426,20 +694,32 @@ pub struct ThemeDef {
     pub palette: [u32; 16],
 }
 
-pub fn lookup_theme(name: &str) -> Option<ThemeDef> {
-    let effective = if let Some((dark_part, _)) = name.split_once(',') {
-        if let Some(d) = dark_part.strip_prefix("dark:") {
-            d.trim()
-        } else {
-            dark_part.trim()
+/// Pick the variant of `theme = light:X,dark:Y` (either order, either part
+/// optional) that matches the system appearance; a plain name is returned as is.
+pub fn theme_variant(name: &str, dark: bool) -> &str {
+    let mut light = None;
+    let mut dark_name = None;
+    for part in name.split(',').map(str::trim) {
+        if let Some(l) = part.strip_prefix("light:") {
+            light = Some(l.trim());
+        } else if let Some(d) = part.strip_prefix("dark:") {
+            dark_name = Some(d.trim());
         }
-    } else if let Some(d) = name.strip_prefix("dark:") {
-        d.trim()
-    } else {
-        name.trim()
-    };
+    }
+    match (light, dark_name) {
+        (None, None) => name.trim(),
+        (l, d) if dark => d.or(l).unwrap_or_default(),
+        (l, d) => l.or(d).unwrap_or_default(),
+    }
+}
 
-    let norm = effective.to_ascii_lowercase().replace(['-', '_', ' '], "");
+/// Whether a theme value depends on the system appearance.
+pub fn theme_is_conditional(name: &str) -> bool {
+    name.contains("light:") || name.contains("dark:")
+}
+
+pub fn lookup_theme(name: &str) -> Option<ThemeDef> {
+    let norm = name.trim().to_ascii_lowercase().replace(['-', '_', ' '], "");
     match norm.as_str() {
         "horizon" | "horizondark" => Some(ThemeDef {
             background: 0x1C1E_2600,
@@ -525,7 +805,12 @@ pub fn lookup_theme(name: &str) -> Option<ThemeDef> {
     }
 }
 
-pub fn load_theme_file(name: &str) -> Option<ThemeDef> {
+/// A theme file from the user's or Ghostty's themes directories.
+fn theme_file_text(name: &str) -> Option<String> {
+    // A theme name is a file name, never a path.
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return None;
+    }
     let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
     let candidates = [
         PathBuf::from(&home).join(".laplace").join("themes").join(name),
@@ -533,48 +818,46 @@ pub fn load_theme_file(name: &str) -> Option<ThemeDef> {
         PathBuf::from(&home).join("Applications/Ghostty.app/Contents/Resources/ghostty/themes").join(name),
         PathBuf::from("/Applications/Ghostty.app/Contents/Resources/ghostty/themes").join(name),
     ];
-    for p in &candidates {
-        if let Ok(text) = std::fs::read_to_string(p) {
-            let mut bg = 0x0000_0000;
-            let mut fg = 0xE6E6_E600;
-            let mut pal = DEFAULT_PALETTE;
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((k, v)) = line.split_once('=') {
-                    let k = k.trim();
-                    let v = v.trim().trim_matches('"');
-                    if k == "background" {
-                        if let Ok(c) = parse_color(v) {
-                            bg = c;
-                        }
-                    } else if k == "foreground" {
-                        if let Ok(c) = parse_color(v) {
-                            fg = c;
-                        }
-                    } else if k == "palette" {
-                        if let Some((idx_str, col_str)) = v.split_once('=') {
-                            if let Ok(idx) = idx_str.trim().parse::<usize>() {
-                                if idx < 16 {
-                                    if let Ok(c) = parse_color(col_str.trim()) {
-                                        pal[idx] = c >> 8;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return Some(ThemeDef {
-                background: bg,
-                foreground: fg,
-                palette: pal,
-            });
+    candidates.iter().find_map(|p| std::fs::read_to_string(p).ok())
+}
+
+/// `trigger=action`. The trigger may itself end in `=` (`ctrl+==increase_font_size`),
+/// so every `=` is tried as the separator.
+fn parse_keybind(v: &str) -> Result<(crate::keymap::Trigger, crate::keymap::Binding), String> {
+    let mut last_err = format!("expected `trigger=action`, got `{v}`");
+    for (i, _) in v.match_indices('=') {
+        let trigger = crate::keymap::parse_trigger(&v[..i]);
+        let action = crate::keymap::parse_binding(&v[i + 1..]);
+        match (trigger, action) {
+            (Ok(t), Ok(a)) => return Ok((t, a)),
+            (Err(e), _) | (_, Err(e)) => last_err = e,
         }
     }
-    None
+    Err(last_err)
+}
+
+/// `window-padding-x = 8` or Ghostty's `left,right` form (`4,12`); Laplace pads both
+/// sides equally, so a pair is averaged.
+fn parse_padding(v: &str) -> Result<f32, String> {
+    let num = |s: &str| s.trim().parse::<f32>().map_err(|_| format!("invalid number `{s}`"));
+    let pt = match v.split_once(',') {
+        Some((a, b)) => (num(a)? + num(b)?) / 2.0,
+        None => num(v)?,
+    };
+    Ok(pt.clamp(0.0, 200.0))
+}
+
+/// Expand a leading `~/` to `$HOME` (Ghostty's optional `?` prefix is dropped).
+fn expand_home(v: &str) -> PathBuf {
+    let v = v.strip_prefix('?').unwrap_or(v);
+    match (v.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(v),
+    }
+}
+
+fn parse_f32(v: &str) -> Result<f32, String> {
+    v.parse::<f32>().ok().filter(|f| f.is_finite()).ok_or_else(|| format!("invalid number `{v}`"))
 }
 
 fn parse_bool(v: &str) -> Result<bool, String> {
@@ -758,6 +1041,145 @@ mod tests {
     use super::*;
 
     #[test]
+    fn color_title_and_copy_options() {
+        let (cfg, errors) = Config::parse(
+            "cursor-color = #ff0000\nselection-background = #112233\nselection-foreground = #ffffff\ncopy-on-select = false\ntitle = Work\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.cursor_color, Some(0xFF00_0000));
+        assert_eq!((cfg.selection_background, cfg.selection_foreground), (Some(0x1122_3300), Some(0xFFFF_FF00)));
+        assert!(!cfg.copy_on_select);
+        assert_eq!(cfg.title.as_deref(), Some("Work"));
+        assert!(Config::default().copy_on_select);
+    }
+
+    #[test]
+    fn auto_update_options() {
+        let (cfg, errors) = Config::parse("auto-update = download\nauto-update-channel = tip\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.auto_update, AutoUpdateMode::Download);
+        assert_eq!(cfg.auto_update_channel, AutoUpdateChannel::Tip);
+
+        let (cfg, errors) = Config::parse("auto-update = off\nauto-update-channel = stable\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.auto_update, AutoUpdateMode::Off);
+        assert_eq!(cfg.auto_update_channel, AutoUpdateChannel::Stable);
+
+        assert_eq!(Config::default().auto_update, AutoUpdateMode::Check);
+        assert_eq!(Config::default().auto_update_channel, AutoUpdateChannel::Stable);
+    }
+
+    #[test]
+    fn scrollback_split_and_contrast_options() {
+        let (cfg, errors) = Config::parse(
+            "scrollback-limit = 10000000\nunfocused-split-opacity = 0.05\nunfocused-split-fill = #000000\nminimum-contrast = 3\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.scrollback_limit, Some(10_000_000));
+        assert_eq!(cfg.unfocused_split_opacity, 0.15, "clamped to Ghostty's minimum");
+        assert_eq!(cfg.unfocused_split_fill, Some(0));
+        assert_eq!(cfg.minimum_contrast, 3.0);
+        assert_eq!(Config::default().confirm_close_surface, ConfirmClose::Running);
+        assert!(Config::parse("macos-native-tabs = true\n").0.macos_native_tabs);
+        let (cfg, errors) = Config::parse("custom-shader = ~/a.glsl\ncustom-shader = /b.glsl\ncustom-shader-animation = always\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.custom_shaders.len(), 2);
+        assert_eq!(cfg.custom_shader_animation, Some(true));
+        assert!(Config::parse("custom-shader = /a\ncustom-shader =\n").0.custom_shaders.is_empty());
+        let (cfg, errors) = Config::parse("keybind = global:cmd+grave_accent=toggle_quick_terminal\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(cfg.quick_terminal_hotkey.is_some() && cfg.keybinds.is_empty());
+        assert_eq!(Config::parse("keybind = global:cmd+t=new_tab\n").1.len(), 1);
+        assert_eq!(Config::parse("confirm-close-surface = always\n").0.confirm_close_surface, ConfirmClose::Always);
+        assert_eq!(Config::parse("confirm-close-surface = false\n").0.confirm_close_surface, ConfirmClose::Never);
+        let (cfg, errors) = Config::parse("adjust-cell-height = 20%\nadjust-cell-width = -1\nfont-thicken = true\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.adjust_cell_height, crate::atlas::MetricAdjust::Percent(20.0));
+        assert_eq!(cfg.adjust_cell_width, crate::atlas::MetricAdjust::Px(-1));
+        assert!(cfg.font_thicken);
+        let (cfg, errors) = Config::parse("font-feature = -calt\nfont-feature = ss01, liga=0\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.font_features, ["-calt", "ss01", "liga=0"]);
+        assert_eq!(Config::parse("font-feature = calt=abc\n").1.len(), 1);
+        assert_eq!(Config::parse("minimum-contrast = nan\n").1.len(), 1);
+        let d = Config::default();
+        assert_eq!((d.scrollback_limit, d.unfocused_split_opacity, d.minimum_contrast), (None, 0.7, 1.0));
+    }
+
+    #[test]
+    fn bell_features_option() {
+        let (cfg, errors) = Config::parse("bell-features = system,no-title,border\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            cfg.bell_features,
+            BellFeatures { system: true, attention: true, title: false, audio: false, border: true }
+        );
+        let (cfg, errors) = Config::parse("bell-features = audio\nbell-audio-path = ~/ding.wav\nbell-audio-volume = 2\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(cfg.bell_features.audio);
+        assert!(cfg.bell_audio_path.is_some_and(|p| p.ends_with("ding.wav") && !p.starts_with("~")));
+        assert_eq!(cfg.bell_audio_volume, 1.0);
+        assert_eq!(Config::parse("bell-features = loud\n").1.len(), 1);
+    }
+
+    #[test]
+    fn keybind_entries() {
+        use crate::keymap::{Action, Binding, TriggerKey};
+        let (cfg, errors) = Config::parse(
+            "keybind = cmd+t=new_split:right\nkeybind = ctrl+==increase_font_size\nkeybind = cmd+k=text:\\x0c\nkeybind = nope=new_tab\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(cfg.keybinds.len(), 3);
+        assert_eq!(cfg.keybinds[0].1, Binding::Action(Action::SplitRight));
+        assert_eq!(cfg.keybinds[1].0.key, TriggerKey::Char('='));
+        assert_eq!(cfg.keybinds[2].1, Binding::Text(vec![0x0c]));
+        let (cfg, _) = Config::parse("keybind = cmd+t=new_tab\nkeybind = clear\n");
+        assert!(cfg.keybinds.is_empty());
+    }
+
+    #[test]
+    fn window_padding_options() {
+        let (cfg, errors) = Config::parse("window-padding-x = 10\nwindow-padding-y = 2,6\nwindow-padding-balance = true\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((cfg.window_padding_x, cfg.window_padding_y, cfg.window_padding_balance), (10.0, 4.0, true));
+        let (_, errors) = Config::parse("window-padding-x = wide\n");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn themes_apply_before_the_rest_of_the_file() {
+        // The user's colors win over the theme's, even when set before `theme`.
+        let (cfg, errors) = Config::parse("background = #101010\ntheme = Dracula\nselection-background = #010203\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.background, 0x1010_1000);
+        assert_eq!(cfg.foreground, 0xF8F8_F200, "from the theme");
+        assert_eq!(cfg.palette[1], 0xFF5555);
+        assert_eq!(cfg.cursor_color, Some(0xF8F8_F200), "theme cursor color");
+        assert_eq!(cfg.selection_background, Some(0x0102_0300));
+
+        // Bundled names are case-insensitive; built-in aliases still work.
+        let (cfg, errors) = Config::parse("theme = catppuccin mocha\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(cfg.background, 0x1E1E_2E00);
+        assert!(Config::parse("theme = tokyonight\n").1.is_empty());
+        assert_eq!(Config::parse("theme = No Such Theme\n").1.len(), 1);
+        assert_eq!(Config::parse("theme = ../../etc/passwd\n").1.len(), 1);
+        assert!(bundled_theme_names().count() > 800);
+        assert_eq!(bundled_theme_names().next(), Some("0x96f"));
+    }
+
+    #[test]
+    fn theme_variants_follow_the_appearance() {
+        let t = "light:Horizon Bright,dark:Dracula";
+        assert_eq!(theme_variant(t, true), "Dracula");
+        assert_eq!(theme_variant(t, false), "Horizon Bright");
+        assert_eq!(theme_variant("dark:Nord, light:Solarized", false), "Solarized");
+        assert_eq!(theme_variant("dark:Nord", false), "Nord", "a missing side falls back to the other");
+        assert_eq!(theme_variant("Dracula", false), "Dracula");
+        assert!(theme_is_conditional(t) && !theme_is_conditional("Dracula"));
+    }
+
+    #[test]
     fn parses_ghostty_style_config() {
         let text = r#"
 # comment
@@ -871,21 +1293,5 @@ copy-on-select = clipboard
         assert_eq!(c.window_colorspace, ColorSpace::DisplayP3);
         assert_eq!(c.font_family, vec!["SFMono Nerd Font"]);
         assert_eq!(c.font_size, 15.0);
-    }
-
-    #[test]
-    fn auto_update_options() {
-        let (cfg, errors) = Config::parse("auto-update = download\nauto-update-channel = tip\n");
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(cfg.auto_update, AutoUpdateMode::Download);
-        assert_eq!(cfg.auto_update_channel, AutoUpdateChannel::Tip);
-
-        let (cfg, errors) = Config::parse("auto-update = off\nauto-update-channel = stable\n");
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(cfg.auto_update, AutoUpdateMode::Off);
-        assert_eq!(cfg.auto_update_channel, AutoUpdateChannel::Stable);
-
-        assert_eq!(Config::default().auto_update, AutoUpdateMode::Check);
-        assert_eq!(Config::default().auto_update_channel, AutoUpdateChannel::Stable);
     }
 }
