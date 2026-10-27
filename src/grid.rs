@@ -1637,7 +1637,7 @@ impl Grid {
                 r[col - 1] = blank;
             }
             let last = col + w - 1;
-            if last + 1 < cols && is_wide_cp(r[last].codepoint) {
+            if last + 1 < cols && r[last + 1].codepoint == 0 && is_wide_cp(r[last].codepoint) {
                 r[last + 1] = blank;
             }
             r[col] = Cell { codepoint, fg, bg };
@@ -3054,6 +3054,12 @@ pub fn is_wide_cp(cp: u32) -> bool {
     if cp & (CLUSTER_FLAG | PH_FLAG) == CLUSTER_FLAG {
         return cp & CLUSTER_WIDE != 0;
     }
+    // Fast-reject common narrow ranges above FIRST_WIDE (0x1100):
+    // Vietnamese Latin Extended Additional (0x1EA0..=0x1EF9),
+    // Box Drawing and Block Elements (0x2500..=0x259F).
+    if (0x1EA0..=0x1EF9).contains(&cp) || (0x2500..=0x259F).contains(&cp) {
+        return false;
+    }
     cp >= FIRST_WIDE && char::from_u32(cp).is_some_and(|c| char_width(c) == 2)
 }
 
@@ -3159,10 +3165,18 @@ fn dec_line_drawing(c: char) -> char {
 impl Perform for Grid {
     fn print(&mut self, c: char) {
         let c = if self.cur.line_drawing { dec_line_drawing(c) } else { c };
-        // Printable ASCII is one column wide and never joins a cluster: skip
-        // the width tables and grapheme checks on the parser's hottest path.
-        if (' '..='~').contains(&c) {
-            self.put_char(c as u32, 1);
+        let cp = c as u32;
+        // Fast path: printable ASCII, Latin-1 supplement (except ©/® which
+        // can join an emoji sequence), Vietnamese precomposed Latin Extended,
+        // and Box Drawing / Block Elements are always 1 column wide and cannot
+        // continue a grapheme cluster.
+        let is_narrow_plain = (' '..='~').contains(&c)
+            || ((0xA0..=0xFF).contains(&cp) && cp != 0xA9 && cp != 0xAE)
+            || (0x1EA0..=0x1EF9).contains(&cp)
+            || (0x2500..=0x259F).contains(&cp);
+
+        if is_narrow_plain && !self.joiner {
+            self.put_char(cp, 1);
         } else if let Some((codepoint, w)) = self.char_cell(c) {
             self.put_char(codepoint, w);
         }
