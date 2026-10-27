@@ -2107,13 +2107,11 @@ fn blit_fit(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) {
 /// fallbacks before the auto-discovered symbol fonts. Without configured
 /// families, `LAPLACE_FONT=/path/to/font.ttf` or the platform defaults apply.
 pub fn load_font(families: &[String]) -> Arc<FontSet> {
-    let mut configured: Vec<(String, u32, fontdue::Font)> = Vec::new();
+    let mut configured_faces: Vec<(String, u32)> = Vec::new();
     for fam in families {
         match crate::fontdb::find_family(fam) {
             Some(face) => {
-                if let Some(f) = try_parse_font_index(&face.path, face.index) {
-                    configured.push((face.path.clone(), face.index, f));
-                }
+                configured_faces.push((face.path.clone(), face.index));
             }
             None => eprintln!("laplace: font-family `{fam}` not found; using fallback"),
         }
@@ -2150,45 +2148,55 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         .map(String::from),
     );
 
-    let mut configured = configured.into_iter();
-    let (mut primary_path, mut primary, mut primary_index) = (None, None, 0);
-    if let Some((p, i, f)) = configured.next() {
-        primary_path = Some(p);
-        primary_index = i;
-        primary = Some(f);
+    let (mut primary_path, mut primary, mut shaper) = (None, None, None);
+
+    let mut configured_iter = configured_faces.into_iter();
+    while let Some((p, idx)) = configured_iter.next() {
+        let s = shaper_for(&p, idx);
+        if let Some(f) = parse_font(&p, idx, s.is_some()) {
+            primary_path = Some(p);
+            primary = Some(f);
+            shaper = s;
+            break;
+        }
     }
+
     if primary.is_none() {
         for path in &primary_candidates {
-            if let Some(f) = try_parse_font(path) {
+            let s = shaper_for(path, 0);
+            if let Some(f) = parse_font(path, 0, s.is_some()) {
                 primary_path = Some(path.clone());
                 primary = Some(f);
+                shaper = s;
                 break;
             }
         }
     }
+
     // Only if none of the standard system/configured fonts were found, fall back to scanning for Nerd Fonts.
     if primary.is_none() {
         let (discovered_mono_nerd, _) = discover_nerd_fonts();
         for path in &discovered_mono_nerd {
-            if let Some(f) = try_parse_font(path) {
+            let s = shaper_for(path, 0);
+            if let Some(f) = parse_font(path, 0, s.is_some()) {
                 primary_path = Some(path.clone());
                 primary = Some(f);
+                shaper = s;
                 break;
             }
         }
     }
     let primary = primary.expect("laplace: no usable monospace font found; set font-family in the config");
 
-    let mut fallbacks: Vec<fontdue::Font> = configured.map(|(_, _, f)| f).collect();
+    let mut fallbacks: Vec<fontdue::Font> = Vec::new();
+    for (p, idx) in configured_iter {
+        if let Some(f) = try_parse_font_index(&p, idx) {
+            fallbacks.push(f);
+        }
+    }
     if let Some(f) = find_first_symbol_font(primary_path.as_deref()) {
         fallbacks.push(f);
     }
-    let shaper = primary_path.as_deref().and_then(|p| shaper_for(p, primary_index));
-    // Ligature glyphs are only reachable through GSUB.
-    let primary = match (&shaper, primary_path.as_deref()) {
-        (Some(_), Some(p)) => parse_font(p, primary_index, true).unwrap_or(primary),
-        _ => primary,
-    };
 
     Arc::new(FontSet { primary, fallbacks, shaper })
 }
