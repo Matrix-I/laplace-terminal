@@ -510,7 +510,7 @@ impl Grid {
             top: 0,
             history: 0,
             display_offset: 0,
-            alt: bytemuck::zeroed_vec(cols * rows),
+            alt: Vec::new(),
             alt_active: false,
             cur: Cursor::default(),
             saved: Cursor::default(),
@@ -1775,7 +1775,7 @@ impl Grid {
         if self.cap >= max_cap {
             return;
         }
-        let new_cap = (self.cap * 2).min(max_cap);
+        let new_cap = (self.cap * 4).max(512).min(max_cap);
         let mut new_cells = bytemuck::zeroed_vec::<Cell>(self.cols * new_cap);
         let mut new_wrapped = vec![false; new_cap];
         let n_lines = self.history + self.rows;
@@ -2176,11 +2176,11 @@ impl Grid {
             self.alt_active = true;
             self.cur.row = 0;
             self.cur.col = 0;
-            let b = Cell { codepoint: 0, fg: 0, bg: 0 };
-            self.alt.fill(b);
+            self.alt = bytemuck::zeroed_vec(self.cols * self.rows);
             self.display_offset = 0;
         } else {
             self.alt_active = false;
+            self.alt = Vec::new();
             if save_cursor {
                 self.cur = self.saved_main;
                 self.clamp_cursor();
@@ -2362,11 +2362,18 @@ impl Grid {
             });
         }
 
-        let mut alt = bytemuck::zeroed_vec::<Cell>(cols * rows);
-        let w = cols.min(self.cols);
-        for r in 0..rows.min(self.rows) {
-            alt[r * cols..r * cols + w].copy_from_slice(&self.alt[r * self.cols..r * self.cols + w]);
-        }
+        let alt = if self.alt_active {
+            let mut alt = bytemuck::zeroed_vec::<Cell>(cols * rows);
+            let w = cols.min(self.cols);
+            for r in 0..rows.min(self.rows) {
+                if !self.alt.is_empty() {
+                    alt[r * cols..r * cols + w].copy_from_slice(&self.alt[r * self.cols..r * self.cols + w]);
+                }
+            }
+            alt
+        } else {
+            Vec::new()
+        };
 
         self.cells = cells;
         self.wrapped = wrapped;

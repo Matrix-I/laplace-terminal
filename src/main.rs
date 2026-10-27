@@ -25,6 +25,10 @@ mod x11colors;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -619,6 +623,8 @@ impl ApplicationHandler<AppEvent> for App {
                         refresh_tab_titles(s);
                         s.renderer.invalidate();
                         s.window.request_redraw();
+                        #[cfg(target_os = "macos")]
+                        macos::release_free_memory();
                         return;
                     }
 
@@ -637,6 +643,8 @@ impl ApplicationHandler<AppEvent> for App {
                     refresh_tab_titles(s);
                     s.renderer.invalidate();
                     s.window.request_redraw();
+                    #[cfg(target_os = "macos")]
+                    macos::release_free_memory();
                 }
             }
             AppEvent::Menu(action) => {
@@ -2095,6 +2103,8 @@ fn close_active_tab(s: &mut State) {
     refresh_tab_titles(s);
     s.renderer.invalidate();
     s.window.request_redraw();
+    #[cfg(target_os = "macos")]
+    macos::release_free_memory();
 }
 
 fn split_active_pane(
@@ -2198,6 +2208,8 @@ fn close_active_pane_or_tab(s: &mut State) {
         refresh_tab_titles(s);
         s.renderer.invalidate();
         s.window.request_redraw();
+        #[cfg(target_os = "macos")]
+        macos::release_free_memory();
     } else {
         close_active_tab(s);
     }
