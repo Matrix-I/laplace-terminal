@@ -2904,9 +2904,20 @@ fn run_tab_action(
     true
 }
 
+/// A clipboard helper command. pbcopy / pbpaste convert text with the locale's
+/// encoding, and an app started from Finder has no `LANG`: without a UTF-8
+/// locale every non-ASCII character would turn into `?`.
+fn clipboard_command(bin: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    if cfg!(target_os = "macos") {
+        cmd.env("LC_ALL", "en_US.UTF-8");
+    }
+    cmd
+}
+
 fn copy_to_clipboard(text: &str) {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     #[cfg(target_os = "macos")]
     let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbcopy", &[])];
@@ -2918,7 +2929,7 @@ fn copy_to_clipboard(text: &str) {
     ];
 
     for (bin, args) in cmds {
-        if let Ok(mut child) = Command::new(bin)
+        if let Ok(mut child) = clipboard_command(bin)
             .args(*args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -2965,7 +2976,7 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 fn paste_from_clipboard() -> Option<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     #[cfg(target_os = "macos")]
     let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbpaste", &[])];
@@ -2977,7 +2988,7 @@ fn paste_from_clipboard() -> Option<String> {
     ];
 
     for (bin, args) in cmds {
-        if let Ok(out) = Command::new(bin)
+        if let Ok(out) = clipboard_command(bin)
             .args(*args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
