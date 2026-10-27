@@ -41,7 +41,7 @@ Each item lists what to run inside a Laplace window and the expected result.
   - Open a 2nd tab, run `sleep 2; printf '\a'` in it and switch to tab 1 → that tab's title gets `🔔 `, cleared when you switch back
   - `sleep 3; printf '\a'` and switch to another app → Laplace bounces in the Dock
 
-- [ ] **XTGETTCAP, DECRQSS, pixel mouse, color scheme**
+- [x] **XTGETTCAP, DECRQSS, pixel mouse, color scheme**
   - In `nvim`: `:checkhealth` shows no terminal warnings about true color / undercurl, and `:lua print(vim.o.termguicolors)` → `true`
   - `bash -c 'printf "\eP+q544E\e\\"; IFS= read -rs -d "\\" -t 1 r; echo "${r#?}" | cat -v'` → `P1+r544E=787465726D2D323536636F6C6F72^[` (TN = xterm-256color)
   - `bash -c 'printf "\e[1;31m\eP\$qm\e\\\e[0m"; IFS= read -rs -d "\\" -t 1 r; echo "${r#?}" | cat -v'` → contains `1$r0;1;38;2;…m`

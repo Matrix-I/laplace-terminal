@@ -293,3 +293,76 @@
 | XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 14t | ^[[4;1476;2717t |
 | XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DSR 996 color scheme | ^[[?997;1n |
 | XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | (move the mouse over the window) | ^[[<35;666;1031M |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | pixel coordinates |  |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | AUTO-FAIL | (switch macOS Appearance Light↔Dark) | got: ^M want: ^\[\[?997;[12]n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | nvim health |  |
+| Kitty Caps Lock | auto-pass | Ctrl+A (Caps Lock ON) | ^[[97;69u |
+| Kitty Caps Lock | auto-pass | Ctrl+A (Caps Lock OFF) | ^[[97;5u |
+
+## 2026-10-27 10:05 — triage by Claude
+
+| Group | Status | Item | Detail |
+|---|---|---|---|
+| Kitty Caps Lock | pass | ON / OFF | 09:54 and 09:56 runs |
+| XTGETTCAP… | FIXED? (uncommitted) | Appearance switch still sent nothing | observer now DeliverImmediately (AppKit suspends distributed notifications while inactive), value read via CFPreferences after sync, re-checked on app activation — needs retest |
+
+## 2026-10-27 10:06 (f9a0b42)
+
+| Group | Status | Item | Detail |
+|---|---|---|---|
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTGETTCAP TN | ^[P1+r544E=787465726D2D323536636F6C6F72^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DECRQSS SGR | ^[P1$r0;1;38;2;233;86;120m^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DA1 advertises sixel | ^[[?62;4;22c |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 18t | ^[[8;41;143t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 14t | ^[[4;1476;2717t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DSR 996 color scheme | ^[[?997;1n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | AUTO-FAIL | (move the mouse over the window) | got: ^M want: ^\[\[<35;*M* |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | pixel coordinates |  |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | AUTO-FAIL | (switch macOS Appearance Light↔Dark) | got: ^M want: ^\[\[?997;[12]n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | nvim health |  |
+
+## 2026-10-27 10:08 (f9a0b42)
+
+| Group | Status | Item | Detail |
+|---|---|---|---|
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTGETTCAP TN | ^[P1+r544E=787465726D2D323536636F6C6F72^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DECRQSS SGR | ^[P1$r0;1;38;2;233;86;120m^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DA1 advertises sixel | ^[[?62;4;22c |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 18t | ^[[8;41;143t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 14t | ^[[4;1476;2717t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DSR 996 color scheme | ^[[?997;1n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | (move the mouse over the window) | ^[[<35;1196;976M^[[<35;1160;1008M |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | pixel coordinates |  |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | AUTO-FAIL | (switch macOS Appearance Light↔Dark) | got: ^M want: ^\[\[?997;[12]n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | nvim health |  |
+
+## 2026-10-27 10:09 (f9a0b42)
+
+| Group | Status | Item | Detail |
+|---|---|---|---|
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTGETTCAP TN | ^[P1+r544E=787465726D2D323536636F6C6F72^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DECRQSS SGR | ^[P1$r0;1;38;2;233;86;120m^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DA1 advertises sixel | ^[[?62;4;22c |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 18t | ^[[8;41;143t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 14t | ^[[4;1476;2717t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DSR 996 color scheme | ^[[?997;2n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | AUTO-FAIL | (move the mouse over the window) | got: ^M want: ^\[\[<35;*M* |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | pixel coordinates |  |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | (switch macOS Appearance Light↔Dark) | ^[[?997;1n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | nvim health |  |
+| XTGETTCAP… | pass | Appearance switch (manual run) | ^[[?997;1n received; came from the activation re-check (debug log: AppleInterfaceThemeChangedNotification never reached the app). Notification replaced by KVO on NSApp.effectiveAppearance — retest pending |
+
+## 2026-10-27 10:12 (f9a0b42)
+
+| Group | Status | Item | Detail |
+|---|---|---|---|
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTGETTCAP TN | ^[P1+r544E=787465726D2D323536636F6C6F72^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DECRQSS SGR | ^[P1$r0;1;38;2;233;86;120m^[\ |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DA1 advertises sixel | ^[[?62;4;22c |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 18t | ^[[8;41;143t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTWINOPS 14t | ^[[4;1476;2717t |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DSR 996 color scheme | ^[[?997;1n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | (move the mouse over the window) | ^[[<35;1024;765M |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | pixel coordinates |  |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | (switch macOS Appearance Light↔Dark) | ^[[?997;2n |
+| XTGETTCAP, DECRQSS, pixel mouse, color scheme | pass | nvim health |  |
