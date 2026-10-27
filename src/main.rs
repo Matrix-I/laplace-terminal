@@ -48,6 +48,8 @@ pub enum AppEvent {
     Reopen,
     /// A menu bar item (macOS) was chosen.
     Menu(keymap::Action),
+    /// The system switched between Light and Dark appearance (macOS).
+    SystemAppearance { dark: bool },
     UpdateCheckResult(Result<update::ReleaseInfo, String>),
     UpdateInstallResult(Result<update::Version, String>),
 }
@@ -312,22 +314,31 @@ impl App {
                 return;
             }
         }
-        // (cwd, window to attach the new one to as a native tab)
+        // (cwd, window to attach the new one to as a native tab, position to cascade from)
         let mut requests = Vec::new();
         for s in &mut self.windows {
             let new_window = std::mem::take(&mut s.new_window_requested);
             let native_tab = std::mem::take(&mut s.native_tab_requested);
             if new_window || native_tab {
                 let cwd = s.tabs.get(s.active).and_then(|t| t.active_pane().pty.cwd());
-                requests.push((cwd, native_tab.then(|| s.window.id())));
+                let from = (!native_tab && s.window.is_visible() != Some(false))
+                    .then(|| s.window.outer_position().ok().map(|p| (p, s.window.scale_factor())))
+                    .flatten();
+                requests.push((cwd, native_tab.then(|| s.window.id()), from));
             }
         }
-        for (cwd, parent) in requests {
+        for (cwd, parent, from) in requests {
             match create_window(event_loop, &self.waker, cwd.as_deref()) {
                 // The hidden, tab-less window kept for the Dock is no longer needed.
                 Ok(s) => {
                     if let Some(p) = parent.and_then(|id| self.windows.iter().find(|w| w.window.id() == id)) {
                         macos::add_tabbed_window(&p.window, &s.window);
+                    }
+                    // winit centers every new window: cascade it down-right from the
+                    // one it was opened from so it does not hide exactly behind it.
+                    if let Some((pos, scale)) = from {
+                        let step = (28.0 * scale).round() as i32;
+                        s.window.set_outer_position(PhysicalPosition::new(pos.x + step, pos.y + step));
                     }
                     self.windows.retain(|w| !w.tabs.is_empty());
                     self.windows.push(s);
@@ -380,14 +391,17 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         .with_title("Laplace")
         .with_transparent(cfg.background_opacity < 1.0)
         .with_inner_size(LogicalSize::new(960.0, 600.0));
-    // Laplace windows group into one native tab bar (`macos-native-tabs`, or
-    // the system "Prefer tabs" setting).
+    // Native tabs (`macos-native-tabs`) group under one identifier. Created
+    // hidden so AppKit cannot merge a New Window into a tab of the focused one
+    // before tabbing is turned off for it; native tabs re-enable it.
     #[cfg(target_os = "macos")]
     let attrs = {
         use winit::platform::macos::WindowAttributesExtMacOS;
-        attrs.with_tabbing_identifier("laplace")
+        attrs.with_tabbing_identifier("laplace").with_visible(false)
     };
     let window = Arc::new(event_loop.create_window(attrs).map_err(std::io::Error::other)?);
+    macos::set_tabbing_allowed(&window, false);
+    window.set_visible(true);
     // Composed input (Vietnamese Telex/VNI, CJK) arrives as `WindowEvent::Ime`.
     window.set_ime_allowed(true);
     let dark = window.theme() != Some(winit::window::Theme::Light);
@@ -630,6 +644,12 @@ impl ApplicationHandler<AppEvent> for App {
                     run_action(s, action, &waker);
                 }
                 self.process_window_requests(event_loop);
+            }
+            AppEvent::SystemAppearance { dark } => {
+                if dark != grid::color_scheme_is_dark() {
+                    grid::set_color_scheme_dark(dark);
+                    self.windows.iter_mut().for_each(apply_system_appearance);
+                }
             }
             AppEvent::Reopen => {
                 // Bring the windows back; with none left, reopen the hidden one.
@@ -1153,15 +1173,10 @@ impl App {
             }
 
             WindowEvent::ThemeChanged(theme) => {
-                grid::set_color_scheme_dark(theme == winit::window::Theme::Dark);
-                if s.config.theme.as_deref().is_some_and(config::theme_is_conditional) {
-                    reload_config(s);
-                }
-                // DECSET 2031: tell applications that asked about the new appearance.
-                for pane in s.tabs.iter().flat_map(|t| &t.panes) {
-                    if pane.grid.lock().color_scheme_reports {
-                        pane.pty.write(grid::color_scheme_report());
-                    }
+                let dark = theme == winit::window::Theme::Dark;
+                if dark != grid::color_scheme_is_dark() {
+                    grid::set_color_scheme_dark(dark);
+                    apply_system_appearance(s);
                 }
             }
 
@@ -2902,6 +2917,19 @@ fn run_tab_action(
         A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab | A::NewWindow | A::CheckUpdate | A::ToggleQuickTerminal => {}
     }
     true
+}
+
+/// Follow a Light/Dark switch: re-resolve `theme = light:X,dark:Y` and tell
+/// applications that set DECSET 2031.
+fn apply_system_appearance(s: &mut State) {
+    if s.config.theme.as_deref().is_some_and(config::theme_is_conditional) {
+        reload_config(s);
+    }
+    for pane in s.tabs.iter().flat_map(|t| &t.panes) {
+        if pane.grid.lock().color_scheme_reports {
+            pane.pty.write(grid::color_scheme_report());
+        }
+    }
 }
 
 /// A clipboard helper command. pbcopy / pbpaste convert text with the locale's

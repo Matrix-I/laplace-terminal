@@ -132,6 +132,11 @@ mod imp {
         fn NSBeep();
     }
 
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    }
+
     /// Secure Keyboard Entry: other processes cannot observe keystrokes. Calls
     /// are reference-counted by macOS, so every enable needs one disable.
     pub fn set_secure_input(on: bool) {
@@ -358,14 +363,20 @@ mod imp {
         extern "C" fn on_activate(_this: Id, _cmd: Id, _notification: Id) {
             send_reopen();
         }
+        extern "C" fn on_appearance(_this: Id, _cmd: Id, _notification: Id) {
+            if let Some(proxy) = REOPEN_PROXY.lock().as_ref() {
+                let _ = proxy.send_event(crate::AppEvent::SystemAppearance { dark: system_dark() });
+            }
+        }
 
         // SAFETY: the method implementations match the type encodings given.
         unsafe {
             let Some(delegate) = shared_application().and_then(|app| send_id(app, c"delegate")) else { return };
             let Some(delegate_cls) = send_id(delegate, c"class") else { return };
-            let methods: [(&CStr, *const (), &CStr); 2] = [
+            let methods: [(&CStr, *const (), &CStr); 3] = [
                 (c"applicationShouldHandleReopen:hasVisibleWindows:", on_reopen as *const (), c"B@:@B"),
                 (c"applicationDidBecomeActive:", on_activate as *const (), c"v@:@"),
+                (c"laplaceAppearanceChanged:", on_appearance as *const (), c"v@:@"),
             ];
             for (name, imp, types) in methods {
                 let selector = sel(name);
@@ -376,6 +387,39 @@ mod imp {
                     }
                 }
             }
+            // Windows carry their own NSAppearance (matching the terminal
+            // background), so winit's ThemeChanged never fires: follow the
+            // system Light/Dark switch through its distributed notification.
+            let center = class(c"NSDistributedNotificationCenter").and_then(|cls| send_id(cls, c"defaultCenter"));
+            if let (Some(center), Some(name)) = (center, ns_string("AppleInterfaceThemeChangedNotification")) {
+                msg_send!(
+                    center,
+                    c"addObserver:selector:name:object:",
+                    delegate => Id,
+                    sel(c"laplaceAppearanceChanged:") => Id,
+                    name => Id,
+                    std::ptr::null_mut::<c_void>() => Id
+                );
+            }
+        }
+    }
+
+    /// The system appearance is Dark (`AppleInterfaceStyle` in the global
+    /// defaults; absent in Light mode).
+    pub fn system_dark() -> bool {
+        // SAFETY: NSUserDefaults lookups on live objects; the C string is
+        // copied before the autoreleased NSString can go away.
+        unsafe {
+            let Some(defaults) = class(c"NSUserDefaults").and_then(|cls| send_id(cls, c"standardUserDefaults")) else {
+                return true;
+            };
+            let Some(key) = ns_string("AppleInterfaceStyle") else { return true };
+            let style = msg_send!(defaults, c"stringForKey:", key => Id; -> Id);
+            if style.is_null() {
+                return false;
+            }
+            let utf8 = msg_send!(style, c"UTF8String"; -> *const std::ffi::c_char);
+            !utf8.is_null() && CStr::from_ptr(utf8).to_bytes() == b"Dark"
         }
     }
 
@@ -579,9 +623,22 @@ mod imp {
 
     /// Attach `child` as a native tab of `parent`, right after it.
     pub fn add_tabbed_window(parent: &Window, child: &Window) {
+        set_tabbing_allowed(parent, true);
+        set_tabbing_allowed(child, true);
         let (Some((_, p)), Some((_, c))) = (ns_window_of(parent), ns_window_of(child)) else { return };
         // SAFETY: both are live NSWindows; 1 = NSWindowAbove.
         unsafe { msg_send!(p, c"addTabbedWindow:ordered:", c => Id, 1 => isize) };
+    }
+
+    /// Let `window` join native tab groups (`true`), or keep it a separate
+    /// window even where AppKit would merge it into a tab of another Laplace
+    /// window (`false`). Takes effect the next time the window is ordered in.
+    pub fn set_tabbing_allowed(window: &Window, allowed: bool) {
+        let Some((_, w)) = ns_window_of(window) else { return };
+        // NSWindowTabbingMode: 0 = automatic, 2 = disallowed.
+        let mode: isize = if allowed { 0 } else { 2 };
+        // SAFETY: live NSWindow.
+        unsafe { msg_send!(w, c"setTabbingMode:", mode => isize) };
     }
 
     /// Move between native tabs of `window`: -1 previous, 1 next, or index
@@ -602,10 +659,12 @@ mod imp {
         true
     }
 
-    /// Caps Lock is on (`NSEvent.modifierFlags`, NSEventModifierFlagCapsLock).
+    /// Caps Lock is on: the hardware state (kCGEventSourceStateHIDSystemState,
+    /// kCGEventFlagMaskAlphaShift), which inside the app is not tied to how far
+    /// AppKit's event queue has got.
     pub fn caps_lock() -> bool {
-        // SAFETY: class method returning the current modifier flags.
-        unsafe { class(c"NSEvent").is_some_and(|cls| msg_send!(cls, c"modifierFlags"; -> u64) & (1 << 16) != 0) }
+        // SAFETY: plain C call without pointers.
+        unsafe { CGEventSourceFlagsState(1) & 0x1_0000 != 0 }
     }
 
     /// Show or clear the check mark of the "Secure Keyboard Entry" menu item.
@@ -873,6 +932,7 @@ mod stub {
     pub fn set_global_hotkey(_trigger: Option<&crate::keymap::Trigger>) {}
     pub fn hide_app() {}
     pub fn add_tabbed_window(_parent: &winit::window::Window, _child: &winit::window::Window) {}
+    pub fn set_tabbing_allowed(_window: &winit::window::Window, _allowed: bool) {}
     pub fn select_native_tab(_window: &winit::window::Window, _step: isize, _index: Option<usize>) -> bool {
         false
     }
