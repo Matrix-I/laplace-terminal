@@ -670,11 +670,13 @@ impl ApplicationHandler<AppEvent> for App {
                             let choice = macos::alert_choice(title, &message, &["Update Now", "View Release", "Cancel"]);
                             match choice {
                                 0 => {
-                                    macos::show_progress_dialog(
-                                        "Updating Laplace…",
-                                        &format!("Downloading and installing Laplace v{}…", release.version),
-                                    );
-                                    update::start_install_update(release, self.waker.proxy.clone());
+                                    let text = format!("Downloading and installing Laplace v{}…", release.version);
+                                    // The result event is handled after this one, so the dialog opens before it closes.
+                                    if update::start_install_update(release, self.waker.proxy.clone()) {
+                                        macos::show_progress_dialog("Updating Laplace…", &text);
+                                    } else {
+                                        macos::alert("Update In Progress", "Laplace is already installing an update.");
+                                    }
                                 }
                                 1 => {
                                     #[cfg(target_os = "macos")]
@@ -2768,7 +2770,7 @@ fn run_action(
         A::NewTab => duplicate_active_tab(s, waker),
         A::CheckUpdate => {
             macos::show_progress_dialog("Checking for Updates…", "Checking for new releases of Laplace…");
-            update::start_interactive_check(waker.proxy.clone());
+            update::start_interactive_check(waker.proxy.clone(), s.config.auto_update_channel);
         }
         _ if s.tabs.is_empty() => {}
         _ => return run_tab_action(s, action, waker),

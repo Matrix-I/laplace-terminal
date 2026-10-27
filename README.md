@@ -214,6 +214,10 @@ Laplace includes a built-in, zero-dependency self-updater that checks for releas
 - **CLI Commands**:
   - `laplace +check-update` (or `--check-update`): Check if a new version is available without installing.
   - `laplace +update` (or `--update`): Download and install the newest release directly in your terminal (use `--force` to reinstall current version).
+- **Background checks** (at most once a day, at startup): `auto-update = check` notifies when a release is out; `auto-update = download` also downloads and verifies it, and the next **Check for Updates…** / `laplace +update` installs that copy without downloading again. Nothing is installed without asking.
+- **Channels**: `stable` follows the latest release; `tip` also considers prereleases and picks the highest version.
+- **Architecture-safe**: the updater picks the asset for this machine's CPU (`laplace-macos-<arch>`, `Laplace-macos-<arch>.zip`, `laplace-linux-<arch>`, with `<arch>` = `aarch64` or `x86_64`; the unsuffixed names of older releases count as arm64 on macOS and x86_64 on Linux) and refuses a binary whose Mach-O / ELF header is built for another CPU.
+- Only one update runs at a time (a lock in `~/.cache/laplace/updates`, shared with `laplace +update`), and every network request has connect and transfer timeouts.
 
 ---
 

@@ -68,6 +68,12 @@ cp "target/release/laplace" "$DIST_DIR/laplace-macos"
 chmod +x "$DIST_DIR/laplace-macos"
 (cd "$DIST_DIR" && rm -f Laplace-macos.zip && zip -q -r Laplace-macos.zip "$APP_NAME")
 
+# Architecture-suffixed copies (Rust `std::env::consts::ARCH` naming) for the self-updater.
+ARCH="$(uname -m)"
+[ "$ARCH" = "arm64" ] && ARCH="aarch64"
+cp "$DIST_DIR/laplace-macos" "$DIST_DIR/laplace-macos-$ARCH"
+cp "$DIST_DIR/Laplace-macos.zip" "$DIST_DIR/Laplace-macos-$ARCH.zip"
+
 echo "==> Done! Outputs ready:"
 ls -lh "$APP_DIR"
 ls -lh "$DMG_PATH"
