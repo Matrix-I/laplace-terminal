@@ -4365,6 +4365,16 @@ mod tests {
     }
 
     #[test]
+    fn emoji_clusters_copy_back_exactly() {
+        let s = "😀 👍🏽 👨‍👩‍👧 🇻🇳 ❤️ #️⃣ 🏳️‍🌈";
+        let mut g = Grid::new(40, 3);
+        g.grapheme_mode = true;
+        feed(&mut g, &format!("\x1b]133;A\x07$ \x1b]133;B\x07echo '{s}'\r\n\x1b]133;C\x07{s}\r\n"));
+        g.set_selection(Some(Selection { start: (1, 0), end: (1, 39) }));
+        assert_eq!(g.selected_text().as_deref(), Some(s));
+    }
+
+    #[test]
     fn selection_follows_text_when_output_scrolls() {
         let mut g = Grid::new(10, 3);
         feed(&mut g, "one\r\ntwo\r\nthree");
