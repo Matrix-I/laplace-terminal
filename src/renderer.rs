@@ -498,6 +498,37 @@ impl Renderer {
         self.force_full = true;
     }
 
+    /// Present a few 1×1 frames before the window is hidden or closed. macOS keeps the
+    /// last drawables of a layer alive (about 30 MB for a Retina window),
+    /// so leave it holding tiny ones instead.
+    pub fn shrink_drawables(&mut self) {
+        self.config.width = 1;
+        self.config.height = 1;
+        self.surface.configure(&self.device, &self.config);
+        for _ in 0..3 {
+            let Ok(frame) = self.surface.get_current_texture() else { break };
+            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shrink_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.queue.submit([encoder.finish()]);
+            frame.present();
+        }
+        let _ = self.device.poll(wgpu::Maintain::Wait);
+    }
+
     pub fn pad(&self) -> (u32, u32) {
         self.pad
     }

@@ -269,6 +269,14 @@ impl App {
         self.windows.iter_mut().find(|s| s.window.id() == id)
     }
 
+    /// Drop the hidden, tab-less window kept for the Dock once another one opens.
+    fn drop_tabless_windows(&mut self) {
+        for s in self.windows.iter_mut().filter(|s| s.tabs.is_empty()) {
+            s.renderer.shrink_drawables();
+        }
+        self.windows.retain(|w| !w.tabs.is_empty());
+    }
+
     /// Show the Quick Terminal (creating it on first use) or hide it when it is
     /// already in front.
     fn toggle_quick_terminal(&mut self, event_loop: &ActiveEventLoop) {
@@ -294,7 +302,7 @@ impl App {
                 s.window.set_decorations(false);
                 s.window.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
                 place_quick_terminal(&s);
-                self.windows.retain(|w| !w.tabs.is_empty());
+                self.drop_tabless_windows();
                 self.windows.push(s);
             }
             Err(e) => eprintln!("laplace: failed to open the Quick Terminal: {e}"),
@@ -340,7 +348,7 @@ impl App {
                         let step = (28.0 * scale).round() as i32;
                         s.window.set_outer_position(PhysicalPosition::new(pos.x + step, pos.y + step));
                     }
-                    self.windows.retain(|w| !w.tabs.is_empty());
+                    self.drop_tabless_windows();
                     self.windows.push(s);
                 }
                 Err(e) => eprintln!("laplace: failed to open window: {e}"),
@@ -350,7 +358,7 @@ impl App {
         while let Some(pos) = self.windows.iter().position(|s| s.close_requested) {
             if self.windows.len() > 1 {
                 // Dropping the state closes the window and hangs up its shells.
-                self.windows.remove(pos);
+                self.windows.remove(pos).renderer.shrink_drawables();
                 continue;
             }
             let s = &mut self.windows[pos];
@@ -666,6 +674,8 @@ impl ApplicationHandler<AppEvent> for App {
                     if s.tabs.is_empty() {
                         open_fresh_tab(s, &self.waker);
                     } else {
+                        let sz = s.window.inner_size();
+                        s.renderer.resize(sz.width, sz.height);
                         s.window.set_visible(true);
                         s.window.focus_window();
                         #[cfg(target_os = "macos")]
@@ -1935,6 +1945,8 @@ fn open_fresh_tab(
     s: &mut State,
     waker: &Waker,
 ) {
+    let sz = s.window.inner_size();
+    s.renderer.resize(sz.width, sz.height);
     let (cols, rows) = s.renderer.grid_size_for_tabs(false);
     let (cw, ch) = s.renderer.cell_size();
     let tab_id = next_id();
@@ -2049,6 +2061,7 @@ fn hide_or_exit_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
         s.selecting = false;
         s.active = 0;
         s.window.set_visible(false);
+        s.renderer.shrink_drawables();
         macos::release_free_memory();
     } else {
         event_loop.exit();
