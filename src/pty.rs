@@ -47,8 +47,6 @@ pub struct Pty {
     pub pid: libc::pid_t,
     /// Bytes for the shell, written by the writer thread so the UI never blocks.
     tx: mpsc::Sender<WritePayload>,
-    has_pending: Arc<std::sync::atomic::AtomicBool>,
-    direct_lock: Mutex<()>,
     /// Read end of the shutdown pipe, polled by the I/O threads.
     shutdown_rx: Arc<OwnedFd>,
     /// Write end of the shutdown pipe: closing it (on drop) signals shutdown.
@@ -223,25 +221,13 @@ impl Pty {
             let (tx, rx) = mpsc::channel::<WritePayload>();
             let writer_fd = dup_cloexec(master.as_raw_fd())?;
             let writer_shutdown = shutdown_rx.clone();
-            let has_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let has_pending_worker = has_pending.clone();
             std::thread::Builder::new()
                 .name("pty-writer".into())
                 .stack_size(64 * 1024)
                 .spawn(move || {
                     while let Ok(data) = rx.recv() {
-                        let mut cur = data;
-                        loop {
-                            if !write_all(writer_fd.as_raw_fd(), cur.as_slice(), writer_shutdown.as_raw_fd()) {
-                                return;
-                            }
-                            match rx.try_recv() {
-                                Ok(next) => cur = next,
-                                Err(_) => {
-                                    has_pending_worker.store(false, std::sync::atomic::Ordering::Release);
-                                    break;
-                                }
-                            }
+                        if !write_all(writer_fd.as_raw_fd(), data.as_slice(), writer_shutdown.as_raw_fd()) {
+                            return;
                         }
                     }
                 })?;
@@ -250,8 +236,6 @@ impl Pty {
                 master,
                 pid,
                 tx,
-                has_pending,
-                direct_lock: Mutex::new(()),
                 shutdown_rx,
                 _shutdown_tx: shutdown_tx,
             })
@@ -286,28 +270,8 @@ impl Pty {
         }
     }
 
-    /// Queue or immediately write bytes for the shell.
-    /// Fast-paths interactive keystrokes directly to the non-blocking master descriptor,
-    /// achieving sub-microsecond latency and 0 heap allocations.
+    /// Queue bytes for the shell. Uses WritePayload to avoid heap allocation on keystrokes.
     pub fn write(&self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-        if data.len() <= 1024 {
-            if let Some(_guard) = self.direct_lock.try_lock() {
-                if !self.has_pending.load(std::sync::atomic::Ordering::Acquire) {
-                    let n = unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
-                    if n == data.len() as isize {
-                        return;
-                    }
-                    let rem = if n > 0 { &data[n as usize..] } else { data };
-                    self.has_pending.store(true, std::sync::atomic::Ordering::Release);
-                    let _ = self.tx.send(WritePayload::from_slice(rem));
-                    return;
-                }
-            }
-        }
-        self.has_pending.store(true, std::sync::atomic::Ordering::Release);
         let _ = self.tx.send(WritePayload::from_slice(data));
     }
 

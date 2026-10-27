@@ -47,7 +47,7 @@ use crate::split::{Direction, PaneRect, Rect, SplitDirection, SplitNode};
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    WakeUp(Option<WindowId>),
+    WakeUp,
     ChildExit(u64),
     Reopen,
     /// A menu bar item (macOS) was chosen.
@@ -159,7 +159,6 @@ struct HoveredPaneLink {
 struct State {
     window: Arc<Window>,
     renderer: Renderer,
-    waker: Waker,
     tabs: Vec<Tab>,
     tab_titles: Vec<String>,
     active: usize,
@@ -245,21 +244,12 @@ fn next_id() -> u64 {
 struct Waker {
     proxy: EventLoopProxy<AppEvent>,
     queued: Arc<AtomicBool>,
-    window_id: Option<WindowId>,
 }
 
 impl Waker {
-    fn for_window(&self, window_id: WindowId) -> Self {
-        Self {
-            proxy: self.proxy.clone(),
-            queued: Arc::new(AtomicBool::new(false)),
-            window_id: Some(window_id),
-        }
-    }
-
     fn wake(&self) {
         if !self.queued.swap(true, Ordering::AcqRel) {
-            let _ = self.proxy.send_event(AppEvent::WakeUp(self.window_id));
+            let _ = self.proxy.send_event(AppEvent::WakeUp);
         }
     }
 
@@ -487,7 +477,6 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     let (cols, rows) = renderer.grid_size_for_tabs(false);
     let (cw, ch) = renderer.cell_size();
 
-    let win_waker = waker.for_window(window.id());
     let pane = spawn_pane(
         next_id(),
         cols,
@@ -495,7 +484,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         (cw, ch),
         cwd,
         Some((cfg.shell_integration, cfg.shell_integration_features)),
-        &win_waker,
+        waker,
     )?;
     let mut tab = Tab::new(next_id(), pane);
     let title = tab_title(&mut tab);
@@ -504,7 +493,6 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     Ok(State {
         window,
         renderer,
-        waker: win_waker,
         tabs: vec![tab],
         tab_titles: vec![title],
         active: 0,
@@ -588,14 +576,9 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::WakeUp(target_wid) => {
+            AppEvent::WakeUp => {
+                self.waker.rearm();
                 for s in &mut self.windows {
-                    if let Some(target) = target_wid {
-                        if s.window.id() != target {
-                            continue;
-                        }
-                    }
-                    s.waker.rearm();
                     // OSC 52: applications (e.g. vim/tmux over ssh) setting the clipboard.
                     for pane in s.tabs.iter().flat_map(|t| &t.panes) {
                         let request = pane.grid.lock().clipboard_request.take();
@@ -788,7 +771,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.windows.iter().any(|s| s.waker.is_queued()) || self.waker.is_queued() {
+        if self.waker.is_queued() {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
@@ -825,8 +808,8 @@ impl ApplicationHandler<AppEvent> for App {
 
 impl App {
     fn handle_window_event(&mut self, id: WindowId, event: WindowEvent) {
+        let waker = self.waker.clone();
         let Some(s) = self.window_mut(id) else { return };
-        let waker = s.waker.clone();
         match event {
             WindowEvent::CloseRequested => {
                 if confirm_close(&s.config, s.tabs.iter().flat_map(|t| &t.panes), "this window") {
@@ -2525,10 +2508,19 @@ fn handle_key(
                 return;
             }
         }
+        Key::Named(NamedKey::Enter) => {
+            let cmd = {
+                let g = pane.grid.lock();
+                // Full-screen apps (vim, less, REPL UIs) are not shell commands.
+                if g.alt_active { String::new() } else { g.current_prompt_input() }
+            };
+            if !cmd.is_empty() {
+                s.history_search.add_session_command(&cmd);
+            }
+        }
         _ => {}
     }
 
-    let is_enter = matches!(ev.logical_key, Key::Named(NamedKey::Enter));
     let bytes = if kitty_flags != 0 {
         let kind = if ev.repeat { keymap::KeyKind::Repeat } else { keymap::KeyKind::Press };
         let unshifted = ev.key_without_modifiers();
@@ -2541,16 +2533,6 @@ fn handle_key(
     };
     if let Some(bytes) = &bytes {
         pane.pty.write(bytes);
-    }
-    if is_enter {
-        let cmd = {
-            let g = pane.grid.lock();
-            // Full-screen apps (vim, less, REPL UIs) are not shell commands.
-            if g.alt_active { String::new() } else { g.current_prompt_input() }
-        };
-        if !cmd.is_empty() {
-            s.history_search.add_session_command(&cmd);
-        }
     }
     if s.inspector {
         s.inspector_key = describe_key(&ev.logical_key, m, bytes.as_deref());
@@ -3154,7 +3136,7 @@ fn main() {
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)), window_id: None },
+        waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)) },
         windows: Vec::new(),
     };
     event_loop.run_app(&mut app).expect("run app");
