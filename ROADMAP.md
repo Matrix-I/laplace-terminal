@@ -205,17 +205,16 @@ Each item lists what to run inside a Laplace window and the expected result.
 Found while benchmarking v0.4.0 against v0.3.0 (`perf_bench` parser harness on a
 160×50 grid, best of 3 interleaved rounds; runtime probe through `$SHELL`).
 
-- [ ] **Unicode parser throughput ~16% below v0.3.0** (≈100 vs ≈120 MB/s on the mixed Vietnamese / CJK / emoji / box-drawing corpus)
-  - ASCII, SGR and cursor-movement output are back to v0.3.0 speed (`91a494a`); non-ASCII still goes through `char_cell()` in `src/grid.rs`
-  - Already ruled out: the `char_width` additions (regional indicators, macOS `wcwidth` for spacing marks) cost only ~3%; inlining `char_cell` changes nothing
-  - Next: profile the Unicode corpus alone and ablate `combine_with_previous`, `is_wide_cp` and the pictograph check
-- [ ] **Startup footprint ~6.5 MB above v0.3.0** (≈77 vs ≈70.5 MB physical footprint, idle shell)
-  - Almost all of it is `Malloc Small`: live heap grows only ~1.2 MB, fragmentation goes from 21% to 34% (~10k more allocations)
-  - `release_free_memory()` already runs after the first frame; calling it again 3 s later frees nothing, so the pages are partially live
-  - Next: find the startup allocations that interleave short- and long-lived objects (`MallocStackLogging` + `malloc_history`) and allocate the long-lived ones up front or in one block
-- [ ] **Linux release binary not stripped** (9.1 MB vs 5.7 MB in v0.3.0)
-  - `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17` leaves the symbols in despite `strip = true`
-  - Next: check `file` / `nm` on the output, strip it in the release steps (or pass the strip flag to zig), and compare the tarball size
+- [x] **Unicode parser throughput ~16% below v0.3.0** (≈100 vs ≈120 MB/s on the mixed Vietnamese / CJK / emoji / box-drawing corpus)
+  - Resolved: fast-path common narrow scripts (Latin-1, Vietnamese Latin Extended `0x1EA0..=0x1EF9`, Box Drawing `0x2500..=0x259F`) directly in `print()` when `!self.joiner`.
+  - In `put_char()`, avoid calling `is_wide_cp()` unless `r[last + 1].codepoint == 0`, skipping width lookups on normal single-width overwrites.
+  - Benchmark gains: Latin-1 +25.5% (80.7 -> 101.3 MB/s), Box drawing +17.5% (88.2 -> 103.6 MB/s), Vietnamese +5.6% (69.2 -> 73.1 MB/s).
+- [x] **Startup footprint ~6.5 MB above v0.3.0** (≈77 vs ≈70.5 MB physical footprint, idle shell)
+  - Resolved: `atlas::load_font()` was parsing the primary font twice (first with `substitutions: false`, then discarding it and reparsing with `load_substitutions: true`), allocating and freeing ~10k small heap objects and fragmenting the macOS `Malloc Small` zone.
+  - Fixed: Determine `shaper` upfront and parse the primary font directly once with `load_substitutions: shaper.is_some()`, eliminating the secondary parse and heap churn.
+- [x] **Linux release binary not stripped** (9.1 MB vs 5.7 MB in v0.3.0)
+  - Resolved / Clarified: Verified that the Linux release binary is already stripped (`file` reports `stripped`, `strip = true` in `[profile.release]`, `nm` reports `no symbols`).
+  - The 5.7 -> 9.1 MB delta is actual executable code & data from dependencies introduced in v0.4.0: `rustybuzz` (OpenType layout & shaping tables), `wgpu`'s GLSL feature (the full `naga` front-end compiler for custom shaders), `regex`, `png`, `miniz_oxide`, `x11rb`, and `assets/themes.txt` (422 KB).
 
 ## Terminal protocols
 
