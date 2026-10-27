@@ -1579,12 +1579,99 @@ impl Grid {
         Some(CLUSTER_FLAG | CLUSTER_WIDE | id)
     }
 
+    /// The cell value and width `c` is printed with, or None when it joins
+    /// the previous cell (combining mark, grapheme cluster).
+    fn char_cell(&mut self, c: char) -> Option<(u32, usize)> {
+        if self.grapheme_mode && !c.is_ascii() && self.extend_grapheme(c) {
+            return None;
+        }
+        let mut w = char_width(c);
+        if w == 0 {
+            self.combine_with_previous(c);
+            return None;
+        }
+        let mut codepoint = if c == PLACEHOLDER { PH_FLAG } else { c as u32 };
+        if w == 1 && (0x1F300..=0x1F6FF).contains(&codepoint) && self.cols >= 2 && self.in_line_editor() {
+            if let Some(wide) = self.wide_pictograph(c) {
+                (codepoint, w) = (wide, 2);
+            }
+        }
+        if w == 2 && self.cols < 2 {
+            w = 1;
+        }
+        Some((codepoint, w))
+    }
+
+    /// Write a `w`-column character at the cursor and advance it.
+    #[inline(always)]
+    fn put_char(&mut self, codepoint: u32, w: usize) {
+        if self.wrap_pending {
+            self.wrap_pending = false;
+            if self.autowrap {
+                self.set_wrapped(self.cur.row, true);
+                self.cur.col = 0;
+                self.linefeed();
+            }
+        }
+        if w == 2 && self.cur.col + 1 >= self.cols {
+            if !self.autowrap {
+                return;
+            }
+            self.clear_cols(self.cur.row, self.cur.col, self.cols);
+            self.set_wrapped(self.cur.row, true);
+            self.cur.col = 0;
+            self.linefeed();
+        }
+        let (fg, bg) = self.colors();
+        let (row, col) = (self.cur.row, self.cur.col);
+        let blank = self.blank();
+        let cols = self.cols;
+        let insert = self.insert_mode;
+        {
+            let r = self.row_mut(row);
+            if insert && col + w < cols {
+                r.copy_within(col..cols - w, col + w);
+            }
+            // Never leave half of a double-width character behind.
+            if col > 0 && r[col].codepoint == 0 && is_wide_cp(r[col - 1].codepoint) {
+                r[col - 1] = blank;
+            }
+            let last = col + w - 1;
+            if last + 1 < cols && is_wide_cp(r[last].codepoint) {
+                r[last + 1] = blank;
+            }
+            r[col] = Cell { codepoint, fg, bg };
+            if w == 2 {
+                r[col + 1] = Cell { codepoint: 0, fg, bg };
+            }
+        }
+        if col + w >= cols {
+            self.set_wrapped(row, false);
+        }
+        self.mark(row);
+        let next = col + w;
+        if next >= self.cols {
+            self.cur.col = self.cols - 1;
+            self.wrap_pending = self.autowrap;
+        } else {
+            self.cur.col = next;
+        }
+    }
+
     /// Mode 2027: join `c` to the grapheme before the cursor when it continues
     /// it (UAX #29 emoji rules: ZWJ sequences, VS16, skin tones, flags, tags).
     fn extend_grapheme(&mut self, c: char) -> bool {
         let joiner = std::mem::take(&mut self.joiner);
         let cp = c as u32;
         let is_ri = |cp: u32| (0x1F1E6..=0x1F1FF).contains(&cp);
+        // Most characters never continue a grapheme: rule them out before
+        // looking at the previous cell.
+        let may_join = matches!(cp, 0x200D | 0xFE0F | 0xE0020..=0xE007F | 0x1F3FB..=0x1F3FF)
+            || is_ri(cp)
+            || (joiner && is_pictographic(cp));
+        if !may_join {
+            return false;
+        }
         let Some((row, col)) = self.previous_cell() else { return false };
         let prev = self.row_mut(row)[col].codepoint;
         if prev == 0 || prev & PH_FLAG != 0 {
@@ -3072,73 +3159,12 @@ fn dec_line_drawing(c: char) -> char {
 impl Perform for Grid {
     fn print(&mut self, c: char) {
         let c = if self.cur.line_drawing { dec_line_drawing(c) } else { c };
-        if self.grapheme_mode && !c.is_ascii() && self.extend_grapheme(c) {
-            return;
-        }
-        let mut w = char_width(c);
-        if w == 0 {
-            self.combine_with_previous(c);
-            return;
-        }
-        let mut codepoint = if c == PLACEHOLDER { PH_FLAG } else { c as u32 };
-        if w == 1 && (0x1F300..=0x1F6FF).contains(&codepoint) && self.cols >= 2 && self.in_line_editor() {
-            if let Some(wide) = self.wide_pictograph(c) {
-                (codepoint, w) = (wide, 2);
-            }
-        }
-        if w == 2 && self.cols < 2 {
-            w = 1;
-        }
-        if self.wrap_pending {
-            self.wrap_pending = false;
-            if self.autowrap {
-                self.set_wrapped(self.cur.row, true);
-                self.cur.col = 0;
-                self.linefeed();
-            }
-        }
-        if w == 2 && self.cur.col + 1 >= self.cols {
-            if !self.autowrap {
-                return;
-            }
-            self.clear_cols(self.cur.row, self.cur.col, self.cols);
-            self.set_wrapped(self.cur.row, true);
-            self.cur.col = 0;
-            self.linefeed();
-        }
-        let (fg, bg) = self.colors();
-        let (row, col) = (self.cur.row, self.cur.col);
-        let blank = self.blank();
-        let cols = self.cols;
-        let insert = self.insert_mode;
-        {
-            let r = self.row_mut(row);
-            if insert && col + w < cols {
-                r.copy_within(col..cols - w, col + w);
-            }
-            // Never leave half of a double-width character behind.
-            if col > 0 && r[col].codepoint == 0 && is_wide_cp(r[col - 1].codepoint) {
-                r[col - 1] = blank;
-            }
-            let last = col + w - 1;
-            if last + 1 < cols && is_wide_cp(r[last].codepoint) {
-                r[last + 1] = blank;
-            }
-            r[col] = Cell { codepoint, fg, bg };
-            if w == 2 {
-                r[col + 1] = Cell { codepoint: 0, fg, bg };
-            }
-        }
-        if col + w >= cols {
-            self.set_wrapped(row, false);
-        }
-        self.mark(row);
-        let next = col + w;
-        if next >= self.cols {
-            self.cur.col = self.cols - 1;
-            self.wrap_pending = self.autowrap;
-        } else {
-            self.cur.col = next;
+        // Printable ASCII is one column wide and never joins a cluster: skip
+        // the width tables and grapheme checks on the parser's hottest path.
+        if (' '..='~').contains(&c) {
+            self.put_char(c as u32, 1);
+        } else if let Some((codepoint, w)) = self.char_cell(c) {
+            self.put_char(codepoint, w);
         }
     }
 
@@ -4362,6 +4388,31 @@ mod tests {
         feed(&mut g, "中\x1b[2Gy");
         assert_eq!(g.display_row(0)[0].codepoint, 0);
         assert_eq!(line(&g, 0), " y");
+    }
+
+    #[test]
+    fn printable_ascii_keeps_insert_wrap_and_line_drawing() {
+        let mut g = Grid::new(5, 2);
+        feed(&mut g, "abcd\r\x1b[4hX\x1b[4l");
+        assert_eq!(line(&g, 0), "Xabcd");
+        // The last column defers the wrap to the next character.
+        feed(&mut g, "\x1b[1;5Hyz");
+        assert_eq!((line(&g, 0), line(&g, 1)), ("Xabcy".to_string(), "z".to_string()));
+        // DEC line drawing maps letters before the ASCII fast path.
+        feed(&mut g, "\x1b(0q\x1b(Bq");
+        assert_eq!(line(&g, 1), "z─q");
+    }
+
+    #[test]
+    fn only_continuations_join_the_previous_grapheme() {
+        let mut g = Grid::new(10, 1);
+        g.grapheme_mode = true;
+        // After a ZWJ a non-pictographic character starts its own cell, and
+        // the joiner does not carry over to the emoji after it.
+        feed(&mut g, "👨\u{200D}中👩");
+        let row = g.display_row(0);
+        assert_eq!(g.cluster(row[0].codepoint), Some("👨\u{200D}"));
+        assert_eq!((row[2].codepoint, row[4].codepoint), ('中' as u32, '👩' as u32));
     }
 
     #[test]
