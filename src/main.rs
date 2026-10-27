@@ -652,6 +652,14 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             AppEvent::Reopen => {
+                // A Light/Dark switch made while another app was in front.
+                if cfg!(target_os = "macos") {
+                    let dark = macos::system_dark();
+                    if dark != grid::color_scheme_is_dark() {
+                        grid::set_color_scheme_dark(dark);
+                        self.windows.iter_mut().for_each(apply_system_appearance);
+                    }
+                }
                 // Bring the windows back; with none left, reopen the hidden one.
                 let visible = self.windows.iter().position(|s| !s.tabs.is_empty());
                 if let Some(s) = self.windows.get_mut(visible.unwrap_or(0)) {

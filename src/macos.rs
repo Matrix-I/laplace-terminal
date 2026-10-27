@@ -363,20 +363,14 @@ mod imp {
         extern "C" fn on_activate(_this: Id, _cmd: Id, _notification: Id) {
             send_reopen();
         }
-        extern "C" fn on_appearance(_this: Id, _cmd: Id, _notification: Id) {
-            if let Some(proxy) = REOPEN_PROXY.lock().as_ref() {
-                let _ = proxy.send_event(crate::AppEvent::SystemAppearance { dark: system_dark() });
-            }
-        }
 
         // SAFETY: the method implementations match the type encodings given.
         unsafe {
             let Some(delegate) = shared_application().and_then(|app| send_id(app, c"delegate")) else { return };
             let Some(delegate_cls) = send_id(delegate, c"class") else { return };
-            let methods: [(&CStr, *const (), &CStr); 3] = [
+            let methods: [(&CStr, *const (), &CStr); 2] = [
                 (c"applicationShouldHandleReopen:hasVisibleWindows:", on_reopen as *const (), c"B@:@B"),
                 (c"applicationDidBecomeActive:", on_activate as *const (), c"v@:@"),
-                (c"laplaceAppearanceChanged:", on_appearance as *const (), c"v@:@"),
             ];
             for (name, imp, types) in methods {
                 let selector = sel(name);
@@ -387,39 +381,62 @@ mod imp {
                     }
                 }
             }
-            // Windows carry their own NSAppearance (matching the terminal
-            // background), so winit's ThemeChanged never fires: follow the
-            // system Light/Dark switch through its distributed notification.
-            let center = class(c"NSDistributedNotificationCenter").and_then(|cls| send_id(cls, c"defaultCenter"));
-            if let (Some(center), Some(name)) = (center, ns_string("AppleInterfaceThemeChangedNotification")) {
-                msg_send!(
-                    center,
-                    c"addObserver:selector:name:object:",
-                    delegate => Id,
-                    sel(c"laplaceAppearanceChanged:") => Id,
-                    name => Id,
-                    std::ptr::null_mut::<c_void>() => Id
-                );
+        }
+        observe_system_appearance();
+    }
+
+    /// Windows carry their own NSAppearance (matching the terminal background),
+    /// so winit's ThemeChanged never fires. The application's appearance still
+    /// follows the system: watch it with KVO (the change is reported after it
+    /// took effect, so `system_dark` already sees the new value).
+    fn observe_system_appearance() {
+        extern "C" fn on_change(_this: Id, _cmd: Id, _path: Id, _object: Id, _change: Id, _context: *mut c_void) {
+            if let Some(proxy) = REOPEN_PROXY.lock().as_ref() {
+                let _ = proxy.send_event(crate::AppEvent::SystemAppearance { dark: system_dark() });
             }
+        }
+        // SAFETY: the observer class is created once with a method matching its
+        // type encoding; the observer instance lives for the whole process.
+        unsafe {
+            let Some(app) = shared_application() else { return };
+            let name = c"LaplaceAppearanceObserver";
+            let mut cls = objc_getClass(name.as_ptr());
+            if cls.is_null() {
+                let Some(base) = class(c"NSObject") else { return };
+                cls = objc_allocateClassPair(base, name.as_ptr(), 0);
+                if cls.is_null() {
+                    return;
+                }
+                let selector = sel(c"observeValueForKeyPath:ofObject:change:context:");
+                class_addMethod(cls, selector, on_change as *const (), c"v@:@@@^v".as_ptr());
+                objc_registerClassPair(cls);
+            }
+            let Some(observer) = send_id(cls, c"alloc").and_then(|o| send_id(o, c"init")) else { return };
+            let Some(key) = ns_string("effectiveAppearance") else { return };
+            // NSKeyValueObservingOptionNew = 1
+            msg_send!(
+                app,
+                c"addObserver:forKeyPath:options:context:",
+                observer => Id,
+                key => Id,
+                1 => usize,
+                std::ptr::null_mut::<c_void>() => *mut c_void
+            );
         }
     }
 
-    /// The system appearance is Dark (`AppleInterfaceStyle` in the global
-    /// defaults; absent in Light mode).
+    /// The system appearance is Dark: the application's effective appearance
+    /// (Laplace never sets one on NSApp, only on its windows).
     pub fn system_dark() -> bool {
-        // SAFETY: NSUserDefaults lookups on live objects; the C string is
-        // copied before the autoreleased NSString can go away.
+        // SAFETY: NSApp and its appearance are live; the name is read while
+        // the autoreleased objects are still alive.
         unsafe {
-            let Some(defaults) = class(c"NSUserDefaults").and_then(|cls| send_id(cls, c"standardUserDefaults")) else {
-                return true;
-            };
-            let Some(key) = ns_string("AppleInterfaceStyle") else { return true };
-            let style = msg_send!(defaults, c"stringForKey:", key => Id; -> Id);
-            if style.is_null() {
-                return false;
-            }
-            let utf8 = msg_send!(style, c"UTF8String"; -> *const std::ffi::c_char);
-            !utf8.is_null() && CStr::from_ptr(utf8).to_bytes() == b"Dark"
+            let name = shared_application()
+                .and_then(|app| send_id(app, c"effectiveAppearance"))
+                .and_then(|appearance| send_id(appearance, c"name"))
+                .map(|name| msg_send!(name, c"UTF8String"; -> *const std::ffi::c_char))
+                .filter(|p| !p.is_null());
+            name.is_none_or(|p| CStr::from_ptr(p).to_bytes().windows(4).any(|w| w == b"Dark"))
         }
     }
 
@@ -938,6 +955,9 @@ mod stub {
     }
     pub fn caps_lock() -> bool {
         false
+    }
+    pub fn system_dark() -> bool {
+        true
     }
     pub fn set_secure_input_menu_state(_on: bool) {}
     pub fn set_dock_icon() {}
