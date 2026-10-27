@@ -512,10 +512,27 @@ impl Atlas {
             return false;
         }
         let half = key & (WIDE_LEFT | WIDE_RIGHT);
-        let cp = key & CODEPOINT_MASK;
+        let mut cp = key & CODEPOINT_MASK;
         let cluster = if key & CLUSTER_KEY != 0 { self.clusters.get(cp as usize).cloned() } else { None };
+        // A lone regional indicator (a flag half the shell's line editor
+        // prints on its own) has no emoji glyph: show its letter.
+        if cluster.is_none() && (0x1F1E6..=0x1F1FF).contains(&cp) {
+            cp = 'A' as u32 + (cp - 0x1F1E6);
+        }
         // Wide emoji come from the system's color emoji font when there is one.
         let emoji = cluster.as_deref().map_or(is_emoji(cp), is_emoji_text);
+        // So does an emoji sequence squeezed into one cell (❤️ at a zsh prompt).
+        if half == 0 && emoji && cluster.is_some() {
+            let text = cluster.as_deref().unwrap_or_default();
+            let mut buf = std::mem::take(&mut self.color_scratch);
+            buf.fill(0);
+            let drawn = rasterize_color(&mut buf, self.cell_w, self.cell_h, self.px, text);
+            self.color_scratch = buf;
+            if drawn {
+                self.scratch.fill(0);
+                return true;
+            }
+        }
         if half != 0 && emoji {
             let (cw, ch) = (self.cell_w as usize, self.cell_h as usize);
             let mut wide = vec![0u8; 2 * cw * ch * 4];
