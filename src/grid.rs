@@ -1460,11 +1460,21 @@ impl Grid {
         col
     }
 
-    /// The visual column logical column `col` of display row `r` is drawn at.
-    pub fn visual_col(&self, r: usize, col: usize) -> usize {
-        let mut order = Vec::new();
-        if r < self.rows && self.bidi_order(r, &mut Vec::new(), &mut Vec::new(), &mut order) {
-            return order.iter().position(|&l| l as usize == col).unwrap_or(col);
+    /// The visual column the cursor at logical column `col` of display row
+    /// `r` is drawn at. After left-to-right text the cursor stays right after
+    /// that text, even when the cell under it starts a right-to-left run
+    /// (drawn at the run's right end): typing `echo '` before a right-to-left
+    /// autosuggestion keeps the cursor next to the quote.
+    pub fn cursor_visual_col(&self, r: usize, col: usize) -> usize {
+        let (mut levels, mut order) = (Vec::new(), Vec::new());
+        if r < self.rows && self.bidi_order(r, &mut Vec::new(), &mut levels, &mut order) {
+            let visual = |l: usize| order.iter().position(|&o| o as usize == l);
+            if let Some(prev) = col.checked_sub(1).filter(|&p| levels.get(p) == Some(&0)) {
+                if let Some(v) = visual(prev).map(|v| v + 1).filter(|&v| v < order.len()) {
+                    return v;
+                }
+            }
+            return visual(col).unwrap_or(col);
         }
         col
     }
@@ -2875,7 +2885,41 @@ fn parse_x11_color(spec: &[u8]) -> Option<u32> {
 /// following the Unicode East Asian Width and emoji presentation tables.
 pub fn char_width(c: char) -> usize {
     use unicode_width::UnicodeWidthChar;
-    c.width().unwrap_or(0).min(2)
+    let w = c.width().unwrap_or(0).min(2);
+    #[cfg(target_os = "macos")]
+    if w == 1 && is_spacing_mark_range(c as u32) && macos_wcwidth(c) == Some(0) {
+        return 0;
+    }
+    w
+}
+
+/// Scripts with spacing combining marks (Indic, Southeast Asian, Brahmic).
+#[cfg(target_os = "macos")]
+fn is_spacing_mark_range(cp: u32) -> bool {
+    matches!(cp, 0x0900..=0x0DFF | 0x0F00..=0x109F | 0x1700..=0x1CFF | 0xA800..=0xABFF | 0x11000..=0x11FFF)
+}
+
+/// What macOS's own `wcwidth` says. Shells (zsh, bash, readline) count with it, so
+/// for spacing marks such as Devanagari U+093F, which it treats as zero-width,
+/// disagreeing would leave the line editor's cursor columns off.
+#[cfg(target_os = "macos")]
+fn macos_wcwidth(c: char) -> Option<usize> {
+    use std::sync::OnceLock;
+    unsafe extern "C" {
+        fn wcwidth_l(wc: libc::wchar_t, loc: libc::locale_t) -> libc::c_int;
+    }
+    static LOCALE: OnceLock<usize> = OnceLock::new();
+    // SAFETY: newlocale gets a valid NUL-terminated name and a null base; the
+    // locale is never freed, so the pointer stays valid for wcwidth_l.
+    let loc = *LOCALE.get_or_init(|| unsafe {
+        libc::newlocale(libc::LC_CTYPE_MASK, c"en_US.UTF-8".as_ptr(), std::ptr::null_mut()) as usize
+    });
+    if loc == 0 {
+        return None;
+    }
+    // SAFETY: loc is a live locale from newlocale.
+    let w = unsafe { wcwidth_l(c as libc::wchar_t, loc as libc::locale_t) };
+    usize::try_from(w).ok()
 }
 
 /// Smallest codepoint `char_width` reports as double-width (Hangul Jamo).
@@ -3882,8 +3926,17 @@ mod tests {
         let mut g = Grid::new(6, 1);
         feed(&mut g, "a אבג");
         // Drawn as "a גבא": visual column 2 shows logical column 4 (ג).
-        assert_eq!((g.logical_col(0, 2), g.visual_col(0, 4)), (4, 2));
-        assert_eq!((g.logical_col(0, 0), g.visual_col(0, 2)), (0, 4));
+        assert_eq!((g.logical_col(0, 2), g.cursor_visual_col(0, 4)), (4, 2));
+        assert_eq!(g.logical_col(0, 0), 0);
+        // A cursor right after left-to-right text stays next to it, not at
+        // the right end of the run its cell starts.
+        assert_eq!(g.cursor_visual_col(0, 2), 2);
+        // After a right-to-left letter it follows its own cell.
+        assert_eq!(g.cursor_visual_col(0, 3), 3);
+        // Typing `echo '` before a right-to-left autosuggestion.
+        let mut g = Grid::new(14, 1);
+        feed(&mut g, "echo 'سلام'\x1b[7G");
+        assert_eq!(g.cursor_pos().map(|(x, _)| g.cursor_visual_col(0, x)), Some(6));
         // Full-screen applications get the cells as they are.
         feed(&mut g, "\x1b[?1049h\x1b[Hאב");
         assert_eq!(g.logical_col(0, 0), 0);
@@ -3899,6 +3952,17 @@ mod tests {
         assert_eq!(row[1].codepoint, 'é' as u32, "precomposed when possible");
         assert_eq!((row[2].codepoint, g.cur.col), ('z' as u32, 3));
         assert_eq!(cluster_line(&g, 0), "q\u{0303}éz");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn spacing_marks_follow_the_system_wcwidth() {
+        // zsh on macOS counts "कि नमस्ते" as 6 columns (U+093F is zero-width
+        // there); any other count desyncs the line editor's cursor.
+        let mut g = Grid::new(20, 1);
+        feed(&mut g, "कि नमस्ते");
+        assert_eq!(g.cur.col, 6);
+        assert_eq!(g.cluster(g.display_row(0)[0].codepoint), Some("कि"));
     }
 
     #[test]

@@ -648,7 +648,7 @@ impl Renderer {
             let g = active_pane.grid.lock();
             let cur = g
                 .cursor_pos()
-                .map(|(cx, cy)| (active_pane.rect.col + g.visual_col(cy, cx), active_pane.rect.row + cy + top_rows));
+                .map(|(cx, cy)| (active_pane.rect.col + g.cursor_visual_col(cy, cx), active_pane.rect.row + cy + top_rows));
             let dirty = g.all_dirty || g.dirty.iter().any(|&d| d);
             let cursor_color = g.cursor_color().map_or(self.config_cursor_color, |c| c | 1);
             (cur, dirty, (g.fg_color(), g.bg_color()), cursor_color, g.progress)
