@@ -1553,6 +1553,32 @@ impl Grid {
         true
     }
 
+    /// Whether the shell's line editor owns the cursor line (OSC 133 B..C on
+    /// the main screen). It counts columns codepoint by codepoint with its own
+    /// width table, so cells must follow that count there.
+    fn in_line_editor(&self) -> bool {
+        self.prompt_input_mark.is_some() && !self.alt_active
+    }
+
+    /// A double-width cell for `c`, a pictograph that is narrow by default
+    /// (🏳, 🌡, 👁): zsh counts every codepoint in U+1F300..U+1F6FF as two
+    /// columns. None if the cluster table is full.
+    fn wide_pictograph(&mut self, c: char) -> Option<u32> {
+        let mut buf = [0u8; 4];
+        let text: &str = c.encode_utf8(&mut buf);
+        let id = match self.cluster_ids.get(text) {
+            Some(&id) => id,
+            None if self.clusters.len() < MAX_CLUSTERS => {
+                let id = self.clusters.len() as u32;
+                self.clusters.push(text.into());
+                self.cluster_ids.insert(text.into(), id);
+                id
+            }
+            None => return None,
+        };
+        Some(CLUSTER_FLAG | CLUSTER_WIDE | id)
+    }
+
     /// Mode 2027: join `c` to the grapheme before the cursor when it continues
     /// it (UAX #29 emoji rules: ZWJ sequences, VS16, skin tones, flags, tags).
     fn extend_grapheme(&mut self, c: char) -> bool {
@@ -1573,10 +1599,14 @@ impl Grid {
             _ if is_ri(cp) => is_ri(prev),
             _ => joiner && is_pictographic(cp),
         };
-        if !joins {
+        // While the shell edits the command line (OSC 133 B..C) its line editor
+        // counts columns with the system wcwidth, codepoint by codepoint: only
+        // zero-width ones may join, and nothing widens, or its cursor drifts.
+        let line_editor = self.in_line_editor();
+        if !joins || (line_editor && char_width(c) > 0) {
             return false;
         }
-        let widen = (cp == 0xFE0F && (is_pictographic(base) || keycap)) || is_ri(cp);
+        let widen = !line_editor && ((cp == 0xFE0F && (is_pictographic(base) || keycap)) || is_ri(cp));
         if !self.append_to_cell(row, col, c, widen) {
             return false;
         }
@@ -2885,6 +2915,11 @@ fn parse_x11_color(spec: &[u8]) -> Option<u32> {
 /// following the Unicode East Asian Width and emoji presentation tables.
 pub fn char_width(c: char) -> usize {
     use unicode_width::UnicodeWidthChar;
+    // Regional indicators have emoji presentation: two columns each, as in
+    // zsh, kitty and Ghostty (a flag pair joins into one two-column cluster).
+    if (0x1F1E6..=0x1F1FF).contains(&(c as u32)) {
+        return 2;
+    }
     let w = c.width().unwrap_or(0).min(2);
     #[cfg(target_os = "macos")]
     if w == 1 && is_spacing_mark_range(c as u32) && macos_wcwidth(c) == Some(0) {
@@ -3045,6 +3080,12 @@ impl Perform for Grid {
             self.combine_with_previous(c);
             return;
         }
+        let mut codepoint = if c == PLACEHOLDER { PH_FLAG } else { c as u32 };
+        if w == 1 && (0x1F300..=0x1F6FF).contains(&codepoint) && self.cols >= 2 && self.in_line_editor() {
+            if let Some(wide) = self.wide_pictograph(c) {
+                (codepoint, w) = (wide, 2);
+            }
+        }
         if w == 2 && self.cols < 2 {
             w = 1;
         }
@@ -3083,7 +3124,6 @@ impl Perform for Grid {
             if last + 1 < cols && is_wide_cp(r[last].codepoint) {
                 r[last + 1] = blank;
             }
-            let codepoint = if c == PLACEHOLDER { PH_FLAG } else { c as u32 };
             r[col] = Cell { codepoint, fg, bg };
             if w == 2 {
                 r[col + 1] = Cell { codepoint: 0, fg, bg };
@@ -3952,6 +3992,32 @@ mod tests {
         assert_eq!(row[1].codepoint, 'é' as u32, "precomposed when possible");
         assert_eq!((row[2].codepoint, g.cur.col), ('z' as u32, 3));
         assert_eq!(cluster_line(&g, 0), "q\u{0303}éz");
+    }
+
+    #[test]
+    fn command_line_input_keeps_per_codepoint_widths() {
+        // At the prompt (OSC 133 B..C) zsh counts 👍🏽 as 4 columns and ❤️ as 1.
+        let mut g = Grid::new(20, 2);
+        g.grapheme_mode = true;
+        feed(&mut g, "\x1b]133;A\x07$ \x1b]133;B\x07👍🏽❤\u{FE0F}x");
+        assert_eq!(g.cur.col, 2 + 4 + 1 + 1);
+        assert_eq!(g.cluster(g.display_row(0)[6].codepoint), Some("❤\u{FE0F}"));
+        // Command output clusters as usual.
+        feed(&mut g, "\r\n\x1b]133;C\x07👍🏽❤\u{FE0F}x");
+        assert_eq!(g.cur.col, 2 + 2 + 1);
+        // Narrow-by-default pictographs are two columns there too (zsh's table).
+        let mut g = Grid::new(20, 2);
+        feed(&mut g, "\x1b]133;A\x07$ \x1b]133;B\x07🏳\u{FE0F}x");
+        assert_eq!(g.cur.col, 2 + 2 + 1);
+        assert_eq!(g.cluster(g.display_row(0)[2].codepoint), Some("🏳\u{FE0F}"));
+        // A flag: two regional indicators of two columns each at the prompt,
+        // one two-column cluster in the output.
+        let mut g = Grid::new(20, 2);
+        g.grapheme_mode = true;
+        feed(&mut g, "\x1b]133;A\x07$ \x1b]133;B\x07🇻🇳");
+        assert_eq!(g.cur.col, 2 + 4);
+        feed(&mut g, "\r\n\x1b]133;C\x07🇻🇳");
+        assert_eq!(g.cur.col, 2);
     }
 
     #[cfg(target_os = "macos")]
