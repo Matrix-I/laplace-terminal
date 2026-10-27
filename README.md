@@ -17,7 +17,8 @@
 - **Zero-Allocation Ring Buffer:** Character cells are packed into just **12 bytes** (`codepoint`, packed `fg`, packed `bg`). Scrolling and heavy logging stream directly through an in-place circular ring buffer without runtime heap thrashing.
 - **True 0.0% Idle CPU:** Pure event-driven execution using `ControlFlow::Wait`. Laplace sleeps completely when inactive, never running unnecessary polling loops.
 - **Ghostty-Compatible Configuration:** Reads `~/.laplace/config` and automatically falls back to `~/.config/ghostty/config`. Supports live config reloading (`Cmd+,` / `Ctrl+,` and `Cmd+Shift+,` / `Ctrl+Shift+,`) and auto-reloads on window focus.
-- **Native macOS Lifecycle:** Closing the last tab or window keeps Laplace running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Laplace` immediately restores a fresh tab. Press `Cmd+Q` (or `Ctrl+Shift+Q` on Linux) to quit.
+- **Native macOS Lifecycle:** Closing the last tab or window keeps Laplace running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Laplace` immediately restores a fresh tab. Press `Cmd+Q` (or `Ctrl+Shift+Q` on Linux) to quit; with `confirm-close-surface` (default) Laplace asks first while a program is still running. A native menu bar exposes the main actions, including **Secure Keyboard Entry**.
+- **Multiple Windows:** `Cmd+N` / `Ctrl+Shift+N` opens another window in the current directory; each window has its own tabs and splits.
 - **Tabs with CWD Inheritance:** Seamless multi-tab experience (`Cmd+T`/`Ctrl+Shift+T`, `Cmd+W`/`Ctrl+Shift+W`, tab cycling, 1..9 direct jumps). New tabs automatically open in the current working directory of the active tab.
 - **Ghostty-Style Splits / Panes:** Split any tab horizontally or vertically (`Cmd+D` / `Cmd+Shift+D` on macOS, `Ctrl+Shift+D` / `Ctrl+Shift+E` on Linux). Seamlessly navigate between panes (`Cmd+Option+Arrows` / `Cmd+[` / `Cmd+]`), resize splits (`Cmd+Ctrl+Arrows`), toggle zoom (`Cmd+Shift+Enter`), or equalize ratios (`Cmd+Option+=`). Renders sleek hairline divider borders with zero overhead in the same single GPU instanced draw call.
 - **Smart Hyperlink & Path Detection:** `Cmd+Click` (macOS) / `Ctrl+Click` (Linux) on URLs or local filesystem paths (`~/...`, `./...`, or absolute paths) to open them directly in your default browser or editor. Explicit **OSC 8 hyperlinks** (`ls --hyperlink`, `gcc`, `delta`, `rg --hyperlink-format`) take priority: hovering shows the real target, `file://` links open the local file, and only `http(s)`, `ftp(s)` and `mailto` URIs are opened.
@@ -25,9 +26,12 @@
 - **Find in Terminal (Regex):** Press `Cmd+F` (macOS) or `Ctrl+Shift+F` / `Super+F` (Linux) to open a search box in the top-right corner. Queries are regular expressions by default (`Ctrl+R` toggles literal mode) with smart case. All matches in the scrollback are highlighted; `Enter` / `↑` / `Cmd+G` jump to the previous (older) match, `Shift+Enter` / `↓` / `Cmd+Shift+G` to the next, and `Esc` closes.
 - **Click-to-Position Cursor:** Click anywhere on the active command line to immediately move the shell cursor to that character, with automatic alignment for wide Unicode glyphs, CJK characters, and multi-byte prompt symbols (`❯`, `🦀`, emojis).
 - **Ergonomic Line & Word Editing:** Out-of-the-box support for word jumping (`Option+Left/Right` on macOS without interfering with Mission Control Spaces, `Ctrl+Left/Right` on Linux), prompt-aware deletion before cursor (`Ctrl+U`), delete to line end (`Ctrl+K`), and instant scrollback clear (`Cmd+K` / `Ctrl+Shift+K`).
+- **Automatic Shell Integration:** zsh, bash (including macOS's 3.2), fish and nushell (0.101+) get OSC 133 prompt marks and OSC 7 directory reports without editing any dotfile (injected via `ZDOTDIR`, `bash --rcfile`, or `XDG_DATA_DIRS`); elvish needs one line, `use laplace`, in `rc.elv`. This powers jumping between prompts (`Cmd+Shift+↑/↓`), selecting the last command's output (`Cmd+Shift+O`), new tabs in the current directory, and optionally a bar cursor at the prompt and the window title (`shell-integration-features = cursor,title`).
 - **Kitty Keyboard Protocol:** Full support for all five progressive enhancements (`CSI > flags u`): disambiguated `Esc`/`Ctrl`/`Alt` keys, key repeat & release events, alternate (shifted and US-layout) keys, every key as an escape code, and associated text — with separate flag stacks for the main and alternate screens. Neovim, Helix, fish 4 and Kakoune can tell `Ctrl+I` from `Tab`, `Ctrl+Shift+<key>` from `Ctrl+<key>`, and see key releases.
-- **Full-Screen App & Unicode Support:** Mouse reporting (X10/SGR, click, drag and motion tracking) for vim, tmux and htop; focus events; alternate scroll in `less`/`man`; IME input (Vietnamese Telex/VNI, CJK); combining-mark composition; double-width CJK/emoji glyphs; bold/italic text; strikethrough (SGR 9) and styled underlines (SGR `4:1`..`4:5` single/double/curly/dotted/dashed, `21` double) with their own color (SGR 58/59), as used by Neovim diagnostics; reflow of wrapped lines on resize; synchronized output; OSC 7 (cwd), OSC 8 (hyperlinks), OSC 52 (set clipboard) and OSC 133 (prompt marks).
-- **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and built-in palettes.
+- **xterm `modifyOtherKeys`:** levels 1 and 2 (`CSI > 4 ; n m`) encode modified keys such as `Ctrl+Enter`, `Ctrl+1` or `Ctrl+Tab` as `CSI 27 ; mods ; code ~` for applications that do not speak the Kitty protocol. Unbound `Cmd`/`Super` combinations reach Kitty-protocol applications (e.g. Neovim `<D-…>` mappings).
+- **Full-Screen App & Unicode Support:** Mouse reporting (X10/SGR, click, drag and motion tracking) for vim, tmux and htop; focus events; alternate scroll in `less`/`man`; IME input (Vietnamese Telex/VNI, CJK); combining-mark composition; double-width CJK glyphs; color emoji (Apple Color Emoji on macOS, Noto Color Emoji bitmaps on Linux) with grapheme clustering (DEC mode 2027: ZWJ sequences, flags, skin tones, VS16 and keycaps share one cell pair, marks without a precomposed form stay with their base); right-to-left Hebrew and Arabic shown in visual order with joined Arabic letters on the primary screen; bold/italic text; strikethrough (SGR 9) and styled underlines (SGR `4:1`..`4:5` single/double/curly/dotted/dashed, `21` double) with their own color (SGR 58/59), as used by Neovim diagnostics; reflow of wrapped lines on resize; synchronized output; XTGETTCAP / DECRQSS / XTWINOPS replies, SGR pixel mouse (1016), light/dark color scheme reports (2031, DSR 996), OSC 9 / OSC 777 desktop notifications, OSC 9;4 progress in the tab title, OSC 22 pointer shape, a bell that bounces the Dock and marks the tab with 🔔, OSC 4 / 10 / 11 / 12 (set and query the palette, default foreground/background and cursor color per terminal, reset with OSC 104 / 110 / 111 / 112), OSC 7 (cwd), OSC 8 (hyperlinks), OSC 52 (set clipboard) and OSC 133 (prompt marks).
+- **Inline Images:** the Kitty graphics protocol (PNG / RGB / RGBA, chunked, file, temp-file or shared-memory transfers — `kitten icat`, `timg`, `chafa`, yazi previews; images under the text with `z < 0`; unicode placeholders for tmux and other multiplexers; animation frames) and Sixel (`img2sixel`, `chafa -f sixel`); images scroll with the text and survive reflow.
+- **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and 860+ bundled themes from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (`laplace +list-themes`; files in `~/.laplace/themes` or `~/.config/ghostty/themes` override them). As in Ghostty, a theme is applied before the rest of the config, so your own colors always win.
 
 ---
 
@@ -80,7 +84,8 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 
 | Action | macOS (`Cmd`) | Linux (`Ctrl` / `Super`) | Notes |
 | :--- | :--- | :--- | :--- |
-| **New tab** *(inherits active CWD)* | <kbd>Cmd</kbd> + <kbd>T</kbd> / <kbd>Cmd</kbd> + <kbd>N</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> / <kbd>N</kbd> *(or <kbd>Super</kbd> + <kbd>T/N</kbd>)* | Preserves bare `Ctrl+T` (transpose/fzf) and `Ctrl+N` (history) |
+| **New tab** *(inherits active CWD)* | <kbd>Cmd</kbd> + <kbd>T</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> *(or <kbd>Super</kbd> + <kbd>T</kbd>)* | Preserves bare `Ctrl+T` (transpose/fzf) |
+| **New window** *(inherits active CWD)* | <kbd>Cmd</kbd> + <kbd>N</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd> *(or <kbd>Super</kbd> + <kbd>N</kbd>)* | Preserves bare `Ctrl+N` (history) |
 | **Close active pane / tab** | <kbd>Cmd</kbd> + <kbd>W</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd> *(or <kbd>Super</kbd> + <kbd>W</kbd>)* | Closes active split pane; closes tab if last pane remaining |
 | **Split pane right (Vertical)** | <kbd>Cmd</kbd> + <kbd>D</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>D</kbd> *(or <kbd>Super</kbd> + <kbd>D</kbd>)* | Splits active pane vertically with hairline divider |
 | **Split pane down (Horizontal)** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>D</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd> / <kbd>Super</kbd> + <kbd>Shift</kbd> + <kbd>D</kbd> | Splits active pane horizontally |
@@ -104,6 +109,9 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 | **Reload config file** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Live reload without losing shell session |
 | **Open URL or path** | <kbd>Cmd</kbd> + <kbd>Click</kbd> | <kbd>Ctrl</kbd> + <kbd>Click</kbd> *(or <kbd>Super</kbd> + <kbd>Click</kbd>)* | Opens in default browser / editor via `open` or `xdg-open` |
 | **Hover URL preview** | <kbd>Cmd</kbd> + <kbd>Mouse Move</kbd> | <kbd>Ctrl</kbd> + <kbd>Mouse Move</kbd> *(or <kbd>Super</kbd>)* | Underlines URL and displays preview pill |
+| **Jump to previous / next prompt** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>↑</kbd> / <kbd>↓</kbd> | Scrolls between shell prompts (needs shell integration) |
+| **Select last command output** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> | Selects and copies the output of the last command (needs shell integration) |
+| **Terminal inspector** | <kbd>Cmd</kbd> + <kbd>Option</kbd> + <kbd>I</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>I</kbd> *(or <kbd>Super</kbd> + <kbd>Alt</kbd> + <kbd>I</kbd>)* | Debug overlay: modes, protocols, cell under the mouse, last key's bytes |
 | **Select all** | <kbd>Cmd</kbd> + <kbd>A</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>A</kbd> *(or <kbd>Super</kbd> + <kbd>A</kbd>)* | Selects all scrollback and screen text; copy with <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>. Preserves bare `Ctrl+A` (beginning of line) |
 | **Extend selection** | <kbd>Shift</kbd> + <kbd>Click</kbd> / <kbd>Drag</kbd> | <kbd>Shift</kbd> + <kbd>Click</kbd> / <kbd>Drag</kbd> | Moves the nearest end of the current selection to the mouse and copies it |
 | **Select text in mouse apps** | <kbd>Shift</kbd> + <kbd>Drag</kbd> | <kbd>Shift</kbd> + <kbd>Drag</kbd> | Bypasses mouse reporting in vim/tmux/htop to select and copy locally |
@@ -145,7 +153,7 @@ window-colorspace = "display-p3"
 # Colors & Palette
 background = #121316
 foreground = #e6e6e6
-# theme = "catppuccin-mocha"
+# theme = "Catppuccin Mocha"     # any name from `laplace +list-themes`
 
 # Cursor
 cursor-style = "block"          # "block", "bar", "underline", "block_hollow"
@@ -157,12 +165,45 @@ mouse-scroll-precision = 1.0
 mouse-scroll-discrete = 3.0
 
 # Shell Integration
-shell-integration = "detect"     # "detect", "zsh", "bash", "none"
+shell-integration = "detect"     # "detect", "zsh", "bash", "fish", "nushell", "elvish", "none"
 shell-integration-features = "cursor,title"
+
+# Padding (points) and a light/dark theme pair that follows the system appearance
+window-padding-x = 8
+window-padding-y = 6
+window-padding-balance = true
+# theme = light:Horizon Bright,dark:Dracula
+
+# Colors and behavior
+# cursor-color = #f38ba8
+# selection-background = #3d59a1
+# selection-foreground = #ffffff
+# copy-on-select = false
+# title = Work
+# bell-features = border,audio,no-attention
+# bell-audio-path = /System/Library/Sounds/Glass.aiff
+# font-feature = -calt          # ligatures are on with fonts that have them; also ss01, liga=0, ...
+# adjust-cell-height = 10%       # or pixels: 2 / -1; also adjust-cell-width
+# font-thicken = true
+# keybind = global:cmd+grave_accent=toggle_quick_terminal   # drop-down Quick Terminal (macOS; X11 on Linux)
+#   Wayland: bind `laplace +toggle-quick-terminal` to a desktop shortcut instead
+# grapheme-width-method = legacy  # one width per codepoint (default `unicode`: emoji sequences are one grapheme)
+# custom-shader = ~/.laplace/shaders/crt.glsl   # Ghostty/Shadertoy GLSL (mainImage, iChannel0, iTime); repeat to chain
+# macos-native-tabs = true       # Cmd+T opens native macOS window tabs
+# confirm-close-surface = true   # ask before closing a running program (false / always)
+# scrollback-limit = 10000000    # bytes, as in Ghostty (default: 5000 lines)
+# unfocused-split-opacity = 0.7  # fade inactive splits (0.15 - 1.0)
+# unfocused-split-fill = #000000
+# minimum-contrast = 1.1         # force readable text (1 = off, 21 = black/white)
 
 # Auto Update
 auto-update = "check"           # "check" (default), "download", or "off"
 auto-update-channel = "stable"  # "stable" (default) or "tip"
+
+# Key bindings (Ghostty syntax; the last match wins, `keybind = clear` drops them all)
+keybind = cmd+t=new_split:right
+keybind = ctrl+shift+h=text:hello\n
+keybind = cmd+d=unbind
 ```
 
 ## 🔄 Auto-Update & CLI Commands

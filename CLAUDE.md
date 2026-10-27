@@ -21,7 +21,8 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 
 | Feature | macOS (`target_os = "macos"`) | Linux (`not(target_os = "macos")`) | Rationale / Behavior |
 | :--- | :--- | :--- | :--- |
-| **New / Duplicate Tab** | `Cmd + T` or `Cmd + N` | `Ctrl + Shift + T` / `Ctrl + Shift + N` *(or `Super + T/N`)* | Bare `Ctrl+T` is needed for shell transpose/fzf; bare `Ctrl+N` is history next. |
+| **New / Duplicate Tab** | `Cmd + T` | `Ctrl + Shift + T` *(or `Super + T`)* | Bare `Ctrl+T` is needed for shell transpose/fzf. |
+| **New Window** | `Cmd + N` | `Ctrl + Shift + N` *(or `Super + N`)* | Opens in the active pane's directory; bare `Ctrl+N` is history next. |
 | **Close Tab** | `Cmd + W` | `Ctrl + Shift + W` *(or `Super + W`)* | Bare `Ctrl+W` is delete word in bash/zsh. |
 | **Copy Selection** | `Cmd + C` | `Ctrl + Shift + C` *(or `Super + C`)* | Bare `Ctrl+C` sends SIGINT (`\x03`). |
 | **Paste Clipboard** | `Cmd + V` | `Ctrl + Shift + V` *(or `Super + V`)* | Bare `Ctrl+V` sends verbatim escape (`\x16`). |
@@ -37,6 +38,9 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **Reset Zoom** | `Cmd + 0` | `Ctrl + 0` *(with or without Shift, or Super)* | Resets font size to configured default. |
 | **Open URL / Path Click** | `Cmd + Click` | `Ctrl + Click` *(or `Super + Click`)* | Opens target with `open` (macOS), `xdg-open` (Linux). |
 | **Hover URL Underline** | `Cmd + Mouse Move` | `Ctrl + Mouse Move` *(or `Super + Mouse Move`)* | Shows pointer cursor and URL preview pill. |
+| **Jump to Prompt (Prev / Next)** | `Cmd + Shift + ↑ / ↓` | `Ctrl + Shift + ↑ / ↓` *(or `Super + Shift + ↑ / ↓`)* | Scrolls to the previous / next shell prompt from OSC 133 marks (shell integration). `Cmd + ↑/↓` keeps navigating splits. |
+| **Select Last Command Output** | `Cmd + Shift + O` | `Ctrl + Shift + O` *(or `Super + Shift + O`)* | Selects and copies the output of the last finished command (OSC 133 C..D). Bare `Ctrl+O` is bash operate-and-get-next. |
+| **Terminal Inspector** | `Cmd + Option + I` | `Ctrl + Shift + I` *(or `Super + Alt + I`)* | Debug overlay (bottom-right): grid size, cursor, modes, mouse/keyboard protocols, the cell under the mouse and the last key's bytes. Bare `Ctrl+I` is Tab. |
 | **Select All** | `Cmd + A` | `Ctrl + Shift + A` *(or `Super + A`)* | Selects all scrollback and screen text (then copy with `Cmd+C` / `Ctrl+Shift+C`). Bare `Ctrl+A` is readline beginning-of-line. |
 | **Extend Selection** | `Shift + Click / Drag` | `Shift + Click / Drag` | Moves the nearest end of the current selection to the mouse (the far end stays anchored) and copies it; without a selection it starts a new one. |
 | **Bypass Mouse Reporting** | `Shift + Click / Drag` | `Shift + Click / Drag` | Local selection while an app tracks the mouse; `Cmd`/`Super + Click` still opens links. |
@@ -76,9 +80,9 @@ When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` 
 | `src/keymap.rs` | Pure shortcut resolution and key-to-byte encoding for macOS and Linux, legacy and Kitty keyboard protocol (unit-tested) |
 | `src/mouse.rs` | Mouse reporting encoding (X10 / SGR) for applications that track the mouse |
 | `src/pty.rs` | `openpty` + `fork`/`execve`, PTY reader thread (parses into the grid) |
-| `src/grid.rs` | 12-byte `Cell`, scrollback ring buffer, `vte::Perform` implementation |
+| `src/grid.rs` | 12-byte `Cell` (grapheme clusters and image placeholders encoded in `codepoint`), scrollback ring buffer, `vte::Perform` implementation, APC filter for Kitty graphics |
 | `src/renderer.rs` | wgpu pipeline, instance buffer, tab bar, history popup |
-| `src/atlas.rs` | Glyph atlas, procedural sprites, font fallback chain, CoreText fallback |
+| `src/atlas.rs` | Glyph atlas (R8 + RGBA color emoji), procedural sprites, font fallback chain, CoreText fallback, ligature shaping |
 | `src/shader.wgsl` | Single instanced draw call for all cells |
 | `src/split.rs` | Split-pane layout tree |
 | `src/history.rs` | Shell history search (fzf-style matching) |
@@ -86,6 +90,13 @@ When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` 
 | `src/config.rs` | Ghostty-compatible config parsing and themes |
 | `src/macos.rs` | Objective-C FFI (`msg_send!`) for window/vibrancy/dock integration; no-op stubs elsewhere |
 | `src/update.rs` | Auto-update checking, SHA-256 verification, asset download, self-replacement |
+| `src/graphics.rs` | Kitty graphics (transmission, placements, animation, placeholders) and Sixel decoding; per-terminal image store |
+| `src/image_layer.rs` / `src/image.wgsl` | GPU side of inline images: textures and per-placement quads, drawn below or above the cells by z |
+| `src/postfx.rs` | `custom-shader` passes (Shadertoy GLSL compiled through naga) |
+| `src/shell_integration.rs` / `src/shell/` | Automatic shell integration scripts (zsh, bash, fish, nushell, elvish) |
+| `src/x11colors.rs` | X11 color names for OSC color specs |
+| `src/bidi.rs` | Visual order of right-to-left lines (implicit UAX #9) and Arabic contextual forms, applied at draw and hit-test time |
+| `src/hotkey.rs` | Quick Terminal global hotkey outside macOS (X11 key grab) and the `+toggle-quick-terminal` control socket |
 
 ## Core Invariants
 
