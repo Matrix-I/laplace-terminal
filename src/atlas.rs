@@ -57,8 +57,12 @@ static THICKEN: AtomicBool = AtomicBool::new(false);
 /// Set `adjust-cell-width`, `adjust-cell-height` and `font-thicken`; they take
 /// effect when an atlas is (re)built.
 pub fn set_font_tweaks(width: MetricAdjust, height: MetricAdjust, thicken: bool) {
-    *CELL_ADJUST.lock() = (width, height);
-    THICKEN.store(thicken, Ordering::Relaxed);
+    let mut adj = CELL_ADJUST.lock();
+    if *adj != (width, height) || THICKEN.load(Ordering::Relaxed) != thicken {
+        *adj = (width, height);
+        THICKEN.store(thicken, Ordering::Relaxed);
+        *FONT_CACHE.lock() = None;
+    }
 }
 
 /// Slot 0 is always blank (space / empty cell).
@@ -217,7 +221,11 @@ pub fn parse_font_feature(v: &str) -> Result<rustybuzz::Feature, String> {
 }
 
 pub fn set_font_features(features: &[rustybuzz::Feature]) {
-    *FONT_FEATURES.lock() = features.to_vec();
+    let mut feat = FONT_FEATURES.lock();
+    if *feat != features {
+        *feat = features.to_vec();
+        *FONT_CACHE.lock() = None;
+    }
 }
 
 pub struct Atlas {
@@ -2100,6 +2108,8 @@ fn blit_fit(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) {
 // Font Discovery (Primary + Nerd Font / Symbol Fallbacks)
 // ============================================================================
 
+static FONT_CACHE: Mutex<Option<(Vec<String>, Arc<FontSet>)>> = parking_lot::const_mutex(None);
+
 /// Load the primary monospace font and any available symbol/Nerd Font fallbacks.
 ///
 /// `families` comes from the `font-family` config option: the first family
@@ -2107,6 +2117,13 @@ fn blit_fit(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) {
 /// fallbacks before the auto-discovered symbol fonts. Without configured
 /// families, `LAPLACE_FONT=/path/to/font.ttf` or the platform defaults apply.
 pub fn load_font(families: &[String]) -> Arc<FontSet> {
+    let mut cache = FONT_CACHE.lock();
+    if let Some((ref cached_families, ref font_set)) = *cache {
+        if cached_families.as_slice() == families {
+            return Arc::clone(font_set);
+        }
+    }
+
     let mut configured_faces: Vec<(String, u32)> = Vec::new();
     for fam in families {
         match crate::fontdb::find_family(fam) {
@@ -2151,7 +2168,7 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
     let (mut primary_path, mut primary, mut shaper) = (None, None, None);
 
     let mut configured_iter = configured_faces.into_iter();
-    while let Some((p, idx)) = configured_iter.next() {
+    for (p, idx) in configured_iter.by_ref() {
         let s = shaper_for(&p, idx);
         if let Some(f) = parse_font(&p, idx, s.is_some()) {
             primary_path = Some(p);
@@ -2198,7 +2215,9 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         fallbacks.push(f);
     }
 
-    Arc::new(FontSet { primary, fallbacks, shaper })
+    let set = Arc::new(FontSet { primary, fallbacks, shaper });
+    *cache = Some((families.to_vec(), Arc::clone(&set)));
+    set
 }
 
 /// A shaping face over `path`. The mapping is leaked on purpose: faces borrow

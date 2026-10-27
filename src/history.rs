@@ -116,6 +116,7 @@ impl HistorySearch {
     pub fn close(&mut self) {
         self.is_open = false;
         self.query.clear();
+        self.filtered = Vec::new();
     }
 
     /// Toggle visibility of the history search popup.

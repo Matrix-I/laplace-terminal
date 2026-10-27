@@ -4629,7 +4629,7 @@ mod tests {
             &mut g,
             "Docs at https://ghostty.org/docs and repo (http://github.com/ghostty-org).\r\n\
              ~/Desktop/personal/laplace-terminal \u{e0b0} main\r\n\
-             $ cd ./target/release",
+             $ cd ./src",
         );
         let link1 = g.find_hyperlink_at(0, 15, None).expect("find https url");
         assert_eq!(link1.url, "https://ghostty.org/docs");
@@ -4649,8 +4649,8 @@ mod tests {
         assert!(path1.is_path);
 
         // Relative path detection
-        let path2 = g.find_hyperlink_at(2, 10, None).expect("find relative path");
-        assert_eq!(path2.url, "./target/release");
+        let path2 = g.find_hyperlink_at(2, 6, None).expect("find relative path");
+        assert_eq!(path2.url, "./src");
         assert!(path2.is_path);
 
         assert!(g.find_hyperlink_at(0, 2, None).is_none());

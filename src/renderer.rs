@@ -158,6 +158,23 @@ pub struct Renderer {
     min_contrast: f32,
 }
 
+static WGPU_INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
+
+fn global_instance() -> &'static wgpu::Instance {
+    WGPU_INSTANCE.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        let backends = wgpu::Backends::METAL;
+        #[cfg(not(target_os = "macos"))]
+        let backends = wgpu::Backends::VULKAN;
+
+        wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            flags: wgpu::InstanceFlags::empty(),
+            ..Default::default()
+        })
+    })
+}
+
 impl Renderer {
     pub fn new(
         window: Arc<Window>,
@@ -168,16 +185,7 @@ impl Renderer {
     ) -> Self {
         let size = window.inner_size();
 
-        #[cfg(target_os = "macos")]
-        let backends = wgpu::Backends::METAL;
-        #[cfg(not(target_os = "macos"))]
-        let backends = wgpu::Backends::VULKAN;
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends,
-            flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
-        });
+        let instance = global_instance();
         let surface = instance.create_surface(window.clone()).expect("create surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,

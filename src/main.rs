@@ -214,6 +214,8 @@ struct State {
     titles_refreshed_at: std::time::Instant,
     /// The last tab closed; `App` removes the window (or hides the last one).
     close_requested: bool,
+    /// The window is completely covered, minimized or on an inactive Space.
+    occluded: bool,
     /// A shortcut asked for a new window; `App` opens it after the event.
     new_window_requested: bool,
     /// New tab as a native macOS window tab (`macos-native-tabs`).
@@ -275,10 +277,15 @@ impl App {
 
     /// Drop the hidden, tab-less window kept for the Dock once another one opens.
     fn drop_tabless_windows(&mut self) {
+        let had_tabless = self.windows.iter().any(|s| s.tabs.is_empty());
         for s in self.windows.iter_mut().filter(|s| s.tabs.is_empty()) {
             s.renderer.shrink_drawables();
         }
         self.windows.retain(|w| !w.tabs.is_empty());
+        if had_tabless {
+            #[cfg(target_os = "macos")]
+            macos::release_free_memory();
+        }
     }
 
     /// Show the Quick Terminal (creating it on first use) or hide it when it is
@@ -363,6 +370,8 @@ impl App {
             if self.windows.len() > 1 {
                 // Dropping the state closes the window and hangs up its shells.
                 self.windows.remove(pos).renderer.shrink_drawables();
+                #[cfg(target_os = "macos")]
+                macos::release_free_memory();
                 continue;
             }
             let s = &mut self.windows[pos];
@@ -520,6 +529,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         sync_pending: false,
         titles_refreshed_at: std::time::Instant::now(),
         close_requested: false,
+        occluded: false,
         new_window_requested: false,
         native_tab_requested: false,
         quick: false,
@@ -533,7 +543,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
 impl ApplicationHandler<AppEvent> for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         if let StartCause::ResumeTimeReached { .. } = cause {
-            for s in self.windows.iter().filter(|s| !s.tabs.is_empty()) {
+            for s in self.windows.iter().filter(|s| !s.tabs.is_empty() && !s.occluded) {
                 s.window.request_redraw();
             }
         }
@@ -1206,8 +1216,32 @@ impl App {
                 }
             }
 
+            WindowEvent::Occluded(occluded) => {
+                s.occluded = occluded;
+                if occluded {
+                    s.renderer.shrink_drawables();
+                    #[cfg(target_os = "macos")]
+                    macos::release_free_memory();
+                } else {
+                    let sz = s.window.inner_size();
+                    if sz.width > 0 && sz.height > 0 {
+                        s.renderer.resize(sz.width, sz.height);
+                    }
+                    s.renderer.invalidate();
+                    s.window.request_redraw();
+                }
+            }
+
             WindowEvent::Focused(focused) => {
                 s.focused = focused;
+                if focused && s.occluded {
+                    s.occluded = false;
+                    let sz = s.window.inner_size();
+                    if sz.width > 0 && sz.height > 0 {
+                        s.renderer.resize(sz.width, sz.height);
+                    }
+                    s.renderer.invalidate();
+                }
                 if focused {
                     s.renderer.set_bell_border(false);
                 }
@@ -1243,6 +1277,9 @@ impl App {
             }
 
             WindowEvent::RedrawRequested => {
+                if s.occluded {
+                    return;
+                }
                 // Re-arm before rendering so any PTY write during the draw schedules the next frame.
                 waker.rearm();
                 render_active(s);
