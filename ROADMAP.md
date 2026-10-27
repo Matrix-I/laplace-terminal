@@ -200,6 +200,23 @@ Each item lists what to run inside a Laplace window and the expected result.
   - X11: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` + reload; from another window press it → a borderless Laplace panel at the top, again → hidden
   - Wayland: create a desktop shortcut running `laplace +toggle-quick-terminal` → toggles the same way; with Laplace not running it prints "no running Laplace"
 
+## Tech debt (v0.4.1)
+
+Found while benchmarking v0.4.0 against v0.3.0 (`perf_bench` parser harness on a
+160×50 grid, best of 3 interleaved rounds; runtime probe through `$SHELL`).
+
+- [ ] **Unicode parser throughput ~16% below v0.3.0** (≈100 vs ≈120 MB/s on the mixed Vietnamese / CJK / emoji / box-drawing corpus)
+  - ASCII, SGR and cursor-movement output are back to v0.3.0 speed (`91a494a`); non-ASCII still goes through `char_cell()` in `src/grid.rs`
+  - Already ruled out: the `char_width` additions (regional indicators, macOS `wcwidth` for spacing marks) cost only ~3%; inlining `char_cell` changes nothing
+  - Next: profile the Unicode corpus alone and ablate `combine_with_previous`, `is_wide_cp` and the pictograph check
+- [ ] **Startup footprint ~6.5 MB above v0.3.0** (≈77 vs ≈70.5 MB physical footprint, idle shell)
+  - Almost all of it is `Malloc Small`: live heap grows only ~1.2 MB, fragmentation goes from 21% to 34% (~10k more allocations)
+  - `release_free_memory()` already runs after the first frame; calling it again 3 s later frees nothing, so the pages are partially live
+  - Next: find the startup allocations that interleave short- and long-lived objects (`MallocStackLogging` + `malloc_history`) and allocate the long-lived ones up front or in one block
+- [ ] **Linux release binary not stripped** (9.1 MB vs 5.7 MB in v0.3.0)
+  - `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17` leaves the symbols in despite `strip = true`
+  - Next: check `file` / `nm` on the output, strip it in the release steps (or pass the strip flag to zig), and compare the tarball size
+
 ## Terminal protocols
 
 - [x] OSC 4 / 10 / 11 / 12 set and query (palette, fg, bg, cursor color) + OSC 104 / 110 / 111 / 112 reset
