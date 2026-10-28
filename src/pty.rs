@@ -144,6 +144,7 @@ impl Pty {
         let mut envp: Vec<*const libc::c_char> = env.iter().map(|s| s.as_ptr()).collect();
         envp.push(std::ptr::null());
         let start_dir = cstr(target_dir);
+        let max_fd = (unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }).clamp(256, 4096) as libc::c_int;
 
         let mut ws = winsize(cols, rows, cell_w, cell_h);
         let (mut master, mut slave): (libc::c_int, libc::c_int) = (-1, -1);
@@ -182,10 +183,18 @@ impl Pty {
                 libc::dup2(slave, 0);
                 libc::dup2(slave, 1);
                 libc::dup2(slave, 2);
-                if slave > 2 {
-                    libc::close(slave);
+                // Close all inherited file descriptors >= 3 so no PTY masters, sockets,
+                // or driver handles leak into the shell.
+                #[cfg(target_os = "linux")]
+                if libc::close_range(3, !0, 0) != 0 {
+                    for fd in 3..max_fd {
+                        libc::close(fd);
+                    }
                 }
-                libc::close(master);
+                #[cfg(not(target_os = "linux"))]
+                for fd in 3..max_fd {
+                    libc::close(fd);
+                }
                 // Rust ignores SIGPIPE; ignored dispositions survive exec, so reset them.
                 for sig in [libc::SIGPIPE, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGCHLD, libc::SIGHUP] {
                     libc::signal(sig, libc::SIG_DFL);

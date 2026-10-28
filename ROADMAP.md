@@ -230,7 +230,7 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
 - [x] **Medium: Positional argument delimiter `--` and executable guard in `open_target` (`src/main.rs`)**
   - Vulnerability: Direct argument passing to `open` (macOS) and `xdg-open` (Linux) without `--` permits flag injection for targets starting with `-`. On macOS, clicking `.app` / `.command` files via `open` executes them directly.
   - Fix: Pass `--` delimiter before targets (`open -- <path>`). Guard or confirm opening executable files/scripts from terminal clicks or OSC 8 hyperlinks.
-- [ ] **Medium: Close all file descriptors $\ge 3$ post-fork before `execve` (`src/pty.rs`)**
+- [x] **Medium: Close all file descriptors $\ge 3$ post-fork before `execve` (`src/pty.rs`)**
   - Vulnerability: Child processes close only `master` and `slave`. Any descriptors opened without `O_CLOEXEC` by drivers, threads, or concurrent PTY allocations leak into child shells.
   - Fix: Call `closefrom(3)` (macOS/BSD) or `close_range(3, !0, 0)` (Linux) in the child process immediately after `fork()`.
 - [ ] **Low: Control socket placement in user-private directory (`src/hotkey.rs`)**

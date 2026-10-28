@@ -668,6 +668,7 @@ impl Store {
 }
 
 fn is_temp_dir(dir: &std::path::Path) -> bool {
+    #[allow(unused_mut)]
     let mut temp_dirs = vec![
         std::env::temp_dir(),
         std::path::PathBuf::from("/tmp"),
