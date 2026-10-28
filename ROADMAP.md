@@ -233,7 +233,7 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
 - [x] **Medium: Close all file descriptors $\ge 3$ post-fork before `execve` (`src/pty.rs`)**
   - Vulnerability: Child processes close only `master` and `slave`. Any descriptors opened without `O_CLOEXEC` by drivers, threads, or concurrent PTY allocations leak into child shells.
   - Fix: Call `closefrom(3)` (macOS/BSD) or `close_range(3, !0, 0)` (Linux) in the child process immediately after `fork()`.
-- [ ] **Low: Control socket placement in user-private directory (`src/hotkey.rs`)**
+- [x] **Low: Control socket placement in user-private directory (`src/hotkey.rs`)**
   - Vulnerability: When `XDG_RUNTIME_DIR` is missing, `/tmp/laplace-{uid}.sock` can be pre-created by other users in `/tmp` (sticky bit), causing `bind` to fail (local DoS on global hotkey).
   - Fix: Store the control socket in a secure private directory (e.g., `~/.cache/laplace/` or Darwin user temp directory).
 - [ ] **Quality / Memory: Font Mmap lifecycle on configuration reload (`src/atlas.rs`)**

@@ -28,12 +28,25 @@ fn toggle() {
     }
 }
 
-/// The control socket: in `$XDG_RUNTIME_DIR` (private to the user), else `/tmp`.
+/// The control socket: in `$XDG_RUNTIME_DIR` (private to the user), else user-private temp/cache directory.
 pub fn socket_path() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("laplace.sock"),
-        // SAFETY: getuid has no preconditions.
-        _ => PathBuf::from(format!("/tmp/laplace-{}.sock", unsafe { libc::getuid() })),
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir).join("laplace.sock");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Darwin temp_dir is user-private (/var/folders/.../T/)
+        std::env::temp_dir().join("laplace.sock")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let dir = PathBuf::from(home).join(".cache").join("laplace");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("laplace.sock")
+        } else {
+            std::env::temp_dir().join(format!("laplace-{}.sock", unsafe { libc::getuid() }))
+        }
     }
 }
 
@@ -49,6 +62,9 @@ pub fn send_toggle() -> std::io::Result<()> {
 pub fn listen(proxy: EventLoopProxy<AppEvent>) {
     *PROXY.lock() = Some(proxy);
     let path = socket_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if UnixStream::connect(&path).is_ok() {
         return;
     }
