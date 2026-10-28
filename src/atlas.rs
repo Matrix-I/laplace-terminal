@@ -90,8 +90,9 @@ pub struct FontSet {
     pub primary: fontdue::Font,
     pub fallbacks: Vec<fontdue::Font>,
     /// HarfBuzz-compatible shaper over the primary font, for ligatures and
-    /// `font-feature`; its bytes stay mapped for the rest of the process.
+    /// `font-feature`; its bytes stay mapped for the lifetime of this FontSet.
     shaper: Option<rustybuzz::Face<'static>>,
+    _mmap: Option<Arc<memmap2::Mmap>>,
 }
 
 /// Slot-map key tag for a shaped glyph piece: bits 5..27 index `Atlas::pieces`,
@@ -2101,7 +2102,7 @@ fn rasterize_color(buf: &mut [u8], w: u32, h: u32, _px: f32, text: &str) -> bool
     static FACE: OnceLock<Option<rustybuzz::Face<'static>>> = OnceLock::new();
     let face = FACE.get_or_init(|| {
         let face = crate::fontdb::find_family("Noto Color Emoji")?;
-        shaper_for(&face.path, face.index)
+        shaper_for(&face.path, face.index).map(|(f, _)| f)
     });
     let Some(face) = face else { return false };
     // Shaped, so ZWJ / flag / skin tone sequences become their ligature glyph.
@@ -2262,18 +2263,24 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         fallbacks.push(f);
     }
 
-    let set = Arc::new(FontSet { primary, fallbacks, shaper });
+    let (shaper_face, shaper_mmap) = match shaper {
+        Some((f, m)) => (Some(f), Some(m)),
+        None => (None, None),
+    };
+    let set = Arc::new(FontSet { primary, fallbacks, shaper: shaper_face, _mmap: shaper_mmap });
     *cache = Some((families.to_vec(), Arc::clone(&set)));
     set
 }
 
-/// A shaping face over `path`. The mapping is leaked on purpose: faces borrow
-/// it, and fonts are only (re)loaded at startup and on a font change.
-fn shaper_for(path: &str, index: u32) -> Option<rustybuzz::Face<'static>> {
+/// A shaping face over `path`. The memory-mapped file is kept alive in the returned `Arc<Mmap>`.
+fn shaper_for(path: &str, index: u32) -> Option<(rustybuzz::Face<'static>, Arc<memmap2::Mmap>)> {
     let file = std::fs::File::open(path).ok()?;
     // SAFETY: font files are not modified while mapped (same as for fontdue).
-    let map: &'static memmap2::Mmap = Box::leak(Box::new(unsafe { memmap2::Mmap::map(&file) }.ok()?));
-    rustybuzz::Face::from_slice(map, index)
+    let map = Arc::new(unsafe { memmap2::Mmap::map(&file) }.ok()?);
+    // SAFETY: the Face references bytes owned by `map`, which is kept alive alongside it in FontSet.
+    let bytes: &'static [u8] = unsafe { &*(&**map as *const [u8]) };
+    let face = rustybuzz::Face::from_slice(bytes, index)?;
+    Some((face, map))
 }
 
 fn find_first_symbol_font(exclude_path: Option<&str>) -> Option<fontdue::Font> {
@@ -2423,7 +2430,10 @@ mod tests {
     #[test]
     fn ligatures_shape_into_glyph_pieces() {
         let Ok(path) = std::env::var("LAPLACE_LIGATURE_FONT") else { return };
-        let fonts = FontSet { primary: parse_font(&path, 0, true).unwrap(), fallbacks: Vec::new(), shaper: shaper_for(&path, 0) };
+        let (shaper, _mmap) = shaper_for(&path, 0)
+            .map(|(f, m)| (Some(f), Some(m)))
+            .unwrap_or((None, None));
+        let fonts = FontSet { primary: parse_font(&path, 0, true).unwrap(), fallbacks: Vec::new(), shaper, _mmap };
         let row: Vec<crate::grid::Cell> =
             "ab -> cd != ef".chars().map(|c| crate::grid::Cell { codepoint: c as u32, ..Default::default() }).collect();
         let mut out = Vec::new();
