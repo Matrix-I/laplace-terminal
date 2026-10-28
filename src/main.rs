@@ -1719,15 +1719,33 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
                 p.to_path_buf()
             } else if let Some(base) = cwd {
                 base.join(p)
+            } else if target.starts_with('-') {
+                std::path::PathBuf::from(format!("./{target}"))
             } else {
                 p.to_path_buf()
             }
         };
 
         #[cfg(target_os = "macos")]
-        let res = spawn_detached(std::process::Command::new("open").arg(&path));
+        let res = {
+            let mut cmd = std::process::Command::new("open");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let is_exec = path
+                    .metadata()
+                    .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+                    .unwrap_or(false);
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if is_exec || ext.eq_ignore_ascii_case("app") || ext.eq_ignore_ascii_case("command") {
+                    cmd.arg("-R");
+                }
+            }
+            cmd.arg("--").arg(&path);
+            spawn_detached(&mut cmd)
+        };
         #[cfg(target_os = "linux")]
-        let res = spawn_detached(std::process::Command::new("xdg-open").arg(&path));
+        let res = spawn_detached(std::process::Command::new("xdg-open").arg("--").arg(&path));
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", path.to_str().unwrap_or(target)])
@@ -1738,9 +1756,9 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
         }
     } else {
         #[cfg(target_os = "macos")]
-        let res = spawn_detached(std::process::Command::new("open").arg(target));
+        let res = spawn_detached(std::process::Command::new("open").arg("-u").arg(target));
         #[cfg(target_os = "linux")]
-        let res = spawn_detached(std::process::Command::new("xdg-open").arg(target));
+        let res = spawn_detached(std::process::Command::new("xdg-open").arg("--").arg(target));
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", target])

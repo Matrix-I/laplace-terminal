@@ -227,7 +227,7 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
 - [x] **High: Restrict Kitty graphics protocol local file access & temporary file deletion (`src/graphics.rs`)**
   - Vulnerability: `t=f` / `t=t` loads arbitrary filesystem paths, allowing remote SSH sessions or untrusted output to probe local file existence/errors. `t=t` unlinks any file containing `tty-graphics-protocol`.
   - Fix: Restrict `t=f` and `t=t` file reads to local secure temporary directories (e.g. `$TMPDIR`, `/tmp`) or private cache; ensure `t=t` unlinks only files strictly within Laplace's designated temporary directory.
-- [ ] **Medium: Positional argument delimiter `--` and executable guard in `open_target` (`src/main.rs`)**
+- [x] **Medium: Positional argument delimiter `--` and executable guard in `open_target` (`src/main.rs`)**
   - Vulnerability: Direct argument passing to `open` (macOS) and `xdg-open` (Linux) without `--` permits flag injection for targets starting with `-`. On macOS, clicking `.app` / `.command` files via `open` executes them directly.
   - Fix: Pass `--` delimiter before targets (`open -- <path>`). Guard or confirm opening executable files/scripts from terminal clicks or OSC 8 hyperlinks.
 - [ ] **Medium: Close all file descriptors $\ge 3$ post-fork before `execve` (`src/pty.rs`)**
