@@ -224,7 +224,7 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
 - [x] **High: Validate hexadecimal characters in XTGETTCAP DCS responses (`src/grid.rs`)**
   - Vulnerability: Unsanitized input echoed back in `reply_termcap` for unknown/invalid capabilities (`\x1bP0+r<hex_name>\x1b\`) could inject control characters or commands into the shell stdin queue.
   - Fix: Validate that `hex_name` contains strictly valid ASCII hexadecimal characters (`0-9`, `a-f`, `A-F`); drop or ignore requests containing invalid characters.
-- [ ] **High: Restrict Kitty graphics protocol local file access & temporary file deletion (`src/graphics.rs`)**
+- [x] **High: Restrict Kitty graphics protocol local file access & temporary file deletion (`src/graphics.rs`)**
   - Vulnerability: `t=f` / `t=t` loads arbitrary filesystem paths, allowing remote SSH sessions or untrusted output to probe local file existence/errors. `t=t` unlinks any file containing `tty-graphics-protocol`.
   - Fix: Restrict `t=f` and `t=t` file reads to local secure temporary directories (e.g. `$TMPDIR`, `/tmp`) or private cache; ensure `t=t` unlinks only files strictly within Laplace's designated temporary directory.
 - [ ] **Medium: Positional argument delimiter `--` and executable guard in `open_target` (`src/main.rs`)**

@@ -667,23 +667,76 @@ impl Store {
     }
 }
 
+fn is_temp_dir(dir: &std::path::Path) -> bool {
+    let mut temp_dirs = vec![
+        std::env::temp_dir(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/var/tmp"),
+    ];
+    #[cfg(target_os = "macos")]
+    {
+        temp_dirs.push(std::path::PathBuf::from("/private/tmp"));
+        temp_dirs.push(std::path::PathBuf::from("/private/var/tmp"));
+    }
+    let Ok(canonical_dir) = dir.canonicalize() else {
+        return false;
+    };
+    temp_dirs.iter().any(|td| {
+        td.canonicalize().is_ok_and(|ctd| canonical_dir.starts_with(&ctd))
+    })
+}
+
+fn is_sensitive_path(path: &std::path::Path) -> bool {
+    let path_str = path.to_string_lossy();
+    for c in path.components() {
+        let name = c.as_os_str().to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            ".ssh" | ".gnupg" | ".aws" | ".config" | ".bash_history" | ".zsh_history"
+        ) {
+            return true;
+        }
+    }
+    path_str.starts_with("/etc")
+        || path_str.starts_with("/private/etc")
+        || path_str.starts_with("/dev")
+        || path_str.starts_with("/proc")
+        || path_str.starts_with("/sys")
+}
+
 /// Decode a transmission into `(width, height, rgba)`.
 fn decode_kitty(c: &KittyCommand, payload: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let raw = base64_decode(payload).ok_or("EINVAL:bad base64")?;
     let data = match c.medium {
         b'd' => raw,
         b'f' | b't' => {
-            let path = String::from_utf8(raw).map_err(|_| "EINVAL:bad path")?;
-            let meta = std::fs::metadata(&path).map_err(|_| "ENOENT:file not found")?;
+            let path_str = String::from_utf8(raw).map_err(|_| "EINVAL:bad path")?;
+            let path = std::path::Path::new(&path_str);
+            let canonical = path.canonicalize().map_err(|_| "ENOENT:file not found")?;
+
+            if c.medium == b't' {
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let parent = path.parent();
+                let canonical_parent = canonical.parent();
+                if !file_name.contains("tty-graphics-protocol")
+                    || !parent.is_some_and(is_temp_dir)
+                    || !canonical_parent.is_some_and(is_temp_dir)
+                {
+                    return Err("EPERM:temporary file must be in temporary directory".into());
+                }
+            } else if is_sensitive_path(&canonical) {
+                return Err("EPERM:access denied".into());
+            }
+
+            let meta = std::fs::metadata(&canonical).map_err(|_| "ENOENT:file not found")?;
             if !meta.is_file() || meta.len() > STORE_LIMIT as u64 {
                 return Err("EINVAL:not a regular file".into());
             }
-            let file = std::fs::File::open(&path).map_err(|_| "ENOENT:cannot read file")?;
+            let file = std::fs::File::open(&canonical).map_err(|_| "ENOENT:cannot read file")?;
             let data = read_range(file, c.offset, c.size)?;
-            // Temporary files are deleted once read, but only ones that look
-            // like they were made for this purpose (as kitty does).
-            if c.medium == b't' && path.contains("tty-graphics-protocol") {
-                let _ = std::fs::remove_file(&path);
+            // Temporary files are deleted once read, but only verified temp files.
+            if c.medium == b't' {
+                let _ = std::fs::remove_file(&canonical);
             }
             data
         }
@@ -1128,5 +1181,40 @@ mod tests {
         // Raster attributes size the image up front.
         let (w, h, _) = decode_sixel(b"\"1;1;8;6#0~", false).unwrap();
         assert_eq!((w, h), (8, 6));
+    }
+
+    #[test]
+    fn kitty_file_transmission_security() {
+        let b64 = |s: &str| -> String {
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let b = s.as_bytes();
+            let mut out = String::new();
+            for c in b.chunks(3) {
+                let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+                for i in 0..=c.len() {
+                    out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+                }
+            }
+            out
+        };
+
+        let mut store = Store::default();
+
+        // 1. Temporary file (t=t) outside temp dir must be rejected with EPERM
+        let fake_temp = "/etc/tty-graphics-protocol-test";
+        let res = run(&mut store, &format!("Ga=t,t=t,f=24,s=1,v=1,i=10;{}", b64(fake_temp)));
+        assert!(res.as_deref().unwrap_or("").contains("EPERM") || res.as_deref().unwrap_or("").contains("ENOENT"));
+
+        // 2. Sensitive paths (t=f) like /etc/passwd or .ssh must be rejected
+        let res = run(&mut store, &format!("Ga=t,t=f,f=24,s=1,v=1,i=11;{}", b64("/etc/passwd")));
+        assert_eq!(res.as_deref(), Some("i=11;EPERM:access denied"));
+
+        // 3. Temporary file inside temp dir with tty-graphics-protocol in name is allowed and unlinked
+        let temp_path = std::env::temp_dir().join("tty-graphics-protocol-unittest.raw");
+        std::fs::write(&temp_path, [255u8, 0, 0]).expect("write temp file");
+        let path_str = temp_path.to_str().unwrap();
+        let res = run(&mut store, &format!("Ga=t,t=t,f=24,s=1,v=1,i=12;{}", b64(path_str)));
+        assert_eq!(res.as_deref(), Some("i=12;OK"));
+        assert!(!temp_path.exists(), "temp file must be deleted after reading");
     }
 }
