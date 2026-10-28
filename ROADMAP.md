@@ -239,7 +239,7 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
 - [x] **Quality / Memory: Font Mmap lifecycle on configuration reload (`src/atlas.rs`)**
   - Debt: `Box::leak` in `shaper_for` leaks `memmap2::Mmap` on every config reload (`Cmd+Shift+,`).
   - Fix: Manage mmap lifetimes using reference-counted or owning structures (`Arc<memmap2::Mmap>`) so reloads reclaim memory.
-- [ ] **Defense-in-depth: Multiline paste confirmation when bracketed paste is disabled (`src/main.rs`)**
+- [x] **Defense-in-depth: Multiline paste confirmation when bracketed paste is disabled (`src/main.rs`)**
   - Enhancement: Protect against accidental multiline paste execution in shells or CLI utilities running without bracketed paste mode.
 
 

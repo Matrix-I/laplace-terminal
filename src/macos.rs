@@ -981,6 +981,9 @@ mod stub {
             _ => 1,
         }
     }
+    pub fn confirm(title: &str, text: &str, button: &str) -> bool {
+        alert_choice(title, text, &[button, "Cancel"]) == 0
+    }
     pub fn alert(title: &str, text: &str) {
         let _ = std::process::Command::new("zenity")
             .args(["--info", "--title", title, "--text", text])

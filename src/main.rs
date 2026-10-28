@@ -2968,6 +2968,22 @@ fn run_tab_action(
                     g.reset_display();
                     g.bracketed_paste
                 };
+                let has_newlines = text.contains('\n') || text.contains('\r');
+                if !bracketed && has_newlines {
+                    let line_count = text.lines().count().max(2);
+                    let preview = text
+                        .lines()
+                        .take(3)
+                        .map(|l| if l.len() > 60 { format!("{}…", &l[..60]) } else { l.to_string() })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let msg = format!(
+                        "Pasting {line_count} lines into a shell without bracketed paste may execute commands immediately.\n\nPreview:\n{preview}\n\nDo you want to paste anyway?"
+                    );
+                    if !macos::confirm("Confirm Multi-Line Paste", &msg, "Paste") {
+                        return true;
+                    }
+                }
                 pane.pty.write(&paste_payload(&text, bracketed));
                 s.window.request_redraw();
             }
