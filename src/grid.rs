@@ -2580,6 +2580,9 @@ impl Grid {
 
     /// XTGETTCAP: answer one hex-encoded terminfo capability name.
     fn reply_termcap(&mut self, hex_name: &[u8]) {
+        if hex_name.is_empty() || !hex_name.len().is_multiple_of(2) || !hex_name.iter().all(|b| b.is_ascii_hexdigit()) {
+            return;
+        }
         let name = decode_hex(hex_name);
         let value = name.as_deref().and_then(termcap);
         match value {
@@ -4258,6 +4261,10 @@ mod tests {
             "\x1bP1$r2;3r\x1b\\\x1bP1$r5 q\x1b\\\x1bP0$r\x1b\\"
         );
         assert_eq!(line(&g, 0), "", "DCS payloads are not printed");
+
+        // Non-hex bytes or invalid length queries must be ignored and never echoed
+        feed(&mut g, "\x1bP+qevil;\rwhoami\r;544;invalid_hex\x1b\\");
+        assert!(g.response.is_empty(), "non-hex and invalid length queries must not be echoed back");
     }
 
     #[test]

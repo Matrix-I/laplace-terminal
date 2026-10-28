@@ -216,6 +216,33 @@ Found while benchmarking v0.4.0 against v0.3.0 (`perf_bench` parser harness on a
   - Resolved / Clarified: Verified that the Linux release binary is already stripped (`file` reports `stripped`, `strip = true` in `[profile.release]`, `nm` reports `no symbols`).
   - The 5.7 -> 9.1 MB delta is actual executable code & data from dependencies introduced in v0.4.0: `rustybuzz` (OpenType layout & shaping tables), `wgpu`'s GLSL feature (the full `naga` front-end compiler for custom shaders), `regex`, `png`, `miniz_oxide`, `x11rb`, and `assets/themes.txt` (422 KB).
 
+## Security & Code Quality Audit (v0.4.1)
+
+Comprehensive code quality, memory safety, and security scan performed on 2026-10-28.
+Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-targets -- -D warnings`.
+
+- [x] **High: Validate hexadecimal characters in XTGETTCAP DCS responses (`src/grid.rs`)**
+  - Vulnerability: Unsanitized input echoed back in `reply_termcap` for unknown/invalid capabilities (`\x1bP0+r<hex_name>\x1b\`) could inject control characters or commands into the shell stdin queue.
+  - Fix: Validate that `hex_name` contains strictly valid ASCII hexadecimal characters (`0-9`, `a-f`, `A-F`); drop or ignore requests containing invalid characters.
+- [ ] **High: Restrict Kitty graphics protocol local file access & temporary file deletion (`src/graphics.rs`)**
+  - Vulnerability: `t=f` / `t=t` loads arbitrary filesystem paths, allowing remote SSH sessions or untrusted output to probe local file existence/errors. `t=t` unlinks any file containing `tty-graphics-protocol`.
+  - Fix: Restrict `t=f` and `t=t` file reads to local secure temporary directories (e.g. `$TMPDIR`, `/tmp`) or private cache; ensure `t=t` unlinks only files strictly within Laplace's designated temporary directory.
+- [ ] **Medium: Positional argument delimiter `--` and executable guard in `open_target` (`src/main.rs`)**
+  - Vulnerability: Direct argument passing to `open` (macOS) and `xdg-open` (Linux) without `--` permits flag injection for targets starting with `-`. On macOS, clicking `.app` / `.command` files via `open` executes them directly.
+  - Fix: Pass `--` delimiter before targets (`open -- <path>`). Guard or confirm opening executable files/scripts from terminal clicks or OSC 8 hyperlinks.
+- [ ] **Medium: Close all file descriptors $\ge 3$ post-fork before `execve` (`src/pty.rs`)**
+  - Vulnerability: Child processes close only `master` and `slave`. Any descriptors opened without `O_CLOEXEC` by drivers, threads, or concurrent PTY allocations leak into child shells.
+  - Fix: Call `closefrom(3)` (macOS/BSD) or `close_range(3, !0, 0)` (Linux) in the child process immediately after `fork()`.
+- [ ] **Low: Control socket placement in user-private directory (`src/hotkey.rs`)**
+  - Vulnerability: When `XDG_RUNTIME_DIR` is missing, `/tmp/laplace-{uid}.sock` can be pre-created by other users in `/tmp` (sticky bit), causing `bind` to fail (local DoS on global hotkey).
+  - Fix: Store the control socket in a secure private directory (e.g., `~/.cache/laplace/` or Darwin user temp directory).
+- [ ] **Quality / Memory: Font Mmap lifecycle on configuration reload (`src/atlas.rs`)**
+  - Debt: `Box::leak` in `shaper_for` leaks `memmap2::Mmap` on every config reload (`Cmd+Shift+,`).
+  - Fix: Manage mmap lifetimes using reference-counted or owning structures (`Arc<memmap2::Mmap>`) so reloads reclaim memory.
+- [ ] **Defense-in-depth: Multiline paste confirmation when bracketed paste is disabled (`src/main.rs`)**
+  - Enhancement: Protect against accidental multiline paste execution in shells or CLI utilities running without bracketed paste mode.
+
+
 ## Terminal protocols
 
 - [x] OSC 4 / 10 / 11 / 12 set and query (palette, fg, bg, cursor color) + OSC 104 / 110 / 111 / 112 reset
