@@ -4,6 +4,7 @@
 mod atlas;
 mod bidi;
 mod config;
+mod event;
 mod fontdb;
 mod graphics;
 mod grid;
@@ -19,10 +20,14 @@ mod renderer;
 mod search;
 mod shell_integration;
 mod split;
+mod tab;
 mod update;
 mod x11colors;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+pub use event::{AppEvent, Waker};
+pub use tab::{HoveredPaneLink, next_id, Pane, Tab};
+
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 #[cfg(target_os = "macos")]
@@ -33,128 +38,17 @@ use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
-use crate::grid::{Grid, Hyperlink, Selection};
+use crate::grid::{Grid, Selection};
 use crate::history::HistorySearch;
 use crate::pty::Pty;
 use crate::renderer::{Renderer, TabBarAction};
 use crate::search::SearchBar;
-use crate::split::{Direction, PaneRect, Rect, SplitDirection, SplitNode};
-
-#[derive(Debug, Clone)]
-pub enum AppEvent {
-    WakeUp,
-    ChildExit(u64),
-    Reopen,
-    /// A menu bar item (macOS) was chosen.
-    Menu(keymap::Action),
-    /// The system switched between Light and Dark appearance (macOS).
-    SystemAppearance { dark: bool },
-    UpdateCheckResult(Result<update::ReleaseInfo, String>),
-    UpdateInstallResult(Result<update::Version, String>),
-}
-
-struct Pane {
-    id: u64,
-    grid: Arc<Mutex<Grid>>,
-    pty: Pty,
-    cached_cwd: Option<String>,
-    last_cwd_check: std::time::Instant,
-}
-
-impl Pane {
-    fn cwd(&mut self) -> Option<String> {
-        if self.cached_cwd.is_some() && self.last_cwd_check.elapsed().as_millis() < 500 {
-            return self.cached_cwd.clone();
-        }
-        // Prefer the directory the shell reports via OSC 7; fall back to asking the OS.
-        let reported = self.grid.lock().reported_cwd.clone();
-        self.cached_cwd = reported.filter(|d| std::path::Path::new(d).is_dir()).or_else(|| self.pty.cwd());
-        self.last_cwd_check = std::time::Instant::now();
-        self.cached_cwd.clone()
-    }
-}
-
-struct Tab {
-    #[allow(dead_code)]
-    id: u64,
-    panes: Vec<Pane>,
-    layout: SplitNode,
-    active_pane_id: u64,
-    zoomed_pane_id: Option<u64>,
-    /// A pane rang the bell while this tab was not in front.
-    bell: bool,
-}
-
-impl Tab {
-    fn new(id: u64, pane: Pane) -> Self {
-        let pane_id = pane.id;
-        Tab {
-            id,
-            panes: vec![pane],
-            layout: SplitNode::new_leaf(pane_id),
-            active_pane_id: pane_id,
-            zoomed_pane_id: None,
-            bell: false,
-        }
-    }
-
-    fn active_pane(&self) -> Option<&Pane> {
-        self.panes
-            .iter()
-            .find(|p| p.id == self.active_pane_id)
-            .or_else(|| self.panes.first())
-    }
-
-    #[allow(dead_code)]
-    fn active_pane_mut(&mut self) -> Option<&mut Pane> {
-        let id = self.active_pane_id;
-        if let Some(pos) = self.panes.iter().position(|p| p.id == id) {
-            self.panes.get_mut(pos)
-        } else {
-            self.panes.first_mut()
-        }
-    }
-
-    fn pane(&self, id: u64) -> Option<&Pane> {
-        self.panes.iter().find(|p| p.id == id)
-    }
-
-    fn compute_pane_rects(&self, total_cols: usize, total_rows: usize) -> Vec<PaneRect> {
-        if let Some(z_id) = self.zoomed_pane_id {
-            if self.panes.iter().any(|p| p.id == z_id) {
-                return vec![PaneRect {
-                    id: z_id,
-                    col: 0,
-                    row: 0,
-                    cols: total_cols,
-                    rows: total_rows,
-                    has_border_right: false,
-                    has_border_bottom: false,
-                }];
-            }
-        }
-        let area = Rect {
-            col: 0,
-            row: 0,
-            cols: total_cols,
-            rows: total_rows,
-        };
-        let mut rects = Vec::with_capacity(self.panes.len());
-        self.layout.compute_rects(area, &mut rects);
-        rects
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct HoveredPaneLink {
-    pane_id: u64,
-    link: Hyperlink,
-}
+use crate::split::{Direction, PaneRect, SplitDirection};
 
 struct State {
     window: Arc<Window>,
@@ -258,37 +152,6 @@ impl Drop for State {
             #[cfg(target_os = "macos")]
             macos::set_secure_input(false);
         }
-    }
-}
-
-/// Tab and pane ids are unique across windows, so `ChildExit` finds its pane.
-fn next_id() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Wakes the event loop from PTY reader threads, coalescing bursts of output
-/// into a single pending `WakeUp`.
-#[derive(Clone)]
-struct Waker {
-    proxy: EventLoopProxy<AppEvent>,
-    queued: Arc<AtomicBool>,
-}
-
-impl Waker {
-    fn wake(&self) {
-        if !self.queued.swap(true, Ordering::AcqRel) {
-            let _ = self.proxy.send_event(AppEvent::WakeUp);
-        }
-    }
-
-    /// Re-arm before rendering so output arriving during the draw schedules another frame.
-    fn rearm(&self) {
-        self.queued.store(false, Ordering::Release);
-    }
-
-    fn is_queued(&self) -> bool {
-        self.queued.load(Ordering::Acquire)
     }
 }
 
@@ -3522,6 +3385,7 @@ mod latency_benchmarks {
 
     #[test]
     fn test_tab_active_pane_empty_panes_does_not_panic() {
+        use crate::split::SplitNode;
         let mut tab = Tab {
             id: 1,
             panes: Vec::new(),
