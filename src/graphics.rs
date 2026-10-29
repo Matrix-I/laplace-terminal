@@ -580,22 +580,6 @@ impl Store {
     /// Run a Kitty command. Returns the outcome and the reply body (`OK` or an
     /// error such as `ENOENT:...`), already filtered by `q=`.
     pub fn kitty(&mut self, cmd: KittyCommand, payload: &[u8]) -> (KittyOutcome, Option<String>) {
-        // Chunked transmissions: collect until `m=0`; only the first chunk has the keys.
-        let (cmd, data) = match self.pending.take() {
-            Some((first, mut data)) if matches!(first.action, b't' | b'T' | b'q' | b'f') => {
-                data.extend_from_slice(payload);
-                if cmd.more {
-                    self.pending = Some((first, data));
-                    return (KittyOutcome::None, None);
-                }
-                (first, data)
-            }
-            _ if cmd.more && matches!(cmd.action, b't' | b'T' | b'q' | b'f') => {
-                self.pending = Some((cmd, payload.to_vec()));
-                return (KittyOutcome::None, None);
-            }
-            _ => (cmd, payload.to_vec()),
-        };
         let reply = |c: &KittyCommand, msg: &str| -> Option<String> {
             let ok = msg == "OK";
             if (c.id == 0 && c.number == 0) || (ok && c.quiet >= 1) || c.quiet >= 2 {
@@ -609,6 +593,28 @@ impl Store {
                 r.push_str(&format!(",p={}", c.placement_id));
             }
             Some(format!("{r};{msg}"))
+        };
+        // Chunked transmissions: collect until `m=0`; only the first chunk has the keys.
+        let (cmd, data) = match self.pending.take() {
+            Some((first, mut data)) if matches!(first.action, b't' | b'T' | b'q' | b'f') => {
+                data.extend_from_slice(payload);
+                if data.len() > STORE_LIMIT {
+                    return (KittyOutcome::None, reply(&first, "EBIG:chunked transmission exceeds size limit"));
+                }
+                if cmd.more {
+                    self.pending = Some((first, data));
+                    return (KittyOutcome::None, None);
+                }
+                (first, data)
+            }
+            _ if cmd.more && matches!(cmd.action, b't' | b'T' | b'q' | b'f') => {
+                if payload.len() > STORE_LIMIT {
+                    return (KittyOutcome::None, reply(&cmd, "EBIG:chunked transmission exceeds size limit"));
+                }
+                self.pending = Some((cmd, payload.to_vec()));
+                return (KittyOutcome::None, None);
+            }
+            _ => (cmd, payload.to_vec()),
         };
         match cmd.action {
             b't' | b'T' | b'q' => match decode_kitty(&cmd, &data) {
@@ -1227,6 +1233,24 @@ mod tests {
         let res = run(&mut store, &format!("Ga=t,t=t,f=24,s=1,v=1,i=12;{}", b64(path_str)));
         assert_eq!(res.as_deref(), Some("i=12;OK"));
         assert!(!temp_path.exists(), "temp file must be deleted after reading");
+    }
+
+    #[test]
+    fn kitty_chunked_transmission_size_limit() {
+        let mut store = Store::default();
+        let payload = vec![b'A'; 100];
+        // Start a chunked transmission
+        let (outcome, reply) = store.kitty(KittyCommand { action: b't', more: true, id: 99, ..KittyCommand::default() }, &payload);
+        assert!(matches!(outcome, KittyOutcome::None));
+        assert!(reply.is_none());
+        assert!(store.pending.is_some());
+
+        // Oversized chunk exceeding STORE_LIMIT
+        let big_chunk = vec![b'A'; STORE_LIMIT + 1];
+        let (outcome, reply) = store.kitty(KittyCommand { action: b't', more: true, ..KittyCommand::default() }, &big_chunk);
+        assert!(matches!(outcome, KittyOutcome::None));
+        assert_eq!(reply.as_deref(), Some("i=99;EBIG:chunked transmission exceeds size limit"));
+        assert!(store.pending.is_none(), "pending must be cleared on overflow");
     }
 
     #[test]

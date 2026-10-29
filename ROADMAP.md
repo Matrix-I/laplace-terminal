@@ -258,6 +258,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prune Kitty image placements on scroll and free unreferenced image data (`src/graphics.rs`, `src/grid.rs`)**
   - Vulnerability / Leak: `graphics.prune()` was only called on image placement or history clear; normal text scrolling (`scroll_up_in`) never invoked `prune()`, leaving placements of long-scrolled-off images in memory. Furthermore, `prune()` filtered `placements` but never cleaned up orphaned images in `self.images` (retaining up to `STORE_LIMIT = 64 MB` per terminal).
   - Fix: Invoke `prune(first_line)` during scrollback eviction in `scroll_up_in()`, and clean up images in `self.images` that have no remaining standard or virtual placements.
+- [x] **Medium: Cap pending buffer size in chunked Kitty transmissions against OOM (`src/graphics.rs`)**
+  - Vulnerability / DoS: In `Store::kitty()`, multi-chunk transmissions (`m=1`) appended payload chunks into `self.pending` without an upper bound check, allowing rogue or runaway processes to consume arbitrary memory until OOM.
+  - Fix: Impose a maximum buffer limit on `self.pending` (matching `STORE_LIMIT`), aborting the transmission and releasing the buffer if exceeded.
 
 
 ## Terminal protocols
