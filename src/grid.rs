@@ -2385,6 +2385,7 @@ impl Grid {
                 p.line = line;
                 true
             });
+            self.graphics.prune_dead_auto_ids();
         }
 
         let alt = if self.alt_active {

@@ -324,6 +324,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prune Kitty virtual placements and auto-id images on screen clear (`src/grid.rs`)**
   - Vulnerability / VRAM leak: `clear_screen_and_history()` cleared all grid cells (destroying all U+10EEEE placeholder cells), but left `self.graphics.virtuals` intact. Because `prune_dead_auto_ids()` kept any auto-id image referenced by `self.graphics.virtuals`, the image data in RAM/VRAM was never freed and `virtuals` accumulated over time.
   - Fix: Clear `self.graphics.virtuals` and invoke `self.graphics.prune_dead_auto_ids()` inside `clear_screen_and_history()`.
+- [x] **Medium: Prune orphaned auto-id images during grid resize reflow (`src/grid.rs`)**
+  - Vulnerability / VRAM leak: During `Grid::resize()`, placements in scrollback truncated by text reflow were dropped from `self.graphics.placements`, but `prune_dead_auto_ids()` was never called. Auto-id images whose placements were dropped lingered in memory and VRAM until store limit eviction.
+  - Fix: Invoke `self.graphics.prune_dead_auto_ids()` at the end of the text reflow block in `Grid::resize()`.
 
 
 
