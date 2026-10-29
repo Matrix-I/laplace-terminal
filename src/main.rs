@@ -1469,16 +1469,22 @@ fn handle_terminal_requests(s: &mut State) {
 /// `paplay` elsewhere); the path is a single argument, never parsed by a shell.
 fn play_sound(path: &std::path::Path, volume: f32) {
     #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("/usr/bin/afplay").arg("-v").arg(volume.to_string()).arg(path).spawn();
+    let res = spawn_detached(
+        std::process::Command::new("/usr/bin/afplay")
+            .arg("-v")
+            .arg(volume.to_string())
+            .arg("--")
+            .arg(path),
+    );
     #[cfg(not(target_os = "macos"))]
-    let spawned = std::process::Command::new("paplay")
-        .arg(format!("--volume={}", (volume * 65536.0) as u32))
-        .arg(path)
-        .spawn();
-    match spawned {
-        // Reap the player when it finishes, without blocking the event loop.
-        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
-        Err(e) => eprintln!("laplace: cannot play {}: {e}", path.display()),
+    let res = spawn_detached(
+        std::process::Command::new("paplay")
+            .arg(format!("--volume={}", (volume * 65536.0) as u32))
+            .arg("--")
+            .arg(path),
+    );
+    if let Err(e) = res {
+        eprintln!("laplace: cannot play {}: {e}", path.display());
     }
 }
 

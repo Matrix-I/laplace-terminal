@@ -309,6 +309,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Support vibrancy & background blur across multiple windows (`src/macos.rs`)**
   - Vulnerability / State bug: `setup_visual_effect_view` used a global process-wide `AtomicBool` (`BLUR_SETUP`), which prevented vibrancy and blur from ever being attached to secondary windows (`Cmd+N`).
   - Fix: Remove `BLUR_SETUP` and check the window's `contentView.subviews` for existing `NSVisualEffectView` instances before attaching, ensuring every window receives blur without duplicates.
+- [x] **Medium: Prevent zombie process and heavy thread stacks in audio alerts (`src/main.rs`)**
+  - Vulnerability / Zombie leak: `play_sound` spawned `/usr/bin/afplay` (macOS) or `paplay` (Linux) with a raw `std::thread::spawn(move || child.wait())`, allocating an 8MB thread stack per alert. If thread spawning failed, `child` was dropped without waiting, leaving an un-reaped zombie process. Furthermore, sound paths were passed without `--` argument delimiters.
+  - Fix: Route player execution through `spawn_detached()`, ensuring dedicated lightweight (32 KB) reaper threads with automatic synchronous SIGKILL and `waitpid` fallback, and pass `--` before paths.
 
 
 
