@@ -1705,6 +1705,25 @@ pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result
     Ok(())
 }
 
+#[cfg(unix)]
+fn safe_path_for_linux_open<'a>(path: &'a std::path::Path) -> &'a std::path::Path {
+    use std::os::unix::fs::PermissionsExt;
+    let is_exec = path
+        .metadata()
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+        .unwrap_or(false);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let is_script_ext = matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "zsh" | "bin" | "run" | "desktop" | "elf" | "py" | "pl" | "command" | "appimage"
+    );
+    if is_exec || is_script_ext {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    }
+}
+
 fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
     if is_path {
         let path = if let Some(rest) = target.strip_prefix("~/") {
@@ -1748,7 +1767,10 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
             spawn_detached(&mut cmd)
         };
         #[cfg(target_os = "linux")]
-        let res = spawn_detached(std::process::Command::new(system_bin("xdg-open")).arg("--").arg(&path));
+        let res = {
+            let open_path = safe_path_for_linux_open(&path);
+            spawn_detached(std::process::Command::new(system_bin("xdg-open")).arg("--").arg(open_path))
+        };
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", path.to_str().unwrap_or(target)])
@@ -3391,6 +3413,36 @@ mod paste_tests {
         assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 
         IN_FLIGHT_DETACHED.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_path_for_linux_open_guards_executables() {
+        use super::safe_path_for_linux_open;
+        use std::path::Path;
+
+        // Script extensions should resolve to parent directory
+        let script = Path::new("/home/user/project/setup.sh");
+        assert_eq!(safe_path_for_linux_open(script), Path::new("/home/user/project"));
+
+        let desktop = Path::new("/usr/share/applications/editor.desktop");
+        assert_eq!(safe_path_for_linux_open(desktop), Path::new("/usr/share/applications"));
+
+        let bin_ext = Path::new("/tmp/installer.bin");
+        assert_eq!(safe_path_for_linux_open(bin_ext), Path::new("/tmp"));
+
+        // Regular non-executable documents should open directly
+        let doc = Path::new("/home/user/notes.txt");
+        assert_eq!(safe_path_for_linux_open(doc), doc);
+
+        let img = Path::new("/home/user/picture.png");
+        assert_eq!(safe_path_for_linux_open(img), img);
+
+        // Real filesystem executable file (e.g. /bin/sh or /bin/ls)
+        let sh_bin = Path::new("/bin/sh");
+        if sh_bin.exists() {
+            assert_eq!(safe_path_for_linux_open(sh_bin), Path::new("/bin"));
+        }
     }
 }
 

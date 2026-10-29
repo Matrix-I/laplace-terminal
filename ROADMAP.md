@@ -477,7 +477,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [ ] Fix updater signature verification pass-through, enforce key pinning, and propagate signature errors (`src/update.rs`)
 - [x] Restrict OSC 52 clipboard writes to active/focused panes to prevent background tab clipboard poisoning (`src/main.rs`, `src/grid/perform.rs`)
 - [x] Bound PNG decoder buffer allocation to `STORE_LIMIT` before decoding (`src/graphics.rs`)
-- [ ] Guard `open_target` on Linux against executing executable files or scripts via `xdg-open` (`src/main.rs`)
+- [x] Guard `open_target` on Linux against executing executable files or scripts via `xdg-open` (`src/main.rs`)
 
 ### Memory Leaks & Resource Management
 - [x] Add timeout and cleanup for abandoned chunked Kitty transmission buffers in `Store.pending` (`src/graphics.rs`)
