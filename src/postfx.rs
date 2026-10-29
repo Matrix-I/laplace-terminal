@@ -29,21 +29,21 @@ const _: () = assert!(std::mem::size_of::<Globals>() == 64);
 
 /// Declarations Shadertoy shaders expect, then the user's code, then `main`.
 const PRELUDE: &str = "#version 450
-layout(set = 0, binding = 0, std140) uniform LaplaceGlobals {
-    vec4 _laplace_resolution;
+layout(set = 0, binding = 0, std140) uniform LittyGlobals {
+    vec4 _litty_resolution;
     vec4 iMouse;
     vec4 iDate;
     float iTime;
     float iTimeDelta;
     int iFrame;
-    uint _laplace_to_screen;
+    uint _litty_to_screen;
 };
-layout(set = 0, binding = 1) uniform texture2D _laplace_tex;
-layout(set = 0, binding = 2) uniform sampler _laplace_smp;
-#define iResolution (_laplace_resolution.xyz)
-#define iChannel0 sampler2D(_laplace_tex, _laplace_smp)
-#define iChannelResolution (vec3[4](_laplace_resolution.xyz, vec3(0.0), vec3(0.0), vec3(0.0)))
-layout(location = 0) out vec4 _laplace_out;
+layout(set = 0, binding = 1) uniform texture2D _litty_tex;
+layout(set = 0, binding = 2) uniform sampler _litty_smp;
+#define iResolution (_litty_resolution.xyz)
+#define iChannel0 sampler2D(_litty_tex, _litty_smp)
+#define iChannelResolution (vec3[4](_litty_resolution.xyz, vec3(0.0), vec3(0.0), vec3(0.0)))
+layout(location = 0) out vec4 _litty_out;
 #line 1
 ";
 
@@ -51,12 +51,12 @@ const MAIN: &str = "
 void main() {
     vec2 fc = gl_FragCoord.xy;
     // Texture rows are stored bottom first; only the window wants top first.
-    if (_laplace_to_screen != 0u) {
-        fc.y = _laplace_resolution.y - fc.y;
+    if (_litty_to_screen != 0u) {
+        fc.y = _litty_resolution.y - fc.y;
     }
     vec4 color = vec4(0.0);
     mainImage(color, fc);
-    _laplace_out = color;
+    _litty_out = color;
 }
 ";
 
@@ -110,10 +110,10 @@ pub fn load(paths: &[std::path::PathBuf]) -> (Vec<String>, bool) {
                         animated |= uses_time(&user);
                         sources.push(src);
                     }
-                    Err(e) => eprintln!("laplace: custom-shader {}: {e}", display(path)),
+                    Err(e) => eprintln!("litty: custom-shader {}: {e}", display(path)),
                 }
             }
-            Err(e) => eprintln!("laplace: custom-shader {}: {e}", display(path)),
+            Err(e) => eprintln!("litty: custom-shader {}: {e}", display(path)),
         }
     }
     (sources, animated)

@@ -598,7 +598,7 @@ fn remove_command_from_file(path: &Path, cmd: &str) -> std::io::Result<bool> {
     let format_path = path;
     let path = std::fs::canonicalize(path)?;
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{file_name}.laplace-{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(format!(".{file_name}.litty-{}.tmp", std::process::id()));
 
     for _ in 0..3 {
         let before = std::fs::metadata(&path)?;
@@ -640,7 +640,7 @@ fn remove_from_disk_history(cmd_to_remove: &str) {
             continue;
         }
         if let Err(e) = remove_command_from_file(&path, cmd_to_remove) {
-            eprintln!("laplace: failed to update history file {path:?}: {e}");
+            eprintln!("litty: failed to update history file {path:?}: {e}");
         }
     }
 }

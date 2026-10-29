@@ -1,4 +1,4 @@
-//! Background and interactive auto-update checks for Laplace Terminal.
+//! Background and interactive auto-update checks for Litty Terminal.
 //!
 //! Checks GitHub Releases for new versions, downloads release assets,
 //! verifies SHA-256 checksums against `SHA256SUMS.txt`, and replaces
@@ -19,7 +19,7 @@ pub enum AutoUpdateMode {
     #[default]
     Check,
     /// Download and verify the update in background, then notify that it is ready.
-    /// Installing still waits for the user (Check for Updates… or `laplace +update`).
+    /// Installing still waits for the user (Check for Updates… or `litty +update`).
     Download,
     /// Do not check for updates automatically.
     Off,
@@ -80,19 +80,19 @@ pub struct ReleaseInfo {
     pub assets: Vec<ReleaseAsset>,
 }
 
-const API_LATEST_URL: &str = "https://api.github.com/repos/Matrix-I/laplace-terminal/releases/latest";
-const API_RELEASES_URL: &str = "https://api.github.com/repos/Matrix-I/laplace-terminal/releases";
-const WEB_LATEST_URL: &str = "https://github.com/Matrix-I/laplace-terminal/releases/latest";
-const WEB_TAG_PREFIX: &str = "https://github.com/Matrix-I/laplace-terminal/releases/tag/";
-const WEB_DOWNLOAD_PREFIX: &str = "https://github.com/Matrix-I/laplace-terminal/releases/download/";
+const API_LATEST_URL: &str = "https://api.github.com/repos/Matrix-I/litty-terminal/releases/latest";
+const API_RELEASES_URL: &str = "https://api.github.com/repos/Matrix-I/litty-terminal/releases";
+const WEB_LATEST_URL: &str = "https://github.com/Matrix-I/litty-terminal/releases/latest";
+const WEB_TAG_PREFIX: &str = "https://github.com/Matrix-I/litty-terminal/releases/tag/";
+const WEB_DOWNLOAD_PREFIX: &str = "https://github.com/Matrix-I/litty-terminal/releases/download/";
 const SUMS_NAME: &str = "SHA256SUMS.txt";
 
-/// Path to cache directory `~/.cache/laplace`.
+/// Path to cache directory `~/.cache/litty`.
 fn cache_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".cache").join("laplace")
+        PathBuf::from(home).join(".cache").join("litty")
     } else {
-        std::env::temp_dir().join("laplace")
+        std::env::temp_dir().join("litty")
     }
 }
 
@@ -469,7 +469,7 @@ fn tag_from_release_url(url: &str) -> Option<&str> {
     url.trim().strip_prefix(WEB_TAG_PREFIX).filter(|tag| is_safe_tag(tag))
 }
 
-/// Fallback method: follow `https://github.com/Matrix-I/laplace-terminal/releases/latest`,
+/// Fallback method: follow `https://github.com/Matrix-I/litty-terminal/releases/latest`,
 /// which redirects to the newest tag and does not suffer from GitHub API rate limits.
 fn fetch_latest_release_redirect() -> Result<ReleaseInfo, String> {
     let mut cmd = curl();
@@ -731,7 +731,7 @@ fn check_binary_arch(path: &Path) -> Result<(), String> {
 }
 
 /// Exclusive lock over the updates directory, shared by the app's threads and by
-/// `laplace +update` in another process (`flock` locks conflict across open files).
+/// `litty +update` in another process (`flock` locks conflict across open files).
 /// Released when dropped.
 struct UpdateLock(#[allow(dead_code)] fs::File);
 
@@ -746,7 +746,7 @@ impl UpdateLock {
             .map_err(|e| format!("cannot open update lock: {e}"))?;
         // SAFETY: flock on a file descriptor we own for the lifetime of `file`.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("another Laplace update is already in progress".to_string());
+            return Err("another Litty update is already in progress".to_string());
         }
         Ok(Self(file))
     }
@@ -833,7 +833,7 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
     // Prevent overwriting local development/debug binaries
     if exe_str.contains("/target/debug/") || exe_str.contains("/target/release/") {
         return Err(format!(
-            "Laplace is running from a build target ({exe_str}).\nSelf-update is disabled for dev builds. Run `cargo build --release` instead."
+            "Litty is running from a build target ({exe_str}).\nSelf-update is disabled for dev builds. Run `cargo build --release` instead."
         ));
     }
 
@@ -942,9 +942,9 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
 /// How to install an update on this platform, for notifications.
 fn install_hint() -> &'static str {
     if cfg!(target_os = "macos") {
-        "Choose Laplace ▸ Check for Updates… to install."
+        "Choose Litty ▸ Check for Updates… to install."
     } else {
-        "Run `laplace +update` to install."
+        "Run `litty +update` to install."
     }
 }
 
@@ -1004,26 +1004,26 @@ pub fn check_on_startup(mode: AutoUpdateMode, channel: AutoUpdateChannel) {
         match mode {
             AutoUpdateMode::Check => {
                 crate::show_notification(
-                    "Laplace Update Available",
+                    "Litty Update Available",
                     &format!("v{} is available. {}", release.version, install_hint()),
                 );
             }
             AutoUpdateMode::Download => match prefetch_release(&release) {
                 Ok(()) => crate::show_notification(
-                    "Laplace Update Ready",
+                    "Litty Update Ready",
                     &format!("v{} has been downloaded and verified. {}", release.version, install_hint()),
                 ),
-                Err(e) => eprintln!("laplace: background update download failed: {e}"),
+                Err(e) => eprintln!("litty: background update download failed: {e}"),
             },
             AutoUpdateMode::Off => {}
         }
     });
 }
 
-/// CLI command `laplace +check-update`.
+/// CLI command `litty +check-update`.
 pub fn cli_check_update() {
     let current = Version::current();
-    println!("Laplace Terminal — Update Check");
+    println!("Litty Terminal — Update Check");
     println!("Current version: v{current}");
     print!("Checking GitHub releases... ");
     match fetch_latest_release(AutoUpdateChannel::Stable) {
@@ -1033,9 +1033,9 @@ pub fn cli_check_update() {
             if release.version > current {
                 println!("\n⚡ An update is available: v{current} -> v{}", release.version);
                 println!("Release URL: {}", release.html_url);
-                println!("\nRun `laplace +update` to automatically download and install this update.");
+                println!("\nRun `litty +update` to automatically download and install this update.");
             } else {
-                println!("\n✓ You are running the latest version of Laplace.");
+                println!("\n✓ You are running the latest version of Litty.");
             }
         }
         Err(e) => {
@@ -1046,10 +1046,10 @@ pub fn cli_check_update() {
     }
 }
 
-/// CLI command `laplace +update` (supports `--force`).
+/// CLI command `litty +update` (supports `--force`).
 pub fn cli_update(force: bool) {
     let current = Version::current();
-    println!("Laplace Terminal — Self-Updater");
+    println!("Litty Terminal — Self-Updater");
     println!("Current version: v{current}");
     print!("Checking for new releases... ");
     let release = match fetch_latest_release(AutoUpdateChannel::Stable) {
@@ -1065,8 +1065,8 @@ pub fn cli_update(force: bool) {
     };
 
     if release.version <= current && !force {
-        println!("✓ Laplace is already up to date (v{current}).");
-        println!("(To reinstall anyway, run `laplace +update --force`)");
+        println!("✓ Litty is already up to date (v{current}).");
+        println!("(To reinstall anyway, run `litty +update --force`)");
         return;
     }
 
@@ -1093,8 +1093,8 @@ pub fn cli_update(force: bool) {
         Ok(()) => {
             let _ = fs::remove_dir_all(dir.join(&release.tag_name));
             println!("done!");
-            println!("\n🎉 Successfully updated Laplace to v{}!", release.version);
-            println!("Please restart Laplace to use the new version.");
+            println!("\n🎉 Successfully updated Litty to v{}!", release.version);
+            println!("Please restart Litty to use the new version.");
         }
         Err(e) => {
             println!("failed.");

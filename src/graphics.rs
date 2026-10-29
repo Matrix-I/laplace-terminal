@@ -675,7 +675,7 @@ impl Store {
                     self.remove_image(cmd.id, true);
                 }
             }
-            // `a`/`A` (the default) and every selector Laplace does not track
+            // `a`/`A` (the default) and every selector Litty does not track
             // individually: all placements.
             _ => {
                 self.placements.clear();
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn kitty_shared_memory_transmission() {
-        let name = format!("/laplace-test-{}", std::process::id());
+        let name = format!("/litty-test-{}", std::process::id());
         let cname = std::ffi::CString::new(name.clone()).unwrap();
         // SAFETY: plain POSIX calls on a descriptor this test owns.
         unsafe {

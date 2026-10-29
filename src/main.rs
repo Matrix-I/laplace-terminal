@@ -82,7 +82,7 @@ struct State {
     config: config::Config,
     config_mtime: Option<std::time::SystemTime>,
     mouse_hidden: bool,
-    /// Keys whose press Laplace handled itself (shortcuts, search box), so their
+    /// Keys whose press Litty handled itself (shortcuts, search box), so their
     /// release is not reported to a Kitty-protocol application either.
     consumed_keys: Vec<PhysicalKey>,
     /// Caps / Num Lock inferred from key presses (`keymap::infer_locks`), for
@@ -208,7 +208,7 @@ impl App {
                 self.drop_tabless_windows();
                 self.windows.push(s);
             }
-            Err(e) => eprintln!("laplace: failed to open the Quick Terminal: {e}"),
+            Err(e) => eprintln!("litty: failed to open the Quick Terminal: {e}"),
         }
     }
 
@@ -254,7 +254,7 @@ impl App {
                     self.drop_tabless_windows();
                     self.windows.push(s);
                 }
-                Err(e) => eprintln!("laplace: failed to open window: {e}"),
+                Err(e) => eprintln!("litty: failed to open window: {e}"),
             }
         }
 
@@ -1354,7 +1354,7 @@ fn play_sound(path: &std::path::Path, volume: f32) {
             .arg(path),
     );
     if let Err(e) = res {
-        eprintln!("laplace: cannot play {}: {e}", path.display());
+        eprintln!("litty: cannot play {}: {e}", path.display());
     }
 }
 
@@ -1392,7 +1392,7 @@ pub(crate) fn show_notification(title: &str, body: &str) {
     #[cfg(not(target_os = "macos"))]
     let res = spawn_detached(std::process::Command::new("notify-send").arg("--").arg(title).arg(body));
     if let Err(e) = res {
-        eprintln!("laplace: failed to show notification: {e}");
+        eprintln!("litty: failed to show notification: {e}");
     }
 }
 
@@ -1674,7 +1674,7 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
             .spawn();
 
         if let Err(e) = res {
-            eprintln!("laplace: failed to open path {path:?}: {e}");
+            eprintln!("litty: failed to open path {path:?}: {e}");
         }
     } else {
         #[cfg(target_os = "macos")]
@@ -1687,7 +1687,7 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
             .spawn();
 
         if let Err(e) = res {
-            eprintln!("laplace: failed to open URL {target}: {e}");
+            eprintln!("litty: failed to open URL {target}: {e}");
         }
     }
 }
@@ -1965,7 +1965,7 @@ fn open_fresh_tab(
             s.renderer.invalidate();
             s.window.request_redraw();
         }
-        Err(e) => eprintln!("laplace: failed to spawn fresh tab: {e}"),
+        Err(e) => eprintln!("litty: failed to spawn fresh tab: {e}"),
     }
 }
 
@@ -2003,7 +2003,7 @@ fn duplicate_active_tab(
             s.renderer.invalidate();
             s.window.request_redraw();
         }
-        Err(e) => eprintln!("laplace: failed to spawn duplicate tab: {e}"),
+        Err(e) => eprintln!("litty: failed to spawn duplicate tab: {e}"),
     }
 }
 
@@ -2145,7 +2145,7 @@ fn split_active_pane(
         }
         Err(e) => {
             tab.layout.remove_pane(new_id);
-            eprintln!("laplace: failed to spawn split pane: {e}");
+            eprintln!("litty: failed to spawn split pane: {e}");
         }
     }
 }
@@ -2590,7 +2590,7 @@ fn inspector_lines(s: &State) -> Vec<String> {
     ]
 }
 
-/// Remember that Laplace handled this key press itself.
+/// Remember that Litty handled this key press itself.
 fn consume_key(s: &mut State, ev: &KeyEvent) {
     if !s.consumed_keys.contains(&ev.physical_key) {
         // A release can be lost (e.g. focus moved away mid-press); never grow unbounded.
@@ -3100,17 +3100,17 @@ fn paste_from_clipboard() -> Option<String> {
 }
 
 fn main() {
-    // `laplace +list-themes` (Ghostty's spelling) or `--list-themes`.
+    // `litty +list-themes` (Ghostty's spelling) or `--list-themes`.
     if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+list-themes" || a == "--list-themes") {
         for name in config::bundled_theme_names() {
             println!("{name}");
         }
         return;
     }
-    // `laplace +check-update` or `--check-update`.
+    // `litty +check-update` or `--check-update`.
     if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+toggle-quick-terminal") {
         if cfg!(target_os = "macos") {
-            eprintln!("laplace: on macOS, use `keybind = global:<trigger>=toggle_quick_terminal`");
+            eprintln!("litty: on macOS, use `keybind = global:<trigger>=toggle_quick_terminal`");
             std::process::exit(1);
         }
         if let Err(e) = hotkey::send_toggle() {
@@ -3123,7 +3123,7 @@ fn main() {
         update::cli_check_update();
         return;
     }
-    // `laplace +update` or `--update`.
+    // `litty +update` or `--update`.
     if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+update" || a == "--update") {
         let force = std::env::args().any(|a| a == "--force" || a == "-f");
         update::cli_update(force);
@@ -3180,7 +3180,7 @@ mod latency_benchmarks {
     #[test]
     fn benchmark_before_vs_after() {
         println!("\n==================================================================");
-        println!("             LAPLACE TERMINAL - LATENCY BENCHMARKS                ");
+        println!("              LITTY TERMINAL - LATENCY BENCHMARKS                 ");
         println!("==================================================================");
 
         // -------------------------------------------------------------
@@ -3192,18 +3192,18 @@ mod latency_benchmarks {
                     0 => format!("git commit -m 'feat: optimize latency step {}'", i),
                     1 => format!("cargo test --target x86_64-unknown-linux-gnu --job {}", i),
                     2 => format!("docker compose -f docker-compose.prod.yml up -d --build service_{}", i),
-                    3 => format!("kubectl get pods -n production -l app=laplace --watch --field-selector={}", i),
+                    3 => format!("kubectl get pods -n production -l app=litty --watch --field-selector={}", i),
                     4 => format!("nvim src/renderer.rs +{}", i),
                     5 => format!("ssh user@server-{}.internal.corp -p 2222", i),
                     6 => format!("tail -f /var/log/system_{}.log | grep -E 'ERROR|WARN'", i),
                     7 => format!("python3 scripts/benchmark_memory_and_fps.py --iterations {}", i),
-                    8 => format!("curl -sSL https://api.github.com/repos/laplace/status?id={}", i),
-                    _ => format!("cd ~/Desktop/personal/laplace-terminal/src_{}", i),
+                    8 => format!("curl -sSL https://api.github.com/repos/litty/status?id={}", i),
+                    _ => format!("cd ~/Desktop/personal/litty-terminal/src_{}", i),
                 }
             })
             .collect();
 
-        let queries = ["git commit", "'renderer", "^cargo", "docker", "!prod", "laplace"];
+        let queries = ["git commit", "'renderer", "^cargo", "docker", "!prod", "litty"];
 
         let iters = 5;
         let t0 = Instant::now();
@@ -3339,7 +3339,7 @@ mod latency_benchmarks {
         let old_cwd_per_frame = old_cwd_dur / cwd_calls;
 
         static HOME_USER: std::sync::OnceLock<(Option<String>, String)> = std::sync::OnceLock::new();
-        let mut cached_cwd = Some("/Users/linh.nguyen/Desktop/personal/laplace-terminal".to_string());
+        let mut cached_cwd = Some("/Users/linh.nguyen/Desktop/personal/litty-terminal".to_string());
         let mut last_check = Instant::now();
         let t_cwd1 = Instant::now();
         for _ in 0..cwd_calls {

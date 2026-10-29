@@ -296,7 +296,7 @@ impl Renderer {
                 .expect("no suitable GPU adapter (Metal/Vulkan)");
                 let (dev, q) = pollster::block_on(adapter.request_device(
                     &wgpu::DeviceDescriptor {
-                        label: Some("laplace"),
+                        label: Some("litty"),
                         required_features: wgpu::Features::empty(),
                         required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                         memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -786,7 +786,7 @@ impl Renderer {
                 return;
             }
             Err(e) => {
-                eprintln!("laplace: surface error: {e}");
+                eprintln!("litty: surface error: {e}");
                 return;
             }
         };

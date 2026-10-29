@@ -2759,7 +2759,7 @@ fn palette(i: u8) -> u32 {
     }
 }
 
-/// A DCS request Laplace answers.
+/// A DCS request Litty answers.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum DcsRequest {
     XtGetTcap,

@@ -470,7 +470,7 @@ impl Config {
             "cursor-color" => self.cursor_color = if empty { None } else { Some(parse_color(value)?) },
             "selection-background" => self.selection_background = if empty { None } else { Some(parse_color(value)?) },
             "selection-foreground" => self.selection_foreground = if empty { None } else { Some(parse_color(value)?) },
-            // Ghostty also accepts `clipboard` (copy to the system clipboard, as Laplace does).
+            // Ghostty also accepts `clipboard` (copy to the system clipboard, as Litty does).
             "copy-on-select" => {
                 self.copy_on_select = match value {
                     "" | "true" | "clipboard" => true,

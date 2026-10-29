@@ -113,7 +113,7 @@ mod imp {
             }
             let Some(t) = trigger else { return };
             let Some(code) = crate::keymap::mac_virtual_keycode(&t.key) else {
-                eprintln!("laplace: key not supported for a global hotkey");
+                eprintln!("litty: key not supported for a global hotkey");
                 return;
             };
             if !HOTKEY_HANDLER.swap(true, Ordering::Relaxed) {
@@ -125,12 +125,12 @@ mod imp {
             // cmdKey, shiftKey, optionKey, controlKey
             let m = t.mods;
             let mods = 0x100 * m.sup as u32 + 0x200 * m.shift as u32 + 0x800 * m.alt as u32 + 0x1000 * m.ctrl as u32;
-            let id = EventHotKeyId { signature: u32::from_be_bytes(*b"LPLC"), id: 1 };
+            let id = EventHotKeyId { signature: u32::from_be_bytes(*b"LTTY"), id: 1 };
             let mut hotkey = std::ptr::null_mut();
             if RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &mut hotkey) == 0 {
                 HOTKEY.store(hotkey, Ordering::Relaxed);
             } else {
-                eprintln!("laplace: the Quick Terminal hotkey is taken by another application");
+                eprintln!("litty: the Quick Terminal hotkey is taken by another application");
             }
         }
     }
@@ -615,7 +615,7 @@ mod imp {
     }
 
     /// The system appearance is Dark: the application's effective appearance
-    /// (Laplace never sets one on NSApp, only on its windows).
+    /// (Litty never sets one on NSApp, only on its windows).
     pub fn system_dark() -> bool {
         // SAFETY: NSApp and its appearance are live; the name is read while
         // the autoreleased objects are still alive.
@@ -631,12 +631,12 @@ mod imp {
 
     use crate::keymap::Action;
 
-    /// A menu entry: one of Laplace's own actions (sent to the event loop), an
+    /// A menu entry: one of Litty's own actions (sent to the event loop), an
     /// AppKit selector sent along the responder chain, or a separator. Key
     /// equivalents are only given where AppKit must not see the key first;
     /// every other shortcut stays in the (rebindable) keymap.
     enum Item {
-        Laplace(&'static str, Action),
+        Litty(&'static str, Action),
         Native(&'static str, &'static CStr, &'static str, u64),
         Separator,
     }
@@ -674,7 +674,7 @@ mod imp {
     }
 
     /// Replace winit's default menu (whose Quit calls `terminate:` directly,
-    /// skipping `confirm-close-surface`) with Laplace's. Call after
+    /// skipping `confirm-close-surface`) with Litty's. Call after
     /// [`register_reopen_handler`], which provides the event loop proxy.
     pub fn install_menu() {
         extern "C" fn on_menu(_this: Id, _cmd: Id, sender: Id) {
@@ -686,51 +686,51 @@ mod imp {
             }
         }
 
-        use Item::{Laplace, Native, Separator};
+        use Item::{Litty, Native, Separator};
         let menus: [(&str, Vec<Item>); 5] = [
             (
                 "Litty",
                 vec![
-                    Laplace("Settings…", Action::OpenConfig),
-                    Laplace("Check for Updates…", Action::CheckUpdate),
-                    Laplace("Secure Keyboard Entry", Action::ToggleSecureInput),
+                    Litty("Settings…", Action::OpenConfig),
+                    Litty("Check for Updates…", Action::CheckUpdate),
+                    Litty("Secure Keyboard Entry", Action::ToggleSecureInput),
                     Separator,
                     Native("Hide Litty", c"hide:", "h", CMD),
                     Native("Hide Others", c"hideOtherApplications:", "h", CMD | OPT),
                     Native("Show All", c"unhideAllApplications:", "", 0),
                     Separator,
-                    Laplace("Quit Litty", Action::Quit),
+                    Litty("Quit Litty", Action::Quit),
                 ],
             ),
             (
                 "Shell",
                 vec![
-                    Laplace("New Window", Action::NewWindow),
-                    Laplace("New Tab", Action::NewTab),
+                    Litty("New Window", Action::NewWindow),
+                    Litty("New Tab", Action::NewTab),
                     Separator,
-                    Laplace("Split Right", Action::SplitRight),
-                    Laplace("Split Down", Action::SplitDown),
+                    Litty("Split Right", Action::SplitRight),
+                    Litty("Split Down", Action::SplitDown),
                     Separator,
-                    Laplace("Close", Action::CloseTab),
+                    Litty("Close", Action::CloseTab),
                 ],
             ),
             (
                 "Edit",
                 vec![
-                    Laplace("Copy", Action::Copy),
-                    Laplace("Paste", Action::Paste),
-                    Laplace("Select All", Action::SelectAll),
+                    Litty("Copy", Action::Copy),
+                    Litty("Paste", Action::Paste),
+                    Litty("Select All", Action::SelectAll),
                     Separator,
-                    Laplace("Find…", Action::Find),
-                    Laplace("Clear Screen", Action::ClearScreen),
+                    Litty("Find…", Action::Find),
+                    Litty("Clear Screen", Action::ClearScreen),
                 ],
             ),
             (
                 "View",
                 vec![
-                    Laplace("Bigger", Action::ZoomIn),
-                    Laplace("Smaller", Action::ZoomOut),
-                    Laplace("Actual Size", Action::ZoomReset),
+                    Litty("Bigger", Action::ZoomIn),
+                    Litty("Smaller", Action::ZoomOut),
+                    Litty("Actual Size", Action::ZoomReset),
                     Separator,
                     Native("Enter Full Screen", c"toggleFullScreen:", "f", CMD | CTRL),
                 ],
@@ -785,7 +785,7 @@ mod imp {
                 for item in items {
                     let entry = match item {
                         Separator => send_id(item_cls, c"separatorItem"),
-                        Laplace(label, action) => {
+                        Litty(label, action) => {
                             // Quit needs Cmd+Q here: AppKit would otherwise terminate.
                             let key = if action == Action::Quit { "q" } else { "" };
                             new_item(label, sel(c"littyMenu:"), key).inspect(|&it| {
@@ -837,7 +837,7 @@ mod imp {
     }
 
     /// Let `window` join native tab groups (`true`), or keep it a separate
-    /// window even where AppKit would merge it into a tab of another Laplace
+    /// window even where AppKit would merge it into a tab of another Litty
     /// window (`false`). Takes effect the next time the window is ordered in.
     pub fn set_tabbing_allowed(window: &Window, allowed: bool) {
         let Some((_, w)) = ns_window_of(window) else { return };
@@ -887,7 +887,7 @@ mod imp {
         unsafe {
             let Some(app) = shared_application() else { return };
 
-            // Inside a .app bundle the Dock already reads Laplace.icns from the bundle;
+            // Inside a .app bundle the Dock already reads Litty.icns (or Laplace.icns) from the bundle;
             // skipping setApplicationIconImage saves ~8 MB of resident bitmap memory.
             let bundle_path = class(c"NSBundle")
                 .and_then(|cls| send_id(cls, c"mainBundle"))
