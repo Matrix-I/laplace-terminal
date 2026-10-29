@@ -844,6 +844,14 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
         let _ = fs::remove_dir_all(&staging_dir);
         let _ = fs::create_dir_all(&staging_dir);
 
+        struct StagingCleanup<'a>(&'a Path);
+        impl Drop for StagingCleanup<'_> {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(self.0);
+            }
+        }
+        let _guard = StagingCleanup(&staging_dir);
+
         // Unzip using system ditto for macOS resource fork and symlink fidelity
         let status = Command::new("/usr/bin/ditto")
             .args(["-xk"])
@@ -891,7 +899,6 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
             .status();
 
         let _ = Command::new("touch").arg(&app_path).status();
-        let _ = fs::remove_dir_all(&staging_dir);
         return Ok(());
     }
 
@@ -902,6 +909,16 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
     check_binary_arch(downloaded_file)?;
     let temp_dest = current_exe.with_extension("new");
     fs::copy(downloaded_file, &temp_dest).map_err(|e| format!("cannot copy binary: {e}"))?;
+
+    struct FileCleanup<'a>(&'a Path, bool);
+    impl Drop for FileCleanup<'_> {
+        fn drop(&mut self) {
+            if self.1 {
+                let _ = fs::remove_file(self.0);
+            }
+        }
+    }
+    let mut file_guard = FileCleanup(&temp_dest, true);
 
     #[cfg(unix)]
     {
@@ -918,6 +935,7 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
     }
 
     fs::rename(&temp_dest, &current_exe).map_err(|e| format!("failed to replace binary {exe_str}: {e}"))?;
+    file_guard.1 = false;
     Ok(())
 }
 

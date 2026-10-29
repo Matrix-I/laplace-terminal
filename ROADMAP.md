@@ -300,6 +300,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prevent system-wide macOS Secure Event Input leak on window drop / dock hide (`src/main.rs`)**
   - Vulnerability / OS resource leak: When a window with `secure_input: true` and `focused: true` was closed or hidden into the Dock without tabs, `macos::set_secure_input(false)` was never called because `State` lacked a `Drop` implementation. Because `EnableSecureEventInput()` is an OS-wide reference-counted Carbon API, this left the entire operating system permanently locked in Secure Keyboard Entry mode, breaking global hotkeys and accessibility utilities across all applications.
   - Fix: Implement `Drop for State` to guarantee `macos::set_secure_input(false)` on drop, and explicitly release secure input and close search popups in `hide_or_exit_last_window()`.
+- [x] **Low: Ensure update staging directory & temporary binary cleanup on error (`src/update.rs`)**
+  - Vulnerability / Disk leak: In `install_release()`, if extraction (`ditto`), architecture verification (`check_binary_arch`), or installation failed, `staging_dir` (on macOS) and `temp_dest` (standalone binary) were left behind in the updates cache without cleanup.
+  - Fix: Guard both temporary locations with RAII drop guards so they are guaranteed to be cleaned up immediately whenever an error occurs.
 
 
 
