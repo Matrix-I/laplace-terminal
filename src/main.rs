@@ -476,13 +476,6 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::WakeUp => {
                 self.waker.rearm();
                 for s in &mut self.windows {
-                    // OSC 52: applications (e.g. vim/tmux over ssh) setting the clipboard.
-                    for pane in s.tabs.iter().flat_map(|t| &t.panes) {
-                        let request = pane.grid.lock().clipboard_request.take();
-                        if let Some(text) = request {
-                            copy_to_clipboard(&text);
-                        }
-                    }
                     handle_terminal_requests(s);
                     if !s.tabs.is_empty() {
                         render_active(s);
@@ -1287,10 +1280,13 @@ fn handle_terminal_requests(s: &mut State) {
     for (i, tab) in s.tabs.iter_mut().enumerate() {
         let in_front = s.focused && i == s.active;
         for pane in &tab.panes {
-            let (notification, bell) = {
+            let (notification, bell, clip) = {
                 let mut g = pane.grid.lock();
-                (g.notification.take(), std::mem::take(&mut g.bell))
+                (g.notification.take(), std::mem::take(&mut g.bell), g.clipboard_request.take())
             };
+            if let Some(text) = clip {
+                copy_to_clipboard(&text);
+            }
             if let Some((title, body)) = notification {
                 // At most one per second, so a runaway loop cannot flood the desktop.
                 if s.last_notification.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {

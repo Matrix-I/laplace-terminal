@@ -828,6 +828,10 @@ impl Renderer {
             let p_cols = pane.rect.cols.min(g.cols);
             let p_rows = pane.rect.rows.min(g.rows);
 
+            if !pane_full && !g.dirty.iter().any(|&d| d) {
+                continue;
+            }
+
             for r in 0..p_rows {
                 if pane_full || g.dirty[r] {
                     let dst_row = top_rows + pane.rect.row + r;
