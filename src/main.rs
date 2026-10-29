@@ -1108,9 +1108,10 @@ impl App {
                     }
                 };
                 if lines != 0 {
+                    let count = lines.unsigned_abs().min(20);
                     let wheel = if lines > 0 { mouse::Button::WheelUp } else { mouse::Button::WheelDown };
                     if report_mouse(s, wheel, mouse::Action::Press) {
-                        for _ in 1..lines.unsigned_abs() {
+                        for _ in 1..count {
                             report_mouse(s, wheel, mouse::Action::Press);
                         }
                         return;
@@ -1877,7 +1878,8 @@ fn alt_screen_scroll(s: &mut State, lines: isize) -> bool {
         (false, true) => b"\x1bOB",
         (false, false) => b"\x1b[B",
     };
-    pane.pty.write(&key.repeat(lines.unsigned_abs()));
+    let count = lines.unsigned_abs().min(20);
+    pane.pty.write(&key.repeat(count));
     true
 }
 
