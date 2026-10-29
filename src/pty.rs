@@ -185,13 +185,13 @@ impl Pty {
                 libc::dup2(slave, 2);
                 // Close all inherited file descriptors >= 3 so no PTY masters, sockets,
                 // or driver handles leak into the shell.
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", target_env = "gnu"))]
                 if libc::close_range(3, !0, 0) != 0 {
                     for fd in 3..max_fd {
                         libc::close(fd);
                     }
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
                 for fd in 3..max_fd {
                     libc::close(fd);
                 }
