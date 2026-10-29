@@ -736,9 +736,9 @@ impl ApplicationHandler<AppEvent> for App {
                                 }
                                 1 => {
                                     #[cfg(target_os = "macos")]
-                                    let _ = std::process::Command::new("open").arg(&release.html_url).spawn();
+                                    let _ = spawn_detached(std::process::Command::new("open").arg(&release.html_url));
                                     #[cfg(not(target_os = "macos"))]
-                                    let _ = std::process::Command::new("xdg-open").arg(&release.html_url).spawn();
+                                    let _ = spawn_detached(std::process::Command::new("xdg-open").arg(&release.html_url));
                                 }
                                 _ => {}
                             }

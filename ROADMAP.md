@@ -264,6 +264,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Reset or bound grapheme cluster interning tables (`src/atlas.rs`, `src/grid.rs`)**
   - Vulnerability / Bloat: `Atlas::clusters` and `Atlas::cluster_ids` appended up to 2 million strings without eviction even when Atlas texture slots were evicted. `Grid::clusters` was also never cleared on `clear_screen_and_history()` (`Cmd+K`) or `full_reset()` (`ESC c`).
   - Fix: Reset or prune grapheme cluster caches on clear/reset, and bound the atlas cluster table to 4096 entries with an eviction/reset policy.
+- [x] **Low: Reap browser helper process when opening release URL (`src/main.rs`)**
+  - Vulnerability / Leak: `process_window_requests()` launched `open` (macOS) or `xdg-open` (Linux) via bare `.spawn()` without `wait()` or `spawn_detached()`, leaving a zombie process in the OS process table upon exit.
+  - Fix: Replace bare `.spawn()` calls with `spawn_detached()`.
 
 
 ## Terminal protocols
