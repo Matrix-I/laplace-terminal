@@ -499,5 +499,5 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Fix zero-width character column calculation (`char_width(c).max(1)`) in search match selections (`src/search.rs`)
 - [x] Clamp wheel delta bursts in `alt_screen_scroll` to avoid flooding PTY with arrow keys (`src/main.rs`)
 - [x] Support standard X11 color names in config `parse_color` consistent with terminal OSC palette (`src/config.rs`)
-- [ ] Propagate config reload renderer changes to all open windows in multi-window mode (`src/main.rs`)
+- [x] Propagate config reload renderer changes to all open windows in multi-window mode (`src/main.rs`)
 

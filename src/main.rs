@@ -121,6 +121,8 @@ struct State {
     quick_terminal_requested: bool,
     /// `Cmd+Q` / `Ctrl+Shift+Q`: `App` confirms across all windows, then exits.
     quit_requested: bool,
+    /// Config reload requested; `App` propagates it to all windows.
+    reload_config_requested: bool,
     /// Terminal inspector overlay is shown.
     inspector: bool,
     /// Last key sent to the terminal and its bytes, for the inspector.
@@ -216,6 +218,11 @@ impl App {
 
     /// Apply what event handlers asked for: quit, open new windows, close emptied ones.
     fn process_window_requests(&mut self, event_loop: &ActiveEventLoop) {
+        if self.windows.iter_mut().any(|s| std::mem::take(&mut s.reload_config_requested)) {
+            for s in &mut self.windows {
+                reload_config(s);
+            }
+        }
         if self.windows.iter_mut().any(|s| std::mem::take(&mut s.quick_terminal_requested)) {
             self.toggle_quick_terminal(event_loop);
         }
@@ -434,6 +441,7 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         quick: false,
         quick_terminal_requested: false,
         quit_requested: false,
+        reload_config_requested: false,
         inspector: false,
         inspector_key: String::new(),
     })
@@ -1213,7 +1221,7 @@ impl App {
                     s.cursor_blink_epoch = std::time::Instant::now();
                     let mtime = config::config_mtime();
                     if mtime != s.config_mtime {
-                        reload_config(s);
+                        s.reload_config_requested = true;
                     }
                 }
                 if !s.tabs.is_empty() {
@@ -2954,7 +2962,7 @@ fn run_action(
         A::Quit => s.quit_requested = true,
         A::Minimize => s.window.set_minimized(true),
         A::OpenConfig => config::open_config_in_editor(),
-        A::ReloadConfig => reload_config(s),
+        A::ReloadConfig => s.reload_config_requested = true,
         A::NewWindow => s.new_window_requested = true,
         A::ToggleQuickTerminal => s.quick_terminal_requested = true,
         A::NewTab if s.tabs.is_empty() => open_fresh_tab(s, waker),
@@ -3126,7 +3134,7 @@ fn run_tab_action(
 /// applications that set DECSET 2031.
 fn apply_system_appearance(s: &mut State) {
     if s.config.theme.as_deref().is_some_and(config::theme_is_conditional) {
-        reload_config(s);
+        s.reload_config_requested = true;
     }
     for pane in s.tabs.iter().flat_map(|t| &t.panes) {
         if pane.grid.lock().color_scheme_reports {
