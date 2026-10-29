@@ -4,7 +4,7 @@
 //! - X11: a passive key grab on the root window, served by a thread that
 //!   waits for the key press.
 //! - Wayland has no global hotkey API for clients, so a control socket lets a
-//!   desktop-environment shortcut run `laplace +toggle-quick-terminal`. The
+//!   desktop-environment shortcut run `litty +toggle-quick-terminal`. The
 //!   socket works under X11 too.
 
 use std::io::{Read, Write};
@@ -16,7 +16,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::keymap::{Action, Trigger};
 use crate::AppEvent;
 
-/// What `laplace +toggle-quick-terminal` sends.
+/// What `litty +toggle-quick-terminal` sends.
 const TOGGLE: &[u8] = b"toggle-quick-terminal\n";
 
 /// Where hotkey presses go, set by [`listen`].
@@ -31,18 +31,38 @@ fn toggle() {
 /// The control socket: in `$XDG_RUNTIME_DIR` (private to the user), else user-private temp/cache directory.
 pub fn socket_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir).join("laplace.sock");
+        return PathBuf::from(dir).join("litty.sock");
     }
     #[cfg(target_os = "macos")]
     {
         // Darwin temp_dir is user-private (/var/folders/.../T/)
+        std::env::temp_dir().join("litty.sock")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let dir = PathBuf::from(home).join(".cache").join("litty");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("litty.sock")
+        } else {
+            std::env::temp_dir().join(format!("litty-{}.sock", unsafe { libc::getuid() }))
+        }
+    }
+}
+
+/// Fallback socket path for backward compatibility.
+pub fn legacy_socket_path() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir).join("laplace.sock");
+    }
+    #[cfg(target_os = "macos")]
+    {
         std::env::temp_dir().join("laplace.sock")
     }
     #[cfg(not(target_os = "macos"))]
     {
         if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
             let dir = PathBuf::from(home).join(".cache").join("laplace");
-            let _ = std::fs::create_dir_all(&dir);
             dir.join("laplace.sock")
         } else {
             std::env::temp_dir().join(format!("laplace-{}.sock", unsafe { libc::getuid() }))
@@ -50,9 +70,12 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
-/// `laplace +toggle-quick-terminal`: ask the running instance to toggle.
+/// `litty +toggle-quick-terminal`: ask the running instance to toggle.
 pub fn send_toggle() -> std::io::Result<()> {
-    UnixStream::connect(socket_path())?.write_all(TOGGLE)
+    if let Ok(mut stream) = UnixStream::connect(socket_path()) {
+        return stream.write_all(TOGGLE);
+    }
+    UnixStream::connect(legacy_socket_path())?.write_all(TOGGLE)
 }
 
 /// Remember the event proxy for hotkey presses and serve the control socket
@@ -74,7 +97,12 @@ pub fn listen(proxy: EventLoopProxy<AppEvent>) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    let spawned = std::thread::Builder::new().name("laplace-control".into()).spawn(move || {
+    // Also try to symlink legacy socket path for backward compatibility
+    let legacy = legacy_socket_path();
+    let _ = std::fs::remove_file(&legacy);
+    let _ = std::os::unix::fs::symlink(&path, &legacy);
+
+    let spawned = std::thread::Builder::new().name("litty-control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
             let mut buf = [0u8; 64];
             let mut stream = stream;
@@ -86,6 +114,7 @@ pub fn listen(proxy: EventLoopProxy<AppEvent>) {
     });
     if spawned.is_err() {
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&legacy);
     }
 }
 
@@ -129,14 +158,14 @@ mod x11 {
             // No X server (pure Wayland): the control socket is the way in.
             let Ok((conn, screen)) = x11rb::connect(None) else {
                 eprintln!(
-                    "laplace: no X11 display for the Quick Terminal hotkey; bind `laplace +toggle-quick-terminal` to a desktop shortcut instead"
+                    "litty: no X11 display for the Quick Terminal hotkey; bind `litty +toggle-quick-terminal` to a desktop shortcut instead"
                 );
                 return;
             };
             let root = conn.setup().roots[screen].root;
             let conn = Arc::new(conn);
             let events = conn.clone();
-            let spawned = std::thread::Builder::new().name("laplace-hotkey".into()).spawn(move || {
+            let spawned = std::thread::Builder::new().name("litty-hotkey".into()).spawn(move || {
                 while let Ok(event) = events.wait_for_event() {
                     if let Event::KeyPress(_) = event {
                         super::toggle();
@@ -157,7 +186,7 @@ mod x11 {
         if let Some(t) = trigger {
             match grab(g, t) {
                 Ok(grabbed) => g.grabbed = Some(grabbed),
-                Err(e) => eprintln!("laplace: Quick Terminal hotkey: {e}"),
+                Err(e) => eprintln!("litty: Quick Terminal hotkey: {e}"),
             }
         }
         let _ = g.conn.flush();

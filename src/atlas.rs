@@ -2187,7 +2187,7 @@ static FONT_CACHE: Mutex<Option<(Vec<String>, Arc<FontSet>)>> = parking_lot::con
 /// `families` comes from the `font-family` config option: the first family
 /// that resolves becomes the primary font, the remaining ones are tried as
 /// fallbacks before the auto-discovered symbol fonts. Without configured
-/// families, `LAPLACE_FONT=/path/to/font.ttf` or the platform defaults apply.
+/// families, `LITTY_FONT=/path/to/font.ttf` or the platform defaults apply.
 pub fn load_font(families: &[String]) -> Arc<FontSet> {
     let mut cache = FONT_CACHE.lock();
     if let Some((ref cached_families, ref font_set)) = *cache {
@@ -2202,12 +2202,12 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
             Some(face) => {
                 configured_faces.push((face.path.clone(), face.index));
             }
-            None => eprintln!("laplace: font-family `{fam}` not found; using fallback"),
+            None => eprintln!("litty: font-family `{fam}` not found; using fallback"),
         }
     }
 
     let mut primary_candidates: Vec<String> = Vec::new();
-    if let Ok(p) = std::env::var("LAPLACE_FONT") {
+    if let Ok(p) = std::env::var("LITTY_FONT").or_else(|_| std::env::var("LAPLACE_FONT")) {
         primary_candidates.push(p);
     }
 
@@ -2275,7 +2275,7 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
             }
         }
     }
-    let primary = primary.expect("laplace: no usable monospace font found; set font-family in the config");
+    let primary = primary.expect("litty: no usable monospace font found; set font-family in the config");
 
     let mut fallbacks: Vec<fontdue::Font> = Vec::new();
     for (p, idx) in configured_iter {
@@ -2357,7 +2357,7 @@ fn parse_font(path: &str, collection_index: u32, substitutions: bool) -> Option<
     match fontdue::Font::from_bytes(mmap, settings) {
         Ok(f) => Some(f),
         Err(e) => {
-            eprintln!("laplace: failed to parse font {path}: {e}");
+            eprintln!("litty: failed to parse font {path}: {e}");
             None
         }
     }
@@ -2459,10 +2459,10 @@ mod tests {
     }
 
     /// Needs a font with programming ligatures, e.g.
-    /// `LAPLACE_LIGATURE_FONT=JetBrainsMono-Regular.ttf cargo test ligatures`.
+    /// `LITTY_LIGATURE_FONT=JetBrainsMono-Regular.ttf cargo test ligatures`.
     #[test]
     fn ligatures_shape_into_glyph_pieces() {
-        let Ok(path) = std::env::var("LAPLACE_LIGATURE_FONT") else { return };
+        let Ok(path) = std::env::var("LITTY_LIGATURE_FONT").or_else(|_| std::env::var("LAPLACE_LIGATURE_FONT")) else { return };
         let (shaper, _mmap) = shaper_for(&path, 0)
             .map(|(f, m)| (Some(f), Some(m)))
             .unwrap_or((None, None));

@@ -132,19 +132,22 @@ impl Pty {
             .collect();
         env.push(cstr("TERM=xterm-256color"));
         env.push(cstr("COLORTERM=truecolor"));
-        env.push(cstr("TERM_PROGRAM=laplace"));
+        env.push(cstr("TERM_PROGRAM=litty"));
         env.push(cstr(concat!("TERM_PROGRAM_VERSION=", env!("CARGO_PKG_VERSION"))));
         for (k, v) in &injected_env {
             env.push(cstr(format!("{k}={v}")));
         }
         if let Some((_, feats)) = integration {
+            env.push(cstr("LITTY_SHELL_INTEGRATION=1"));
             env.push(cstr("LAPLACE_SHELL_INTEGRATION=1"));
             let mut list = Vec::new();
             if feats.cursor { list.push("cursor"); }
             if feats.sudo { list.push("sudo"); }
             if feats.title { list.push("title"); }
             if !list.is_empty() {
-                env.push(cstr(format!("LAPLACE_SHELL_INTEGRATION_FEATURES={}", list.join(","))));
+                let joined = list.join(",");
+                env.push(cstr(format!("LITTY_SHELL_INTEGRATION_FEATURES={joined}")));
+                env.push(cstr(format!("LAPLACE_SHELL_INTEGRATION_FEATURES={joined}")));
             }
         }
         env.push(cstr(format!("PWD={target_dir}")));

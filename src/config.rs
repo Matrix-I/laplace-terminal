@@ -142,7 +142,7 @@ pub struct Config {
     pub bell_audio_volume: f32,
     pub confirm_close_surface: ConfirmClose,
     /// macOS: new tabs are native window tabs (NSWindow tabbing) instead of
-    /// Laplace's own tab bar.
+    /// Litty's own tab bar.
     pub macos_native_tabs: bool,
     /// `custom-shader` files, applied in order (Shadertoy-style GLSL).
     pub custom_shaders: Vec<PathBuf>,
@@ -182,7 +182,8 @@ pub const DEFAULT_FONT_PT: f32 = 14.0;
 
 impl Default for Config {
     fn default() -> Self {
-        let font_size = std::env::var("LAPLACE_FONT_SIZE")
+        let font_size = std::env::var("LITTY_FONT_SIZE")
+            .or_else(|_| std::env::var("LAPLACE_FONT_SIZE"))
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(DEFAULT_FONT_PT)
@@ -269,13 +270,13 @@ impl Config {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
             Err(e) => {
-                eprintln!("laplace: cannot read config {}: {e}", path.display());
+                eprintln!("litty: cannot read config {}: {e}", path.display());
                 return Config::default();
             }
         };
         let (cfg, errors) = Config::parse(&text);
         for err in errors {
-            eprintln!("laplace: config {}: {err}", path.display());
+            eprintln!("litty: config {}: {err}", path.display());
         }
         cfg
     }
@@ -822,7 +823,7 @@ fn parse_keybind(v: &str) -> Result<(crate::keymap::Trigger, crate::keymap::Bind
     Err(last_err)
 }
 
-/// `window-padding-x = 8` or Ghostty's `left,right` form (`4,12`); Laplace pads both
+/// `window-padding-x = 8` or Ghostty's `left,right` form (`4,12`); Litty pads both
 /// sides equally, so a pair is averaged.
 fn parse_padding(v: &str) -> Result<f32, String> {
     let num = |s: &str| s.trim().parse::<f32>().map_err(|_| format!("invalid number `{s}`"));
@@ -899,13 +900,13 @@ pub fn open_config_in_editor() {
     if !path.exists() {
         if let Some(dir) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("laplace: cannot create {}: {e}", dir.display());
+                eprintln!("litty: cannot create {}: {e}", dir.display());
                 return;
             }
         }
         let body = TEMPLATE.replace("{path}", &path.display().to_string());
         if let Err(e) = std::fs::write(&path, body) {
-            eprintln!("laplace: cannot create {}: {e}", path.display());
+            eprintln!("litty: cannot create {}: {e}", path.display());
             return;
         }
     }
@@ -915,7 +916,7 @@ pub fn open_config_in_editor() {
     #[cfg(not(target_os = "macos"))]
     let res = crate::spawn_detached(std::process::Command::new("xdg-open").arg(&path));
     if let Err(e) = res {
-        eprintln!("laplace: failed to open {}: {e}", path.display());
+        eprintln!("litty: failed to open {}: {e}", path.display());
     }
 }
 

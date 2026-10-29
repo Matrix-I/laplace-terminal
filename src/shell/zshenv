@@ -1,6 +1,9 @@
-# Laplace injects this file by pointing ZDOTDIR here. Restore the user's
+# Litty injects this file by pointing ZDOTDIR here. Restore the user's
 # ZDOTDIR, load their .zshenv, then the integration for interactive shells.
-if [[ -n "${LAPLACE_ZDOTDIR+x}" ]]; then
+if [[ -n "${LITTY_ZDOTDIR+x}" ]]; then
+  ZDOTDIR=$LITTY_ZDOTDIR
+  unset LITTY_ZDOTDIR
+elif [[ -n "${LAPLACE_ZDOTDIR+x}" ]]; then
   ZDOTDIR=$LAPLACE_ZDOTDIR
   unset LAPLACE_ZDOTDIR
 else
@@ -8,11 +11,16 @@ else
 fi
 
 {
-  typeset _laplace_file=${ZDOTDIR-$HOME}/.zshenv
-  [[ ! -r $_laplace_file ]] || builtin source -- $_laplace_file
+  typeset _litty_file=${ZDOTDIR-$HOME}/.zshenv
+  [[ ! -r $_litty_file ]] || builtin source -- $_litty_file
 } always {
-  if [[ -o interactive && -n $LAPLACE_SHELL_INTEGRATION_DIR ]]; then
-    builtin source -- "$LAPLACE_SHELL_INTEGRATION_DIR/zsh/laplace-integration.zsh"
+  typeset _litty_dir=${LITTY_SHELL_INTEGRATION_DIR-$LAPLACE_SHELL_INTEGRATION_DIR}
+  if [[ -o interactive && -n $_litty_dir ]]; then
+    if [[ -r "$_litty_dir/zsh/litty-integration.zsh" ]]; then
+      builtin source -- "$_litty_dir/zsh/litty-integration.zsh"
+    elif [[ -r "$_litty_dir/zsh/laplace-integration.zsh" ]]; then
+      builtin source -- "$_litty_dir/zsh/laplace-integration.zsh"
+    fi
   fi
-  builtin unset _laplace_file
+  builtin unset _litty_file _litty_dir
 }
