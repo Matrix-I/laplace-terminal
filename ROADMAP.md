@@ -345,7 +345,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Hyperlink & SGR 58 underline color slots (`CellExtra`) stale retention on `clear_history` (`src/grid.rs`)**
   - Vulnerability / Slot exhaustion: `clear_history()` resets `self.history = 0` but does not zero out evicted cells in the circular ring buffer `self.cells`, nor does it invoke `trim_extras()`. Furthermore, `collect_extras()` scans all physical rows in `self.cells.iter()`, marking dead cells outside `0..(self.history + self.rows)` as active and permanently exhausting the 255 hyperlink/color slots.
   - Fix: Limit `collect_extras()` row traversal to active visible and scrollback rows (`0..(self.history + self.rows)`), and call `trim_extras()` inside `clear_history()`.
-- [ ] **Low: Inverted nested split ratio adjustment in multi-pane layouts (`src/split.rs`)**
+- [x] **Low: Inverted nested split ratio adjustment in multi-pane layouts (`src/split.rs`)**
   - Bug / Usability: In `SplitNode::adjust_ratio()`, `first.contains(target_id)` evaluates to `true` at the root split node if `target_id` is located anywhere inside the first subtree. As a result, the outermost root split ratio is adjusted rather than recursing down to the innermost split containing the active pane.
   - Fix: Recurse into child subtrees first (`first.adjust_ratio(...) || second.adjust_ratio(...)`), and only adjust the local ratio if the target is an immediate direct leaf of the node.
 

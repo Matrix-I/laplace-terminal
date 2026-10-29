@@ -203,6 +203,7 @@ impl SplitNode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, target_id: u64) -> bool {
         match self {
             SplitNode::Leaf(id) => *id == target_id,
@@ -227,7 +228,7 @@ impl SplitNode {
         }
     }
 
-    /// Adjust ratio of the parent split containing `target_id`.
+    /// Adjust ratio of the innermost parent split containing `target_id`.
     pub fn adjust_ratio(&mut self, target_id: u64, delta: f32) -> bool {
         match self {
             SplitNode::Leaf(_) => false,
@@ -237,14 +238,17 @@ impl SplitNode {
                 second,
                 ..
             } => {
-                if first.contains(target_id) {
+                if first.adjust_ratio(target_id, delta) || second.adjust_ratio(target_id, delta) {
+                    return true;
+                }
+                if matches!(**first, SplitNode::Leaf(id) if id == target_id) {
                     *ratio = (*ratio + delta).clamp(0.15, 0.85);
                     true
-                } else if second.contains(target_id) {
+                } else if matches!(**second, SplitNode::Leaf(id) if id == target_id) {
                     *ratio = (*ratio - delta).clamp(0.15, 0.85);
                     true
                 } else {
-                    first.adjust_ratio(target_id, delta) || second.adjust_ratio(target_id, delta)
+                    false
                 }
             }
         }
@@ -437,5 +441,31 @@ mod tests {
         // Closing first pane (id 1) must leave node as Leaf(2)
         assert!(node.remove_pane(1));
         assert_eq!(node, SplitNode::Leaf(2));
+    }
+
+    #[test]
+    fn test_adjust_ratio_nested_splits() {
+        let mut node = SplitNode::new_leaf(1);
+        node.split_pane(1, 2, SplitDirection::Vertical);
+        node.split_pane(2, 3, SplitDirection::Horizontal);
+
+        // Adjusting pane 2 should adjust the inner split between 2 and 3, not root
+        assert!(node.adjust_ratio(2, 0.1));
+        if let SplitNode::Split { ratio: root_ratio, second, .. } = &node {
+            assert_eq!(*root_ratio, 0.5, "root ratio untouched when adjusting nested split");
+            if let SplitNode::Split { ratio: inner_ratio, .. } = second.as_ref() {
+                assert!((*inner_ratio - 0.6).abs() < 1e-4, "inner ratio adjusted to 0.6");
+            } else {
+                panic!("second child should be Split");
+            }
+        } else {
+            panic!("root should be Split");
+        }
+
+        // Adjusting pane 1 should adjust the root split
+        assert!(node.adjust_ratio(1, 0.1));
+        if let SplitNode::Split { ratio: root_ratio, .. } = &node {
+            assert!((*root_ratio - 0.6).abs() < 1e-4, "root ratio adjusted to 0.6");
+        }
     }
 }
