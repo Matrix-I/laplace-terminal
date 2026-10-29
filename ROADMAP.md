@@ -312,6 +312,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prevent zombie process and heavy thread stacks in audio alerts (`src/main.rs`)**
   - Vulnerability / Zombie leak: `play_sound` spawned `/usr/bin/afplay` (macOS) or `paplay` (Linux) with a raw `std::thread::spawn(move || child.wait())`, allocating an 8MB thread stack per alert. If thread spawning failed, `child` was dropped without waiting, leaving an un-reaped zombie process. Furthermore, sound paths were passed without `--` argument delimiters.
   - Fix: Route player execution through `spawn_detached()`, ensuring dedicated lightweight (32 KB) reaper threads with automatic synchronous SIGKILL and `waitpid` fallback, and pass `--` before paths.
+- [x] **High: Prevent child process zombies on early Pty drop or reader thread panic (`src/pty.rs`)**
+  - Vulnerability / Zombie leak: If a `Pty` was instantiated via `Pty::spawn_in` and dropped before `spawn_reader` ran (or if pane creation failed), `Pty` lacked a `Drop` implementation and never called `reap_child(pid)`. Furthermore, if the reader thread panicked during byte feed/parsing, the thread unwound without reaping the child. The child shell process was left permanently as an un-reaped zombie in the OS process table.
+  - Fix: Add `reader_spawned: AtomicBool` to `Pty` with `Drop for Pty` calling `reap_child(self.pid)` when the reader thread was not spawned. In `spawn_reader`, introduce an RAII `ChildReaper` drop guard to guarantee `reap_child(pid)` runs even if the reader thread panics.
 
 
 

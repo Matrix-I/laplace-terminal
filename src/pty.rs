@@ -51,6 +51,16 @@ pub struct Pty {
     shutdown_rx: Arc<OwnedFd>,
     /// Write end of the shutdown pipe: closing it (on drop) signals shutdown.
     _shutdown_tx: OwnedFd,
+    /// Whether the reader thread was spawned (which takes over reaping the child).
+    reader_spawned: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        if !self.reader_spawned.load(std::sync::atomic::Ordering::SeqCst) {
+            reap_child(self.pid);
+        }
+    }
 }
 
 fn winsize(cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> libc::winsize {
@@ -259,6 +269,7 @@ impl Pty {
                 tx,
                 shutdown_rx,
                 _shutdown_tx: shutdown_tx,
+                reader_spawned: std::sync::atomic::AtomicBool::new(false),
             })
         }
     }
@@ -317,10 +328,17 @@ impl Pty {
         let shutdown = self.shutdown_rx.clone();
         let tx = self.tx.clone();
         let pid = self.pid;
+        struct ChildReaper(libc::pid_t);
+        impl Drop for ChildReaper {
+            fn drop(&mut self) {
+                reap_child(self.0);
+            }
+        }
         if let Err(e) = std::thread::Builder::new()
             .name("pty-reader".into())
             .stack_size(256 * 1024)
             .spawn(move || {
+                let _reaper = ChildReaper(pid);
                 let raw = fd.as_raw_fd();
                 let mut buf = [0u8; 65536];
                 let mut parser = vte::Parser::new();
@@ -386,13 +404,14 @@ impl Pty {
                 // (the writer thread exits once every sender is gone).
                 drop(tx);
                 drop(fd);
-                reap_child(pid);
+                drop(_reaper);
                 on_exit();
             })
         {
             reap_child(self.pid);
             return Err(e);
         }
+        self.reader_spawned.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
@@ -519,6 +538,17 @@ pub(crate) fn pid_cwd(pid: libc::pid_t) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_pty_before_spawn_reader_reaps_the_shell() {
+        let pty = Pty::spawn_in(80, 24, 8, 16, None, None).expect("spawn pty");
+        let pid = pty.pid;
+        drop(pty);
+        let mut status = 0;
+        let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(r, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
 
     #[test]
     fn dropping_pty_never_blocks_and_reaps_the_shell() {
