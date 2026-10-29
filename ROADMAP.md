@@ -351,6 +351,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Eliminate per-line `Vec` heap allocations during window resize reflow (`src/grid.rs`)**
   - Optimization / Heap churn: During terminal resize, reflowing scrollback unwrapped each line into a separate heap-allocated `Vec<Cell>`, triggering thousands of small heap allocations when resizing windows with deep scrollback history.
   - Fix: Flatten intermediate logical line extraction into a single contiguous `logical_cells` buffer with `line_spans: Vec<Range<usize>>`, eliminating per-line heap allocations.
+- [x] **Low: Reuse instance buffer and shrink oversized GPU vertex buffer on window resize (`src/renderer.rs`)**
+  - Optimization / GPU & RAM bloat: When cell count changed, `self.instances` was re-allocated from scratch with `vec![Instance::default(); n]`, discarding existing capacity. Additionally, shrinking a large window retained the peak GPU instance buffer indefinitely without shrinking.
+  - Fix: Reuse `self.instances` with `clear()` and `resize()`, shrinking capacity when more than double the needed size, and reallocate the GPU instance buffer when it exceeds twice the required footprint.
 
 
 

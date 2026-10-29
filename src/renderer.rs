@@ -791,8 +791,15 @@ impl Renderer {
         };
 
         if self.instances.len() != n {
-            self.instances = vec![Instance::default(); n];
-            if self.instance_buf.size() < (n * 12) as u64 {
+            self.instances.clear();
+            self.instances.resize(n, Instance::default());
+            if self.instances.capacity() > n.saturating_mul(2) && self.instances.capacity() > 4096 {
+                self.instances.shrink_to_fit();
+            }
+            let needed_bytes = (n * std::mem::size_of::<Instance>()) as u64;
+            if self.instance_buf.size() < needed_bytes
+                || (self.instance_buf.size() > needed_bytes.saturating_mul(2) && self.instance_buf.size() > 65536)
+            {
                 self.instance_buf = make_instance_buf(&self.device, n);
             }
             self.force_full = true;
