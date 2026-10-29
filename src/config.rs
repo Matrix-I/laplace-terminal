@@ -1,5 +1,5 @@
 //! Ghostty-style configuration: a plain `key = value` text file at
-//! `~/.laplace/config`.
+//! `~/.litty/config`.
 //!
 //! - `#` starts a comment line, blank lines are ignored.
 //! - Values may optionally be wrapped in double quotes.
@@ -239,22 +239,10 @@ impl Default for Config {
     }
 }
 
-/// Primary path for Litty config: `~/.litty/config`.
+/// Path for Litty config: `~/.litty/config`.
 pub fn litty_config_path() -> PathBuf {
     let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
     PathBuf::from(home).join(".litty").join("config")
-}
-
-/// Fallback path for Laplace config: `~/.laplace/config`.
-pub fn laplace_config_path() -> PathBuf {
-    let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
-    PathBuf::from(home).join(".laplace").join("config")
-}
-
-/// Path to Ghostty config: `~/.config/ghostty/config`.
-pub fn ghostty_config_path() -> PathBuf {
-    let home = std::env::var_os("HOME").filter(|v| !v.is_empty()).unwrap_or_else(|| "/".into());
-    PathBuf::from(home).join(".config").join("ghostty").join("config")
 }
 
 /// Primary path for Litty config.
@@ -262,22 +250,9 @@ pub fn config_path() -> PathBuf {
     litty_config_path()
 }
 
-/// Active path: prefers `~/.litty/config` if it exists, otherwise falls back
-/// to `~/.laplace/config`, then `~/.config/ghostty/config` so configurations work out of the box.
+/// Active path for Litty config: `~/.litty/config`.
 pub fn active_config_path() -> PathBuf {
-    let litty = litty_config_path();
-    if litty.exists() {
-        return litty;
-    }
-    let laplace = laplace_config_path();
-    if laplace.exists() {
-        return laplace;
-    }
-    let ghostty = ghostty_config_path();
-    if ghostty.exists() {
-        return ghostty;
-    }
-    litty
+    litty_config_path()
 }
 
 pub fn config_mtime() -> Option<SystemTime> {
