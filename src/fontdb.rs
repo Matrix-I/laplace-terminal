@@ -2,17 +2,26 @@
 //! and face index by reading the OpenType `name` table of installed fonts.
 //! Only the table directory and `name` table are read, never whole files.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 static FONT_FILES_CACHE: RwLock<Option<Arc<[PathBuf]>>> = RwLock::new(None);
+static FACE_CACHE: RwLock<Option<HashMap<PathBuf, Arc<[FaceName]>>>> = RwLock::new(None);
+static FAMILY_CACHE: RwLock<Option<HashMap<String, Option<FaceRef>>>> = RwLock::new(None);
 
-/// Clear the cached font directory scan, forcing the next lookup to re-scan.
+/// Clear all cached font directory scans and parsed metadata, forcing next lookup to re-scan.
 #[allow(dead_code)]
 pub fn invalidate_font_cache() {
     if let Ok(mut lock) = FONT_FILES_CACHE.write() {
+        *lock = None;
+    }
+    if let Ok(mut lock) = FACE_CACHE.write() {
+        *lock = None;
+    }
+    if let Ok(mut lock) = FAMILY_CACHE.write() {
         *lock = None;
     }
 }
@@ -34,6 +43,22 @@ fn get_font_files() -> Arc<[PathBuf]> {
     arc
 }
 
+fn get_cached_faces(path: &Path) -> Arc<[FaceName]> {
+    if let Ok(lock) = FACE_CACHE.read() {
+        if let Some(cache) = lock.as_ref() {
+            if let Some(faces) = cache.get(path) {
+                return Arc::clone(faces);
+            }
+        }
+    }
+    let parsed: Arc<[FaceName]> = read_faces(path).unwrap_or_default().into();
+    if let Ok(mut lock) = FACE_CACHE.write() {
+        let map = lock.get_or_insert_with(HashMap::new);
+        map.insert(path.to_path_buf(), Arc::clone(&parsed));
+    }
+    parsed
+}
+
 /// A resolved font face: file path and index inside a `.ttc` collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaceRef {
@@ -47,6 +72,22 @@ pub fn find_family(family: &str) -> Option<FaceRef> {
     if family.contains('/') {
         return Path::new(family).is_file().then(|| FaceRef { path: family.to_string(), index: 0 });
     }
+    if let Ok(lock) = FAMILY_CACHE.read() {
+        if let Some(cache) = lock.as_ref() {
+            if let Some(res) = cache.get(family) {
+                return res.clone();
+            }
+        }
+    }
+    let res = resolve_family(family);
+    if let Ok(mut lock) = FAMILY_CACHE.write() {
+        let map = lock.get_or_insert_with(HashMap::new);
+        map.insert(family.to_string(), res.clone());
+    }
+    res
+}
+
+fn resolve_family(family: &str) -> Option<FaceRef> {
     let want = normalize(family);
     if want.is_empty() {
         return None;
@@ -112,7 +153,8 @@ fn search_files(files: &[PathBuf], want: &str) -> Option<FaceRef> {
 fn best_match(files: &[&PathBuf], want: &str) -> Option<FaceRef> {
     let mut best: Option<(u8, FaceRef)> = None;
     for &path in files {
-        for face in read_faces(path).unwrap_or_default() {
+        let faces = get_cached_faces(path);
+        for face in faces.iter() {
             let fam_norm = normalize(&face.family);
             let ps_norm = normalize(&face.postscript);
             let full_norm = normalize(&face.full_name);
@@ -207,6 +249,7 @@ fn collect_font_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
     }
 }
 
+#[derive(Clone)]
 struct FaceName {
     index: u32,
     family: String,
@@ -371,5 +414,13 @@ mod tests {
     #[test]
     fn unknown_family_is_none() {
         assert!(find_family("Definitely Not A Real Font 12345").is_none());
+    }
+
+    #[test]
+    fn cache_memoization_and_invalidation() {
+        invalidate_font_cache();
+        assert!(find_family("Definitely Not A Real Font 12345").is_none());
+        assert!(find_family("Definitely Not A Real Font 12345").is_none());
+        invalidate_font_cache();
     }
 }
