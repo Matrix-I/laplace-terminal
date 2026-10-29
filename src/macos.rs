@@ -986,6 +986,39 @@ mod imp {
     }
 
     static ACTIVE_PROGRESS_WINDOW: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static PROGRESS_DELEGATE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    extern "C" fn progress_window_will_close(_this: *mut c_void, _cmd: *mut c_void, _notification: *mut c_void) {
+        let win = ACTIVE_PROGRESS_WINDOW.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        if !win.is_null() {
+            unsafe {
+                msg_send!(win, c"release");
+            }
+        }
+    }
+
+    fn progress_delegate() -> Option<Id> {
+        let cur = PROGRESS_DELEGATE.load(Ordering::SeqCst);
+        if !cur.is_null() {
+            return Some(cur);
+        }
+        unsafe {
+            let name = c"LittyProgressDelegate";
+            let mut cls = objc_getClass(name.as_ptr());
+            if cls.is_null() {
+                let base = class(c"NSObject")?;
+                cls = objc_allocateClassPair(base, name.as_ptr(), 0);
+                if cls.is_null() {
+                    return None;
+                }
+                class_addMethod(cls, sel(c"windowWillClose:"), progress_window_will_close as *const (), c"v@:@".as_ptr());
+                objc_registerClassPair(cls);
+            }
+            let obj = send_id(cls, c"alloc").and_then(|o| send_id(o, c"init"))?;
+            PROGRESS_DELEGATE.store(obj, Ordering::SeqCst);
+            Some(obj)
+        }
+    }
 
     /// Show a modeless progress dialog with an indeterminate progress bar.
     /// Must be called on the main thread.
@@ -996,12 +1029,11 @@ mod imp {
             let Some(win_cls) = class(c"NSWindow") else { return };
             let Some(alloc) = send_id(win_cls, c"alloc") else { return };
             let frame = NSRect { x: 0.0, y: 0.0, w: 360.0, h: 90.0 };
-            // NSWindowStyleMaskTitled (1) | NSWindowStyleMaskClosable (2)
-            // NSBackingStoreBuffered (2), defer: false (0)
+            // NSWindowStyleMaskTitled (1), NSBackingStoreBuffered (2), defer: false (0)
             let win = msg_send!(
                 alloc,
                 c"initWithContentRect:styleMask:backing:defer:",
-                frame => NSRect, 3u64 => u64, 2u64 => u64, false => bool;
+                frame => NSRect, 1u64 => u64, 2u64 => u64, false => bool;
                 -> Id
             );
             if win.is_null() {
@@ -1012,6 +1044,9 @@ mod imp {
                 msg_send!(win, c"setTitle:", s => Id);
             }
             msg_send!(win, c"setReleasedWhenClosed:", false => bool);
+            if let Some(del) = progress_delegate() {
+                msg_send!(win, c"setDelegate:", del => Id);
+            }
 
             let Some(content) = send_id(win, c"contentView") else {
                 msg_send!(win, c"release");
@@ -1113,6 +1148,7 @@ mod imp {
         unsafe {
             let win = ACTIVE_PROGRESS_WINDOW.swap(std::ptr::null_mut(), Ordering::SeqCst);
             if !win.is_null() {
+                msg_send!(win, c"setDelegate:", std::ptr::null_mut() => Id);
                 msg_send!(win, c"orderOut:", std::ptr::null_mut() => Id);
                 msg_send!(win, c"close");
                 msg_send!(win, c"release");

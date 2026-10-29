@@ -190,12 +190,14 @@ pub struct Grid {
     /// DCS request being collected (`DCS + q` XTGETTCAP or `DCS $ q` DECRQSS).
     dcs: Option<DcsRequest>,
     dcs_buf: Vec<u8>,
+    dcs_start: Option<std::time::Instant>,
     /// Inline images (Kitty graphics protocol, Sixel).
     pub graphics: crate::graphics::Store,
     /// APC filter state in front of vte (which drops APC strings): 0 ground,
     /// 1 after ESC, 2 inside `ESC _`, 3 ESC inside it.
     apc_state: u8,
     apc_buf: Vec<u8>,
+    apc_start: Option<std::time::Instant>,
     /// xterm `modifyOtherKeys` level (0 off, 1, 2) set by `CSI > 4 ; level m`.
     pub modify_other_keys: u8,
     /// Kitty keyboard protocol state for the main and the alternate screen.
@@ -309,9 +311,11 @@ impl Grid {
             cell_px: (0, 0),
             dcs: None,
             dcs_buf: Vec::new(),
+            dcs_start: None,
             graphics: crate::graphics::Store::default(),
             apc_state: 0,
             apc_buf: Vec::new(),
+            apc_start: None,
             modify_other_keys: 0,
             kitty_keyboard: [KittyKeyboard::default(); 2],
             title: String::new(),
@@ -712,6 +716,14 @@ impl Grid {
         self.clusters.clear();
         self.cluster_ids.clear();
         self.trim_extras();
+        self.apc_state = 0;
+        self.apc_buf.clear();
+        self.apc_buf.shrink_to_fit();
+        self.apc_start = None;
+        self.dcs = None;
+        self.dcs_buf.clear();
+        self.dcs_buf.shrink_to_fit();
+        self.dcs_start = None;
         self.all_dirty = true;
     }
 
@@ -1648,33 +1660,56 @@ impl Grid {
     /// are handled here, because vte drops them; everything else goes to `parser`.
     #[inline]
     pub fn feed_byte(&mut self, parser: &mut vte::Parser, b: u8) {
+        if self.apc_state >= 2 && self.apc_start.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
+            self.apc_state = 0;
+            self.apc_buf.clear();
+            self.apc_buf.shrink_to_fit();
+            self.apc_start = None;
+        }
+
         match (self.apc_state, b) {
             (0, 0x1b) => self.apc_state = 1,
             (0, _) => parser.advance(self, b),
             (1, b'_') => {
                 self.apc_state = 2;
                 self.apc_buf.clear();
+                self.apc_start = Some(std::time::Instant::now());
             }
             (1, _) => {
                 self.apc_state = 0;
+                self.apc_start = None;
                 parser.advance(self, 0x1b);
                 self.feed_byte(parser, b);
             }
             (2, 0x1b) => self.apc_state = 3,
             // CAN / SUB abort the string.
-            (2, 0x18 | 0x1a) => self.apc_state = 0,
+            (2, 0x18 | 0x1a) => {
+                self.apc_state = 0;
+                self.apc_buf.clear();
+                self.apc_buf.shrink_to_fit();
+                self.apc_start = None;
+            }
             (2, _) => {
                 if self.apc_buf.len() < MAX_IMAGE_STRING {
                     self.apc_buf.push(b);
+                } else {
+                    self.apc_state = 0;
+                    self.apc_buf.clear();
+                    self.apc_buf.shrink_to_fit();
+                    self.apc_start = None;
                 }
             }
             (_, b'\\') => {
                 self.apc_state = 0;
+                self.apc_start = None;
                 self.apc_dispatch();
             }
             // Any other ESC sequence ends the string unfinished.
             (_, _) => {
                 self.apc_state = 0;
+                self.apc_buf.clear();
+                self.apc_buf.shrink_to_fit();
+                self.apc_start = None;
                 parser.advance(self, 0x1b);
                 self.feed_byte(parser, b);
             }
@@ -2044,6 +2079,14 @@ impl Grid {
         self.cluster_ids.clear();
         self.clear_rows(0, self.rows);
         self.trim_extras();
+        self.apc_state = 0;
+        self.apc_buf.clear();
+        self.apc_buf.shrink_to_fit();
+        self.apc_start = None;
+        self.dcs = None;
+        self.dcs_buf.clear();
+        self.dcs_buf.shrink_to_fit();
+        self.dcs_start = None;
         self.all_dirty = true;
     }
 
@@ -4250,5 +4293,48 @@ mod tests {
         g.clear_history();
         assert_eq!(g.history, 0);
         assert_eq!(g.extras.len(), 1, "trailing unused extras trimmed on clear_history");
+    }
+
+    #[test]
+    fn unclosed_apc_stream_cleans_up_on_reset_and_clear() {
+        let mut g = Grid::new(20, 3);
+        let mut parser = vte::Parser::new();
+        // Send start of APC: ESC _
+        g.feed_byte(&mut parser, 0x1b);
+        g.feed_byte(&mut parser, b'_');
+        for &b in b"m=1;a=t;payload" {
+            g.feed_byte(&mut parser, b);
+        }
+        assert_eq!(g.apc_state, 2);
+        assert!(!g.apc_buf.is_empty());
+        assert!(g.apc_start.is_some());
+
+        g.clear_screen_and_history();
+        assert_eq!(g.apc_state, 0);
+        assert!(g.apc_buf.is_empty());
+        assert!(g.apc_start.is_none());
+
+        // Test full reset clears APC too
+        g.feed_byte(&mut parser, 0x1b);
+        g.feed_byte(&mut parser, b'_');
+        g.feed_byte(&mut parser, b'x');
+        assert_eq!(g.apc_state, 2);
+        g.full_reset();
+        assert_eq!(g.apc_state, 0);
+        assert!(g.apc_buf.is_empty());
+        assert!(g.apc_start.is_none());
+    }
+
+    #[test]
+    fn dcs_stream_cleans_up_on_reset_and_clear() {
+        let mut g = Grid::new(20, 3);
+        feed(&mut g, "\x1bP$q\"p");
+        assert!(g.dcs.is_some());
+        assert!(!g.dcs_buf.is_empty());
+
+        g.clear_screen_and_history();
+        assert!(g.dcs.is_none());
+        assert!(g.dcs_buf.is_empty());
+        assert!(g.dcs_start.is_none());
     }
 }

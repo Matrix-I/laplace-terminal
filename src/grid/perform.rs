@@ -443,16 +443,30 @@ impl Perform for Grid {
             _ => None,
         };
         self.dcs_buf.clear();
+        self.dcs_start = if self.dcs.is_some() {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
     }
 
     fn put(&mut self, byte: u8) {
         let limit = if matches!(self.dcs, Some(DcsRequest::Sixel(_))) { MAX_IMAGE_STRING } else { 1024 };
-        if self.dcs.is_some() && self.dcs_buf.len() < limit {
-            self.dcs_buf.push(byte);
+        if self.dcs.is_some() {
+            let timed_out = self.dcs_start.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5));
+            if !timed_out && self.dcs_buf.len() < limit {
+                self.dcs_buf.push(byte);
+            } else {
+                self.dcs = None;
+                self.dcs_buf.clear();
+                self.dcs_buf.shrink_to_fit();
+                self.dcs_start = None;
+            }
         }
     }
 
     fn unhook(&mut self) {
+        self.dcs_start = None;
         let buf = std::mem::take(&mut self.dcs_buf);
         match self.dcs.take() {
             Some(DcsRequest::XtGetTcap) => {

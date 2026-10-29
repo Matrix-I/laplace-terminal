@@ -456,12 +456,12 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Reduce `grid.lock()` hold duration in PTY reader thread by buffering or chunking feed operations (`src/pty.rs`)
 
 ### Memory Leaks & Resource Management
-- [ ] Bounded channel and backpressure for PTY writer thread to prevent unbounded memory growth from terminal queries (`src/pty.rs`)
-- [ ] Cap maximum buffered bytes and add timeouts for unclosed DCS / APC image streams (`src/grid.rs`)
-- [ ] Stream hashing in `sha256_digest` without duplicating entire multi-megabyte download buffer (`src/update.rs`)
-- [ ] Clean up `ACTIVE_PROGRESS_WINDOW` reference if progress dialog is closed by user (`src/macos.rs`)
-- [ ] Close file descriptors > 4096 on macOS after `fork()` to prevent descriptor leaks into child shells (`src/pty.rs`)
-- [ ] Ensure NUL termination in `proc_vnodepathinfo` path buffer before `CStr::from_ptr` (`src/pty.rs`)
+- [x] Bounded channel and backpressure for PTY writer thread to prevent unbounded memory growth from terminal queries (`src/pty.rs`)
+- [x] Cap maximum buffered bytes and add timeouts for unclosed DCS / APC image streams (`src/grid.rs`)
+- [x] Stream hashing in `sha256_digest` without duplicating entire multi-megabyte download buffer (`src/update.rs`)
+- [x] Clean up `ACTIVE_PROGRESS_WINDOW` reference if progress dialog is closed by user (`src/macos.rs`)
+- [x] Close file descriptors > 4096 on macOS after `fork()` to prevent descriptor leaks into child shells (`src/pty.rs`)
+- [x] Ensure NUL termination in `proc_vnodepathinfo` path buffer before `CStr::from_ptr` (`src/pty.rs`)
 
 ### Code Quality & Logic Integrity
 - [ ] Fix history deletion wiping all historical occurrences of a command string instead of the single selected entry (`src/history.rs`)

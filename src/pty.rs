@@ -46,7 +46,7 @@ pub struct Pty {
     master: OwnedFd,
     pub pid: libc::pid_t,
     /// Bytes for the shell, written by the writer thread so the UI never blocks.
-    tx: mpsc::Sender<WritePayload>,
+    tx: mpsc::SyncSender<WritePayload>,
     /// Read end of the shutdown pipe, polled by the I/O threads.
     shutdown_rx: Arc<OwnedFd>,
     /// Write end of the shutdown pipe: closing it (on drop) signals shutdown.
@@ -157,7 +157,14 @@ impl Pty {
         let mut envp: Vec<*const libc::c_char> = env.iter().map(|s| s.as_ptr()).collect();
         envp.push(std::ptr::null());
         let start_dir = cstr(target_dir);
-        let max_fd = (unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }).clamp(256, 4096) as libc::c_int;
+        let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+        let rlim_max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } == 0 && rlim.rlim_cur > 0 {
+            rlim.rlim_cur as libc::c_long
+        } else {
+            4096
+        };
+        let sys_max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+        let max_fd = sys_max.max(rlim_max).clamp(256, 65536) as libc::c_int;
 
         let mut ws = winsize(cols, rows, cell_w, cell_h);
         let (mut master, mut slave): (libc::c_int, libc::c_int) = (-1, -1);
@@ -240,7 +247,7 @@ impl Pty {
             set_cloexec(shutdown_rx.as_raw_fd());
             set_cloexec(shutdown_tx.as_raw_fd());
 
-            let (tx, rx) = mpsc::channel::<WritePayload>();
+            let (tx, rx) = mpsc::sync_channel::<WritePayload>(2048);
             let writer_fd = match dup_cloexec(master.as_raw_fd()) {
                 Ok(fd) => fd,
                 Err(e) => {
@@ -307,7 +314,7 @@ impl Pty {
 
     /// Queue bytes for the shell. Uses WritePayload to avoid heap allocation on keystrokes.
     pub fn write(&self, data: &[u8]) {
-        let _ = self.tx.send(WritePayload::from_slice(data));
+        let _ = self.tx.try_send(WritePayload::from_slice(data));
     }
 
     /// Spawn Thread 1: reads into a fixed 64 KB stack buffer, parsed by `vte`
@@ -380,7 +387,7 @@ impl Pty {
                         }
                         if !reply.is_empty() {
                             // Same queue as keyboard input, so replies never interleave with a paste.
-                            let _ = tx.send(WritePayload::Heap(std::mem::take(&mut reply)));
+                            let _ = tx.try_send(WritePayload::Heap(std::mem::take(&mut reply)));
                         }
 
                         // Never hold output back waiting for the next prompt: prompt themes take
@@ -520,6 +527,11 @@ pub(crate) fn pid_cwd(pid: libc::pid_t) -> Option<String> {
         );
         if ret != size {
             return None;
+        }
+        if let Some(chunk) = info.pvi_cdir.vip_path.last_mut() {
+            if let Some(last) = chunk.last_mut() {
+                *last = 0;
+            }
         }
         let cstr = std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast::<libc::c_char>());
         let s = cstr.to_str().ok()?.to_string();
