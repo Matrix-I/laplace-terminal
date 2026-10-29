@@ -464,10 +464,10 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Ensure NUL termination in `proc_vnodepathinfo` path buffer before `CStr::from_ptr` (`src/pty.rs`)
 
 ### Code Quality & Logic Integrity
-- [ ] Fix history deletion wiping all historical occurrences of a command string instead of the single selected entry (`src/history.rs`)
-- [ ] Use unique temporary filenames in `remove_command_from_file` to prevent collisions between concurrent windows (`src/history.rs`)
-- [ ] Scope history file modifications to the current active shell rather than mutating other shells' history files (`src/history.rs`)
-- [ ] Replace unsound static lifetime cast on `Arc<Mmap>` font buffers in shaper face (`src/atlas.rs`)
-- [ ] Check and report errors from `codesign` and `touch` in macOS app bundle updater (`src/update.rs`)
-- [ ] Avoid duplicate KVO observer registrations on macOS effective appearance changes (`src/macos.rs`)
+- [x] Fix history deletion wiping all historical occurrences of a command string instead of the single selected entry (`src/history.rs`)
+- [x] Use unique temporary filenames in `remove_command_from_file` to prevent collisions between concurrent windows (`src/history.rs`)
+- [x] Scope history file modifications to the current active shell rather than mutating other shells' history files (`src/history.rs`)
+- [x] Replace unsound static lifetime cast on `Arc<Mmap>` font buffers in shaper face (`src/atlas.rs`)
+- [x] Check and report errors from `codesign` and `touch` in macOS app bundle updater (`src/update.rs`)
+- [x] Avoid duplicate KVO observer registrations on macOS effective appearance changes (`src/macos.rs`)
 

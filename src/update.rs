@@ -1045,12 +1045,22 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
         }
 
         // Ad-hoc sign so Gatekeeper does not block the updated bundle
-        let _ = Command::new(resolve_system_bin("codesign"))
+        let sign_status = Command::new(resolve_system_bin("codesign"))
             .args(["--force", "--deep", "--sign", "-"])
             .arg(&app_path)
-            .status();
+            .status()
+            .map_err(|e| format!("failed to execute codesign on {app_path:?}: {e}"))?;
+        if !sign_status.success() {
+            return Err(format!("codesign failed on {app_path:?} with exit code {:?}", sign_status.code()));
+        }
 
-        let _ = Command::new(resolve_system_bin("touch")).arg(&app_path).status();
+        let touch_status = Command::new(resolve_system_bin("touch"))
+            .arg(&app_path)
+            .status()
+            .map_err(|e| format!("failed to execute touch on {app_path:?}: {e}"))?;
+        if !touch_status.success() {
+            return Err(format!("touch failed on {app_path:?} with exit code {:?}", touch_status.code()));
+        }
         return Ok(());
     }
 
@@ -1080,10 +1090,14 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
 
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new(resolve_system_bin("codesign"))
+        let sign_status = Command::new(resolve_system_bin("codesign"))
             .args(["--force", "--deep", "--sign", "-"])
             .arg(&temp_dest)
-            .status();
+            .status()
+            .map_err(|e| format!("failed to execute codesign on {temp_dest:?}: {e}"))?;
+        if !sign_status.success() {
+            return Err(format!("codesign failed on {temp_dest:?} with exit code {:?}", sign_status.code()));
+        }
     }
 
     fs::rename(&temp_dest, &current_exe).map_err(|e| format!("failed to replace binary {exe_str}: {e}"))?;

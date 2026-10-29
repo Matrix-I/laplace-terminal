@@ -579,6 +579,11 @@ mod imp {
     /// follows the system: watch it with KVO (the change is reported after it
     /// took effect, so `system_dark` already sees the new value).
     fn observe_system_appearance() {
+        static OBSERVER_SETUP: AtomicBool = AtomicBool::new(false);
+        if OBSERVER_SETUP.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
         extern "C" fn on_change(_this: Id, _cmd: Id, _path: Id, _object: Id, _change: Id, _context: *mut c_void) {
             if let Some(proxy) = REOPEN_PROXY.lock().as_ref() {
                 let _ = proxy.send_event(crate::AppEvent::SystemAppearance { dark: system_dark() });

@@ -91,8 +91,15 @@ pub struct FontSet {
     pub fallbacks: Vec<fontdue::Font>,
     /// HarfBuzz-compatible shaper over the primary font, for ligatures and
     /// `font-feature`; its bytes stay mapped for the lifetime of this FontSet.
-    shaper: Option<rustybuzz::Face<'static>>,
-    _mmap: Option<Arc<memmap2::Mmap>>,
+    shaper_mmap: Option<Arc<memmap2::Mmap>>,
+    shaper_index: u32,
+}
+
+impl FontSet {
+    pub fn shaper(&self) -> Option<rustybuzz::Face<'_>> {
+        let mmap = self.shaper_mmap.as_ref()?;
+        rustybuzz::Face::from_slice(mmap, self.shaper_index)
+    }
 }
 
 /// Slot-map key tag for a shaped glyph piece: bits 5..27 index `Atlas::pieces`,
@@ -134,7 +141,7 @@ impl Shaper {
     pub fn shape_row(&mut self, fonts: &FontSet, px: f32, cell_w: u32, row: &[crate::grid::Cell], out: &mut Vec<u32>) -> bool {
         out.clear();
         out.resize(row.len(), 0);
-        let Some(face) = fonts.shaper.as_ref() else { return false };
+        let Some(face) = fonts.shaper() else { return false };
         if self.cell_units == 0 {
             self.cell_units = face.glyph_index('M').and_then(|g| face.glyph_hor_advance(g)).map_or(-1, i32::from);
         }
@@ -166,7 +173,7 @@ impl Shaper {
                 buf.add(char::from_u32(c.codepoint).unwrap_or(' '), 0);
             }
             buf.set_direction(rustybuzz::Direction::LeftToRight);
-            let glyphs = rustybuzz::shape(face, &self.features, buf);
+            let glyphs = rustybuzz::shape(&face, &self.features, buf);
             let mut pen = 0i32;
             for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
                 let rel = ((pen + self.cell_units / 2) / self.cell_units) as usize;
@@ -734,7 +741,8 @@ impl Atlas {
     /// character alone.
     fn rasterize_cluster_into(&self, buf: &mut [u8], w: u32, text: &str) {
         let first = text.chars().next().map_or(0, |c| c as u32);
-        let shaped = self.fonts.shaper.as_ref().map(|face| {
+        let shaper = self.fonts.shaper();
+        let shaped = shaper.as_ref().map(|face| {
             let mut ub = rustybuzz::UnicodeBuffer::new();
             ub.push_str(text);
             (face, rustybuzz::shape(face, &[], ub))
@@ -2194,16 +2202,17 @@ fn rasterize_color(buf: &mut [u8], w: u32, h: u32, _px: f32, text: &str) -> bool
     use rustybuzz::ttf_parser::{GlyphId, RasterImageFormat};
     use std::sync::OnceLock;
 
-    static FACE: OnceLock<Option<(rustybuzz::Face<'static>, Arc<memmap2::Mmap>)>> = OnceLock::new();
+    static FACE: OnceLock<Option<(Arc<memmap2::Mmap>, u32)>> = OnceLock::new();
     let pair = FACE.get_or_init(|| {
         let face = crate::fontdb::find_family("Noto Color Emoji")?;
-        shaper_for(&face.path, face.index)
+        shaper_mmap_for(&face.path, face.index)
     });
-    let Some((face, _mmap)) = pair.as_ref() else { return false };
+    let Some((mmap, index)) = pair.as_ref() else { return false };
+    let Some(face) = rustybuzz::Face::from_slice(mmap, *index) else { return false };
     // Shaped, so ZWJ / flag / skin tone sequences become their ligature glyph.
     let mut ub = rustybuzz::UnicodeBuffer::new();
     ub.push_str(text);
-    let shaped = rustybuzz::shape(face, &[], ub);
+    let shaped = rustybuzz::shape(&face, &[], ub);
     let Some(gid) = shaped.glyph_infos().first().map(|g| g.glyph_id).filter(|&g| g != 0) else { return false };
     let Some(img) = face.glyph_raster_image(GlyphId(gid as u16), h.min(u16::MAX as u32) as u16) else { return false };
     if img.format != RasterImageFormat::PNG {
@@ -2312,7 +2321,7 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
 
     let mut configured_iter = configured_faces.into_iter();
     for (p, idx) in configured_iter.by_ref() {
-        let s = shaper_for(&p, idx);
+        let s = shaper_mmap_for(&p, idx);
         if let Some(f) = parse_font(&p, idx, s.is_some()) {
             primary_path = Some(p);
             primary = Some(f);
@@ -2323,7 +2332,7 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
 
     if primary.is_none() {
         for path in &primary_candidates {
-            let s = shaper_for(path, 0);
+            let s = shaper_mmap_for(path, 0);
             if let Some(f) = parse_font(path, 0, s.is_some()) {
                 primary_path = Some(path.clone());
                 primary = Some(f);
@@ -2337,7 +2346,7 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
     if primary.is_none() {
         let (discovered_mono_nerd, _) = discover_nerd_fonts();
         for path in &discovered_mono_nerd {
-            let s = shaper_for(path, 0);
+            let s = shaper_mmap_for(path, 0);
             if let Some(f) = parse_font(path, 0, s.is_some()) {
                 primary_path = Some(path.clone());
                 primary = Some(f);
@@ -2358,24 +2367,22 @@ pub fn load_font(families: &[String]) -> Arc<FontSet> {
         fallbacks.push(f);
     }
 
-    let (shaper_face, shaper_mmap) = match shaper {
-        Some((f, m)) => (Some(f), Some(m)),
-        None => (None, None),
+    let (shaper_mmap, shaper_index) = match shaper {
+        Some((m, idx)) => (Some(m), idx),
+        None => (None, 0),
     };
-    let set = Arc::new(FontSet { primary, fallbacks, shaper: shaper_face, _mmap: shaper_mmap });
+    let set = Arc::new(FontSet { primary, fallbacks, shaper_mmap, shaper_index });
     *cache = Some((families.to_vec(), Arc::clone(&set)));
     set
 }
 
-/// A shaping face over `path`. The memory-mapped file is kept alive in the returned `Arc<Mmap>`.
-fn shaper_for(path: &str, index: u32) -> Option<(rustybuzz::Face<'static>, Arc<memmap2::Mmap>)> {
+/// A shaping mmap over `path`. The memory-mapped file is kept alive in the returned `Arc<Mmap>`.
+fn shaper_mmap_for(path: &str, index: u32) -> Option<(Arc<memmap2::Mmap>, u32)> {
     let file = std::fs::File::open(path).ok()?;
     // SAFETY: font files are not modified while mapped (same as for fontdue).
     let map = Arc::new(unsafe { memmap2::Mmap::map(&file) }.ok()?);
-    // SAFETY: the Face references bytes owned by `map`, which is kept alive alongside it in FontSet.
-    let bytes: &'static [u8] = unsafe { &*(&**map as *const [u8]) };
-    let face = rustybuzz::Face::from_slice(bytes, index)?;
-    Some((face, map))
+    rustybuzz::Face::from_slice(&map, index)?;
+    Some((map, index))
 }
 
 fn find_first_symbol_font(exclude_path: Option<&str>) -> Option<fontdue::Font> {
@@ -2534,10 +2541,10 @@ mod tests {
     #[test]
     fn ligatures_shape_into_glyph_pieces() {
         let Ok(path) = std::env::var("LITTY_LIGATURE_FONT").or_else(|_| std::env::var("LAPLACE_LIGATURE_FONT")) else { return };
-        let (shaper, _mmap) = shaper_for(&path, 0)
-            .map(|(f, m)| (Some(f), Some(m)))
-            .unwrap_or((None, None));
-        let fonts = FontSet { primary: parse_font(&path, 0, true).unwrap(), fallbacks: Vec::new(), shaper, _mmap };
+        let (shaper_mmap, shaper_index) = shaper_mmap_for(&path, 0)
+            .map(|(m, idx)| (Some(m), idx))
+            .unwrap_or((None, 0));
+        let fonts = FontSet { primary: parse_font(&path, 0, true).unwrap(), fallbacks: Vec::new(), shaper_mmap, shaper_index };
         let row: Vec<crate::grid::Cell> =
             "ab -> cd != ef".chars().map(|c| crate::grid::Cell { codepoint: c as u32, ..Default::default() }).collect();
         let mut out = Vec::new();

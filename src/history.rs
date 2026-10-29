@@ -560,25 +560,22 @@ fn parse_history_file(path: &Path, out: &mut Vec<String>) {
     out.extend(split_history_entries(path, &bytes).into_iter().rev().filter_map(|e| e.command));
 }
 
-/// Return `bytes` with every entry equal to `cmd` removed (along with a bash
+/// Return `bytes` with the single latest entry equal to `cmd` removed (along with a bash
 /// timestamp comment directly preceding it), or `None` if nothing matched.
 /// All other entries are kept byte-for-byte, so metafied zsh data is never re-encoded.
 fn strip_command_entries(path: &Path, bytes: &[u8], cmd: &str) -> Option<Vec<u8>> {
-    let mut kept: Vec<&RawEntry> = Vec::new();
-    let mut removed = false;
     let entries = split_history_entries(path, bytes);
-    for entry in &entries {
-        if entry.command.as_deref() == Some(cmd) {
-            removed = true;
+    let target_idx = entries.iter().rposition(|e| e.command.as_deref() == Some(cmd))?;
+
+    let mut kept: Vec<&RawEntry> = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        if i == target_idx {
             if kept.last().is_some_and(|e| e.is_timestamp) {
                 kept.pop();
             }
             continue;
         }
         kept.push(entry);
-    }
-    if !removed {
-        return None;
     }
     let mut out = Vec::with_capacity(bytes.len());
     for entry in kept {
@@ -598,7 +595,13 @@ fn remove_command_from_file(path: &Path, cmd: &str) -> std::io::Result<bool> {
     let format_path = path;
     let path = std::fs::canonicalize(path)?;
     let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{file_name}.litty-{}.tmp", std::process::id()));
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(".{file_name}.litty-{}-{count}-{nanos}.tmp", std::process::id()));
 
     for _ in 0..3 {
         let before = std::fs::metadata(&path)?;
@@ -633,9 +636,51 @@ fn remove_command_from_file(path: &Path, cmd: &str) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// Remove a deleted command from every shell history file that contains it.
+/// Resolve the history file(s) owned by the current active shell.
+fn active_shell_history_files() -> Vec<PathBuf> {
+    if let Ok(histfile) = std::env::var("HISTFILE") {
+        let p = PathBuf::from(histfile.trim());
+        if !histfile.trim().is_empty() && p.exists() {
+            return vec![p];
+        }
+    }
+    let Some(h) = std::env::var("HOME").ok().map(PathBuf::from) else { return candidate_history_files(); };
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let mut files = Vec::new();
+    if shell.ends_with("zsh") {
+        let p = h.join(".zsh_history");
+        if p.exists() {
+            files.push(p);
+        }
+    } else if shell.ends_with("fish") {
+        let p = h.join(".local/share/fish/fish_history");
+        if p.exists() {
+            files.push(p);
+        }
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            let p2 = PathBuf::from(xdg).join("fish/fish_history");
+            if p2.exists() && !files.contains(&p2) {
+                files.push(p2);
+            }
+        }
+    } else if shell.ends_with("bash") {
+        let p = h.join(".bash_history");
+        if p.exists() {
+            files.push(p);
+        }
+    }
+
+    if files.is_empty() {
+        if let Some(f) = candidate_history_files().into_iter().find(|p| p.exists()) {
+            files.push(f);
+        }
+    }
+    files
+}
+
+/// Remove a deleted command from the active shell's history file.
 fn remove_from_disk_history(cmd_to_remove: &str) {
-    for path in candidate_history_files() {
+    for path in active_shell_history_files() {
         if !path.exists() {
             continue;
         }
@@ -1298,5 +1343,14 @@ mod tests {
         }
         assert_eq!(search.items.len(), MAX_HISTORY_ITEMS);
         assert_eq!(search.items[0], format!("cmd_{}", MAX_HISTORY_ITEMS + 49));
+    }
+
+    #[test]
+    fn removal_only_deletes_single_latest_occurrence() {
+        let content = b"echo first\necho repeated\necho middle\necho repeated\n";
+        let path = temp_history(".bash_history", content);
+        assert!(remove_command_from_file(&path, "echo repeated").expect("remove"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"echo first\necho repeated\necho middle\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
