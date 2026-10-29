@@ -252,6 +252,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Critical: Fix Objective-C subview retain count leaks in progress dialog (`src/macos.rs`)**
   - Vulnerability / Leak: In `show_progress_dialog()`, `NSImageView`, two `NSTextField` labels, and `NSProgressIndicator` were created with `alloc` + `initWithFrame:` (+1 retain count) and added via `addSubview:` (content view retains +1). Missing `release` post-add permanently leaked subviews when the dialog was closed.
   - Fix: Call `msg_send!(subview, c"release")` immediately after `addSubview:` for each subview.
+- [x] **Critical / Safety: Prevent premature unmap and dangling pointer in Linux color emoji shaper (`src/atlas.rs`)**
+  - Vulnerability / Safety: In `rasterize_color()` on Linux (`not(target_os = "macos")`), `shaper_for(&face.path, face.index).map(|(f, _)| f)` discarded the `Arc<memmap2::Mmap>`, immediately unmapping the font file while `rustybuzz::Face` retained a dangling pointer to unmapped memory.
+  - Fix: Store `(rustybuzz::Face<'static>, Arc<memmap2::Mmap>)` inside `OnceLock` so the memory-mapped bytes remain alive.
 
 
 ## Terminal protocols

@@ -2099,12 +2099,12 @@ fn rasterize_color(buf: &mut [u8], w: u32, h: u32, _px: f32, text: &str) -> bool
     use rustybuzz::ttf_parser::{GlyphId, RasterImageFormat};
     use std::sync::OnceLock;
 
-    static FACE: OnceLock<Option<rustybuzz::Face<'static>>> = OnceLock::new();
-    let face = FACE.get_or_init(|| {
+    static FACE: OnceLock<Option<(rustybuzz::Face<'static>, Arc<memmap2::Mmap>)>> = OnceLock::new();
+    let pair = FACE.get_or_init(|| {
         let face = crate::fontdb::find_family("Noto Color Emoji")?;
-        shaper_for(&face.path, face.index).map(|(f, _)| f)
+        shaper_for(&face.path, face.index)
     });
-    let Some(face) = face else { return false };
+    let Some((face, _mmap)) = pair.as_ref() else { return false };
     // Shaped, so ZWJ / flag / skin tone sequences become their ligature glyph.
     let mut ub = rustybuzz::UnicodeBuffer::new();
     ub.push_str(text);
