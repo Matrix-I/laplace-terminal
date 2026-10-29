@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 const STORE_LIMIT: usize = 64 << 20;
 /// Largest image accepted, per side.
 const MAX_SIDE: u32 = 8192;
+/// Maximum number of additional animation frames per image.
+const MAX_ANIMATION_FRAMES: usize = 256;
+/// Maximum bytes allocated to a single animated image.
+const MAX_ANIMATION_BYTES: usize = STORE_LIMIT / 2;
 
 /// Process-wide image keys, so the renderer's texture cache never confuses
 /// images of different terminals.
@@ -269,16 +273,25 @@ impl Store {
     /// of frame `c` (or a transparent canvas), blended unless `X=1`.
     fn kitty_frame(&mut self, cmd: &KittyCommand, data: &[u8]) -> Result<(), String> {
         let img = self.images.get(&cmd.id).ok_or("ENOENT:image not found")?;
-        let (iw, ih) = (img.width, img.height);
-        let mut sized = cmd.clone();
-        sized.width = if cmd.width == 0 { iw } else { cmd.width };
-        sized.height = if cmd.height == 0 { ih } else { cmd.height };
-        let (fw, fh, pixels) = decode_kitty(&sized, data)?;
         let (edit, base) = (cmd.rows as usize, cmd.cols as usize);
         let n = img.frame_count();
         if edit > n || base > n {
             return Err("EINVAL:no such frame".into());
         }
+        let (iw, ih) = (img.width, img.height);
+        if edit == 0 {
+            if img.frames.len() >= MAX_ANIMATION_FRAMES {
+                return Err("EBIG:too many animation frames".into());
+            }
+            let frame_bytes = (iw as usize).saturating_mul(ih as usize).saturating_mul(4);
+            if img.bytes().saturating_add(frame_bytes) > MAX_ANIMATION_BYTES {
+                return Err("EBIG:animation exceeds memory limit".into());
+            }
+        }
+        let mut sized = cmd.clone();
+        sized.width = if cmd.width == 0 { iw } else { cmd.width };
+        sized.height = if cmd.height == 0 { ih } else { cmd.height };
+        let (fw, fh, pixels) = decode_kitty(&sized, data)?;
         let mut canvas = match (edit, base) {
             (0, 0) => vec![0u8; (iw * ih * 4) as usize],
             (0, b) => img.frame(b - 1).1.to_vec(),
@@ -1389,5 +1402,33 @@ mod tests {
         let res = decode_png(&png_data);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "EINVAL:image too large");
+    }
+
+    #[test]
+    fn kitty_animation_frame_limits() {
+        let mut store = Store::default();
+        let id = store.insert(1, 10, 10, vec![0; 400]);
+
+        // Frame count cap: fill up to MAX_ANIMATION_FRAMES
+        let img = store.images.get_mut(&id).unwrap();
+        for _ in 0..MAX_ANIMATION_FRAMES {
+            img.frames.push(Frame { key: next_key(), rgba: vec![0; 400].into(), gap: 40 });
+        }
+        let (outcome, reply) = store.kitty(KittyCommand { action: b'f', id, ..KittyCommand::default() }, &[0; 400]);
+        assert!(matches!(outcome, KittyOutcome::None));
+        assert_eq!(reply.as_deref(), Some("i=1;EBIG:too many animation frames"));
+
+        // Memory limit cap:
+        // Create an image with 2048 x 2048 x 4 = 16MB per frame.
+        // MAX_ANIMATION_BYTES is 32MB. Root frame takes 16MB.
+        // 1 additional frame takes 16MB -> total 32MB <= 32MB.
+        // 2nd additional frame would take 48MB > 32MB -> EBIG.
+        let mut store2 = Store::default();
+        let id2 = store2.insert(2, 2048, 2048, vec![0; 2048 * 2048 * 4]);
+        let img2 = store2.images.get_mut(&id2).unwrap();
+        img2.frames.push(Frame { key: next_key(), rgba: vec![0; 2048 * 2048 * 4].into(), gap: 40 });
+        let (outcome2, reply2) = store2.kitty(KittyCommand { action: b'f', id: id2, ..KittyCommand::default() }, &[]);
+        assert!(matches!(outcome2, KittyOutcome::None));
+        assert_eq!(reply2.as_deref(), Some("i=2;EBIG:animation exceeds memory limit"));
     }
 }
