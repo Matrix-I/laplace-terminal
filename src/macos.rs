@@ -840,6 +840,7 @@ mod imp {
                             msg_send!(iv, c"setImage:", img => Id);
                         }
                         msg_send!(content, c"addSubview:", iv => Id);
+                        msg_send!(iv, c"release");
                     }
                 }
             }
@@ -864,6 +865,7 @@ mod imp {
                             }
                         }
                         msg_send!(content, c"addSubview:", tf => Id);
+                        msg_send!(tf, c"release");
                     }
                 }
             }
@@ -888,6 +890,7 @@ mod imp {
                             }
                         }
                         msg_send!(content, c"addSubview:", tf => Id);
+                        msg_send!(tf, c"release");
                     }
                 }
             }
@@ -902,6 +905,7 @@ mod imp {
                         msg_send!(ind, c"setIndeterminate:", true => bool);
                         msg_send!(ind, c"startAnimation:", std::ptr::null_mut() => Id);
                         msg_send!(content, c"addSubview:", ind => Id);
+                        msg_send!(ind, c"release");
                     }
                 }
             }

@@ -243,6 +243,17 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
   - Enhancement: Protect against accidental multiline paste execution in shells or CLI utilities running without bracketed paste mode.
 
 
+## Memory Leak & Resource Management Audit
+
+Comprehensive memory leak, cache accumulation, lifecycle, and zombie process audits conducted across macOS and Linux architectures.
+
+### Phase 1: Core Memory Leaks & Unbounded Caches (Completed 2026-10-28)
+
+- [x] **Critical: Fix Objective-C subview retain count leaks in progress dialog (`src/macos.rs`)**
+  - Vulnerability / Leak: In `show_progress_dialog()`, `NSImageView`, two `NSTextField` labels, and `NSProgressIndicator` were created with `alloc` + `initWithFrame:` (+1 retain count) and added via `addSubview:` (content view retains +1). Missing `release` post-add permanently leaked subviews when the dialog was closed.
+  - Fix: Call `msg_send!(subview, c"release")` immediately after `addSubview:` for each subview.
+
+
 ## Terminal protocols
 
 - [x] OSC 4 / 10 / 11 / 12 set and query (palette, fg, bg, cursor color) + OSC 104 / 110 / 111 / 112 reset
