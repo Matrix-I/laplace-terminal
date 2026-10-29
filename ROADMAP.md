@@ -282,6 +282,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Fix Objective-C `NSVisualEffectView` retain count leak (`src/macos.rs`)**
   - Vulnerability / Leak: In `setup_background_blur()`, `NSVisualEffectView` was allocated with `alloc` + `initWithFrame:` (+1 retain count) and added via `addSubview:positioned:relativeTo:` (incrementing retain count to 2). Missing `release` left it permanently retained.
   - Fix: Send `msg_send!(effect_view, c"release")` immediately after `addSubview:positioned:relativeTo:`.
+- [x] **Low: Prevent zombie process if reaper thread fails in `spawn_detached` (`src/main.rs`)**
+  - Vulnerability / Zombie leak: If `thread::Builder::spawn` fails in `spawn_detached()`, the child process was dropped without `child.wait()`, leaving a zombie.
+  - Fix: Record process PID and synchronously kill and wait on `child` via `libc::kill` and `libc::waitpid` before returning `Err(e)`.
 
 
 ## Terminal protocols

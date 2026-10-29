@@ -1693,12 +1693,22 @@ fn render_active(s: &mut State) {
 /// so it never lingers as a zombie.
 pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
     let mut child = cmd.spawn()?;
-    std::thread::Builder::new()
+    let pid = child.id();
+    if let Err(e) = std::thread::Builder::new()
         .name("reap-helper".into())
         .stack_size(32 * 1024)
         .spawn(move || {
             let _ = child.wait();
-        })?;
+        })
+    {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(pid as libc::pid_t, &mut status, 0);
+        }
+        return Err(e);
+    }
     Ok(())
 }
 
