@@ -18,6 +18,7 @@ pub enum AppEvent {
     SystemAppearance { dark: bool },
     UpdateCheckResult(Result<update::ReleaseInfo, String>),
     UpdateInstallResult(Result<update::Version, String>),
+    BenchAction(crate::bench::BenchCommand),
 }
 
 /// Wakes the event loop from PTY reader threads, coalescing bursts of output

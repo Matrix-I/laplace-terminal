@@ -2,6 +2,7 @@
 //! coalesced PTY redraw wakeups, and keyboard-to-ANSI translation.
 
 mod atlas;
+pub mod bench;
 mod bidi;
 mod config;
 mod event;
@@ -160,6 +161,7 @@ struct App {
     /// One entry per window. On macOS a hidden window with no tabs stays here
     /// after the last one closes, so a Dock click can reopen it.
     windows: Vec<State>,
+    bench_ram_mode: bool,
 }
 
 impl App {
@@ -469,6 +471,10 @@ impl ApplicationHandler<AppEvent> for App {
         update::check_on_startup(cfg.auto_update, cfg.auto_update_channel);
 
         macos::release_free_memory();
+
+        if self.bench_ram_mode {
+            bench::run_ram_benchmark_thread(self.waker.proxy.clone());
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -651,6 +657,44 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     Err(err) => {
                         macos::alert("Update Failed", &format!("Failed to install update:\n{err}"));
+                    }
+                }
+            }
+            AppEvent::BenchAction(cmd) => {
+                match cmd {
+                    bench::BenchCommand::OpenTabInLastWindow => {
+                        if let Some(s) = self.windows.last_mut() {
+                            open_fresh_tab(s, &self.waker);
+                            self.process_window_requests(event_loop);
+                        }
+                    }
+                    bench::BenchCommand::OpenWindow => {
+                        if let Some(s) = self.windows.last_mut() {
+                            s.new_window_requested = true;
+                            self.process_window_requests(event_loop);
+                        }
+                    }
+                    bench::BenchCommand::CloseLastWindow => {
+                        if self.windows.len() > 1 {
+                            let mut s = self.windows.remove(self.windows.len() - 1);
+                            s.renderer.shrink_drawables();
+                            #[cfg(target_os = "macos")]
+                            macos::release_free_memory();
+                        }
+                    }
+                    bench::BenchCommand::CloseExtraTabs => {
+                        for s in &mut self.windows {
+                            while s.tabs.len() > 1 {
+                                s.tabs.pop();
+                            }
+                            sync_size(s);
+                            refresh_tab_titles(s);
+                        }
+                        #[cfg(target_os = "macos")]
+                        macos::release_free_memory();
+                    }
+                    bench::BenchCommand::Exit => {
+                        event_loop.exit();
                     }
                 }
             }
@@ -3160,11 +3204,52 @@ fn main() {
         update::cli_update(force);
         return;
     }
+    // Performance & Latency benchmark CLI
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+bench-perf" || a == "--bench-perf") {
+        let lat = bench::run_latency_benchmark();
+        let stress = bench::run_render_stress_benchmark(20_000);
+        let feat = bench::run_critical_features_benchmark();
+        if !lat.passed || !stress.passed || !feat.passed {
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Stress test only
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+bench-stress" || a == "--bench-stress") {
+        let lines = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(20_000);
+        let stress = bench::run_render_stress_benchmark(lines);
+        if !stress.passed {
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Critical features benchmark only
+    if std::env::args().nth(1).as_deref().is_some_and(|a| a == "+bench-features" || a == "--bench-features") {
+        let feat = bench::run_critical_features_benchmark();
+        if !feat.passed {
+            std::process::exit(1);
+        }
+        return;
+    }
+    let is_bench_ram = std::env::args().nth(1).as_deref().is_some_and(|a| a == "+bench-ram" || a == "--bench-ram" || a == "+bench-all" || a == "--bench-all");
+    let is_bench_all = std::env::args().nth(1).as_deref().is_some_and(|a| a == "+bench-all" || a == "--bench-all");
+
+    if is_bench_all {
+        let lat = bench::run_latency_benchmark();
+        let stress = bench::run_render_stress_benchmark(20_000);
+        let feat = bench::run_critical_features_benchmark();
+        if !lat.passed || !stress.passed || !feat.passed {
+            eprintln!("litty: performance/features benchmark failed");
+            std::process::exit(1);
+        }
+    }
+
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
         waker: Waker { proxy: event_loop.create_proxy(), queued: Arc::new(AtomicBool::new(false)) },
         windows: Vec::new(),
+        bench_ram_mode: is_bench_ram,
     };
     event_loop.run_app(&mut app).expect("run app");
 }
