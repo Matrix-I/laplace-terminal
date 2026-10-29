@@ -488,7 +488,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [ ] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
 
 ### Performance & Concurrency Fixes
-- [ ] Reduce `grid.lock()` mutex hold duration in `renderer.rs` across rasterization and GPU texture uploads (`src/renderer.rs`)
+- [x] Reduce `grid.lock()` mutex hold duration in `renderer.rs` across rasterization and GPU texture uploads (`src/renderer.rs`)
 - [x] Consolidate multiple `grid.lock()` acquisitions into a single guard per keystroke in `handle_key` (`src/main.rs`)
 - [x] Throttle and rate-limit thread/process spawning in `copy_to_clipboard` and `spawn_detached` (`src/main.rs`)
 - [x] Eliminate synchronous main-thread 750ms blocking on clipboard paste (`src/main.rs`)

@@ -749,14 +749,20 @@ impl Renderer {
         let n = cols * total_rows;
 
         let active_pane = panes.iter().find(|p| p.is_active).unwrap_or(&panes[0]);
-        let (active_cur, active_dirty, defaults, cursor_color, progress) = {
+        let (active_cur, active_dirty, defaults, cursor_color, progress, active_cursor_style) = {
             let g = active_pane.grid.lock();
             let cur = g
                 .cursor_pos()
                 .map(|(cx, cy)| (active_pane.rect.col + g.cursor_visual_col(cy, cx), active_pane.rect.row + cy + top_rows));
             let dirty = g.all_dirty || g.dirty.iter().any(|&d| d);
             let cursor_color = g.cursor_color().map_or(self.config_cursor_color, |c| c | 1);
-            (cur, dirty, (g.fg_color(), g.bg_color()), cursor_color, g.progress)
+            let cursor_style = match g.cursor_shape {
+                1 | 2 => 0, // Block
+                3 | 4 => 2, // Underline
+                5 | 6 => 1, // Bar
+                _ => self.cursor_style,
+            };
+            (cur, dirty, (g.fg_color(), g.bg_color()), cursor_color, g.progress, cursor_style)
         };
         if progress != self.last_progress {
             self.last_progress = progress;
@@ -830,6 +836,8 @@ impl Renderer {
         }
 
         let active_rect = panes.iter().find(|p| p.is_active).map(|p| p.rect);
+        self.placed.clear();
+        let (cw, ch) = (self.atlas.cell_w, self.atlas.cell_h);
 
         for pane in panes {
             let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
@@ -838,6 +846,21 @@ impl Renderer {
             let pane_defaults = Some((g.fg_color(), g.bg_color())).filter(|&d| d != defaults);
             let p_cols = pane.rect.cols.min(g.cols);
             let p_rows = pane.rect.rows.min(g.rows);
+
+            // Collect visible images while g is locked to eliminate redundant grid locking in subsequent passes.
+            g.visible_images(&mut self.image_draws);
+            let (px0, py0) = self.cell_origin_px(pane.rect.row, pane.rect.col, tab_bar.is_some());
+            let clip = [px0 as u32, py0 as u32, pane.rect.cols as u32 * cw, pane.rect.rows as u32 * ch];
+            for draw in self.image_draws.drain(..) {
+                let x = px0 as f32 + (draw.col as u32 * cw) as f32;
+                let y = py0 as f32 + draw.row as f32 * ch as f32;
+                let rect = match draw.px {
+                    Some([dx, dy, w, h]) => [x + dx, y + dy, w, h],
+                    None if draw.fit => [x, y, (draw.cols as u32 * cw) as f32, (draw.rows as u32 * ch) as f32],
+                    None => [x, y, draw.src[2], draw.src[3]],
+                };
+                self.placed.push(crate::image_layer::Placed { draw, rect, clip });
+            }
 
             if !pane_full && !g.dirty.iter().any(|&d| d) {
                 continue;
@@ -1008,16 +1031,6 @@ impl Renderer {
             Some((titles, active_idx)) => ((active_idx as u32) << 16) | (titles.len() as u32 & 0xFFFF),
             None => 0,
         };
-        let active_cursor_style = {
-            let g = active_pane.grid.lock();
-            match g.cursor_shape {
-                1 | 2 => 0, // Block
-                3 | 4 => 2, // Underline
-                5 | 6 => 1, // Bar
-                _ => self.cursor_style,
-            }
-        };
-
         let effective_cursor_visible = if is_search_open {
             false
         } else {
@@ -1059,24 +1072,6 @@ impl Renderer {
             _pad: 0,
         };
 
-        // Inline images of every pane, in px, clipped to their pane.
-        self.placed.clear();
-        let (cw, ch) = (self.atlas.cell_w, self.atlas.cell_h);
-        for pane in panes {
-            pane.grid.lock().visible_images(&mut self.image_draws);
-            let (px0, py0) = self.cell_origin_px(pane.rect.row, pane.rect.col, tab_bar.is_some());
-            let clip = [px0 as u32, py0 as u32, pane.rect.cols as u32 * cw, pane.rect.rows as u32 * ch];
-            for draw in self.image_draws.drain(..) {
-                let x = px0 as f32 + (draw.col as u32 * cw) as f32;
-                let y = py0 as f32 + draw.row as f32 * ch as f32;
-                let rect = match draw.px {
-                    Some([dx, dy, w, h]) => [x + dx, y + dy, w, h],
-                    None if draw.fit => [x, y, (draw.cols as u32 * cw) as f32, (draw.rows as u32 * ch) as f32],
-                    None => [x, y, draw.src[2], draw.src[3]],
-                };
-                self.placed.push(crate::image_layer::Placed { draw, rect, clip });
-            }
-        }
         // Lower z first; equal z keeps the placement order.
         self.placed.sort_by_key(|p| p.draw.z);
         // Images under the text split the cells into a background and a text layer.
