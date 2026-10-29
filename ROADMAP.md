@@ -475,8 +475,8 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 
 ### Security Fixes
 - [ ] Fix updater signature verification pass-through, enforce key pinning, and propagate signature errors (`src/update.rs`)
-- [ ] Restrict OSC 52 clipboard writes to active/focused panes to prevent background tab clipboard poisoning (`src/main.rs`, `src/grid/perform.rs`)
-- [ ] Bound PNG decoder buffer allocation to `STORE_LIMIT` before decoding (`src/graphics.rs`)
+- [x] Restrict OSC 52 clipboard writes to active/focused panes to prevent background tab clipboard poisoning (`src/main.rs`, `src/grid/perform.rs`)
+- [x] Bound PNG decoder buffer allocation to `STORE_LIMIT` before decoding (`src/graphics.rs`)
 - [ ] Guard `open_target` on Linux against executing executable files or scripts via `xdg-open` (`src/main.rs`)
 
 ### Memory Leaks & Resource Management
@@ -484,7 +484,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [ ] Enforce memory limit and frame count cap on single-image Kitty animation frames (`src/graphics.rs`)
 - [ ] Prune dead `VirtualPlacement` entries from `Store.virtuals` on scrollback eviction to free auto-id images (`src/graphics.rs`, `src/grid/mod.rs`)
 - [ ] Prune stale `Placement.alt` entries during linefeed scroll in alternate screen (`src/graphics.rs`, `src/grid/mod.rs`)
-- [ ] Prevent Carbon `EnableSecureEventInput` reference counter drift on duplicate focus events (`src/macos.rs`, `src/main.rs`)
+- [x] Prevent Carbon `EnableSecureEventInput` reference counter drift on duplicate focus events (`src/macos.rs`, `src/main.rs`)
 - [ ] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
 
 ### Performance & Concurrency Fixes
@@ -496,8 +496,8 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [ ] Increase default glyph atlas dimensions and prevent invisible `BLANK_SLOT` drops under high Unicode/CJK glyph diversity (`src/atlas.rs`, `src/renderer.rs`)
 
 ### Code Quality & Logic Integrity
-- [ ] Fix zero-width character column calculation (`char_width(c).max(1)`) in search match selections (`src/search.rs`)
-- [ ] Clamp wheel delta bursts in `alt_screen_scroll` to avoid flooding PTY with arrow keys (`src/main.rs`)
-- [ ] Support standard X11 color names in config `parse_color` consistent with terminal OSC palette (`src/config.rs`)
+- [x] Fix zero-width character column calculation (`char_width(c).max(1)`) in search match selections (`src/search.rs`)
+- [x] Clamp wheel delta bursts in `alt_screen_scroll` to avoid flooding PTY with arrow keys (`src/main.rs`)
+- [x] Support standard X11 color names in config `parse_color` consistent with terminal OSC palette (`src/config.rs`)
 - [ ] Propagate config reload renderer changes to all open windows in multi-window mode (`src/main.rs`)
 
