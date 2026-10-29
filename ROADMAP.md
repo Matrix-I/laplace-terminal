@@ -474,7 +474,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 ## Code Health & Hardening (v0.5.1 Audit Backlog)
 
 ### Security Fixes
-- [ ] Fix updater signature verification pass-through, enforce key pinning, and propagate signature errors (`src/update.rs`)
+- [x] Fix updater signature verification pass-through, enforce key pinning, and propagate signature errors (`src/update.rs`)
 - [x] Restrict OSC 52 clipboard writes to active/focused panes to prevent background tab clipboard poisoning (`src/main.rs`, `src/grid/perform.rs`)
 - [x] Bound PNG decoder buffer allocation to `STORE_LIMIT` before decoding (`src/graphics.rs`)
 - [x] Guard `open_target` on Linux against executing executable files or scripts via `xdg-open` (`src/main.rs`)

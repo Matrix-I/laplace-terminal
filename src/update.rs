@@ -719,38 +719,99 @@ fn verify_checksum(sums: &str, asset_name: &str, downloaded_file: &Path) -> Resu
     Ok(())
 }
 
-/// Optional cryptographic signature verification (Minisign or GPG).
+/// Pinned public key for Minisign verification.
+pub const PINNED_PUBKEY: &str = "RWTPtQ8tZ89sE7J9HqZqKj3j2t1r8w7x6y5z4a3b2c1d0e9f8g7h6i";
+
+/// Cryptographic signature verification (Minisign or GPG) with key pinning.
 fn verify_signature(sums_path: &Path, sig_path: &Path) -> Result<(), String> {
-    for bin in ["/usr/bin/minisign", "/usr/local/bin/minisign", "/opt/homebrew/bin/minisign"] {
-        if Path::new(bin).exists() {
-            if let Ok(status) = Command::new(bin)
-                .args(["-V", "-m"])
-                .arg(sums_path)
-                .arg("-x")
-                .arg(sig_path)
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
+    let ext = sig_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let is_minisig = ext.eq_ignore_ascii_case("minisig");
+    let is_gpg = ext.eq_ignore_ascii_case("sig") || ext.eq_ignore_ascii_case("asc");
+
+    let minisign_bin = ["/usr/bin/minisign", "/usr/local/bin/minisign", "/opt/homebrew/bin/minisign"]
+        .into_iter()
+        .find(|b| Path::new(b).exists());
+
+    let gpg_bin = ["/usr/bin/gpg", "/usr/local/bin/gpg", "/opt/homebrew/bin/gpg"]
+        .into_iter()
+        .find(|b| Path::new(b).exists());
+
+    if is_minisig {
+        if let Some(bin) = minisign_bin {
+            let pubkey = std::env::var("LITTY_PUBKEY")
+                .or_else(|_| std::env::var("LAPLACE_PUBKEY"))
+                .unwrap_or_else(|_| PINNED_PUBKEY.to_string());
+            let mut cmd = Command::new(bin);
+            cmd.args(["-V", "-m"]).arg(sums_path).arg("-x").arg(sig_path);
+            if !pubkey.is_empty() {
+                cmd.arg("-P").arg(&pubkey);
+            }
+            match cmd.status() {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(format!(
+                    "minisign signature verification failed (exit code: {:?})",
+                    status.code()
+                )),
+                Err(e) => Err(format!("failed to execute minisign: {e}")),
+            }
+        } else {
+            eprintln!("litty: warning: minisign signature file present but minisign is not installed to verify it");
+            Ok(())
+        }
+    } else if is_gpg {
+        if let Some(bin) = gpg_bin {
+            let mut cmd = Command::new(bin);
+            cmd.args(["--verify"]).arg(sig_path).arg(sums_path);
+            match cmd.status() {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(format!(
+                    "GPG signature verification failed (exit code: {:?})",
+                    status.code()
+                )),
+                Err(e) => Err(format!("failed to execute GPG: {e}")),
+            }
+        } else {
+            eprintln!("litty: warning: GPG signature file present but gpg is not installed to verify it");
+            Ok(())
+        }
+    } else {
+        if let Some(bin) = minisign_bin {
+            let pubkey = std::env::var("LITTY_PUBKEY")
+                .or_else(|_| std::env::var("LAPLACE_PUBKEY"))
+                .unwrap_or_else(|_| PINNED_PUBKEY.to_string());
+            let mut cmd = Command::new(bin);
+            cmd.args(["-V", "-m"]).arg(sums_path).arg("-x").arg(sig_path);
+            if !pubkey.is_empty() {
+                cmd.arg("-P").arg(&pubkey);
+            }
+            match cmd.status() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => {
+                    return Err(format!(
+                        "minisign signature verification failed (exit code: {:?})",
+                        status.code()
+                    ));
                 }
+                Err(e) => return Err(format!("failed to execute minisign: {e}")),
             }
         }
-    }
-    for bin in ["/usr/bin/gpg", "/usr/local/bin/gpg", "/opt/homebrew/bin/gpg"] {
-        if Path::new(bin).exists() {
-            if let Ok(status) = Command::new(bin)
-                .args(["--verify"])
-                .arg(sig_path)
-                .arg(sums_path)
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
+        if let Some(bin) = gpg_bin {
+            let mut cmd = Command::new(bin);
+            cmd.args(["--verify"]).arg(sig_path).arg(sums_path);
+            match cmd.status() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => {
+                    return Err(format!(
+                        "GPG signature verification failed (exit code: {:?})",
+                        status.code()
+                    ));
                 }
+                Err(e) => return Err(format!("failed to execute GPG: {e}")),
             }
         }
+        eprintln!("litty: warning: signature file present but neither minisign nor gpg is installed to verify it");
+        Ok(())
     }
-    Ok(())
 }
 
 /// Detect if current executable is running inside an `.app` bundle on macOS.
@@ -908,6 +969,16 @@ fn download_and_verify_in(
         if let Ok(asset) = pick_asset(release, &sums, candidates) {
             let path = release_dir.join(&asset.name);
             if path.is_file() && verify_checksum(&sums, &asset.name, &path).is_ok() {
+                if let Some(sig_asset) = release
+                    .assets
+                    .iter()
+                    .find(|a| a.name == "SHA256SUMS.txt.minisig" || a.name == "SHA256SUMS.txt.sig")
+                {
+                    let sig_path = release_dir.join(&sig_asset.name);
+                    if sig_path.is_file() {
+                        verify_signature(&sums_path, &sig_path)?;
+                    }
+                }
                 return Ok((path, asset.name.clone()));
             }
         }
@@ -928,9 +999,8 @@ fn download_and_verify_in(
         .find(|a| a.name == "SHA256SUMS.txt.minisig" || a.name == "SHA256SUMS.txt.sig")
     {
         let sig_path = release_dir.join(&sig_asset.name);
-        if download_file(&sig_asset.download_url, &sig_path).is_ok() {
-            let _ = verify_signature(&sums_path, &sig_path);
-        }
+        download_file(&sig_asset.download_url, &sig_path)?;
+        verify_signature(&sums_path, &sig_path)?;
     }
 
     let asset = pick_asset(release, &sums, candidates)?;
@@ -1533,6 +1603,50 @@ mod tests {
         let mut left: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
         left.sort();
         assert_eq!(left, [".lock", "v0.4.0"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_signature_rejection_and_cached_check() {
+        let dir = temp_dir("sig_test");
+        let sums_file = dir.join("SHA256SUMS.txt");
+        let minisig_file = dir.join("SHA256SUMS.txt.minisig");
+        let gpg_file = dir.join("SHA256SUMS.txt.sig");
+        fs::write(&sums_file, b"test content\n").unwrap();
+        // Corrupt signature
+        fs::write(&minisig_file, b"untrusted comment: signature\nWRONGSIG\n").unwrap();
+        fs::write(&gpg_file, b"-----BEGIN PGP SIGNATURE-----\ninvalid\n-----END PGP SIGNATURE-----\n").unwrap();
+
+        let has_minisign = [
+            "/usr/bin/minisign",
+            "/usr/local/bin/minisign",
+            "/opt/homebrew/bin/minisign",
+        ]
+        .iter()
+        .any(|b| Path::new(b).exists());
+
+        let has_gpg = [
+            "/usr/bin/gpg",
+            "/usr/local/bin/gpg",
+            "/opt/homebrew/bin/gpg",
+        ]
+        .iter()
+        .any(|b| Path::new(b).exists());
+
+        let res_mini = verify_signature(&sums_file, &minisig_file);
+        if has_minisign {
+            assert!(res_mini.is_err(), "tampered minisign signature must be rejected");
+        } else {
+            assert!(res_mini.is_ok(), "fallback without minisign should return Ok");
+        }
+
+        let res_gpg = verify_signature(&sums_file, &gpg_file);
+        if has_gpg {
+            assert!(res_gpg.is_err(), "tampered GPG signature must be rejected");
+        } else {
+            assert!(res_gpg.is_ok(), "fallback without gpg should return Ok");
+        }
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
