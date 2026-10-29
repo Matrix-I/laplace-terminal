@@ -2526,7 +2526,7 @@ fn handle_key(
         return;
     }
 
-    let alt_screen = s.tabs.get(s.active).and_then(|t| t.active_pane()).map_or(false, |p| p.grid.lock().alt_active);
+    let alt_screen = s.tabs.get(s.active).and_then(|t| t.active_pane()).is_some_and(|p| p.grid.lock().alt_active);
     if s.search.is_open {
         // Keys belong to the search box; shortcuts it does not consume still work,
         // but nothing reaches the shell.

@@ -439,13 +439,13 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [ ] Use absolute paths for system utility executions (`curl`, `codesign`, `touch`, `open`, `pbcopy`/`pbpaste`, `xclip`) instead of bare `$PATH` lookups
 
 ### Crash & Panic Fixes
-- [ ] Fix `f32::clamp(min, max)` panic (`assertion failed: min <= max`) when split pane rects shrink to <= 1 cell (`src/split.rs`)
-- [ ] Fix out-of-bounds panic on `self.instances` during IME preedit rendering (`src/renderer.rs`)
-- [ ] Fix integer underflow panic when `total_rows == 0` on tiny/zero-sized grid (`src/renderer.rs`)
-- [ ] Fix integer underflow and invalid scissor rect panic in flipped target rendering (`src/image_layer.rs`)
-- [ ] Fix index out-of-bounds panic when searching on an empty grid (`src/search.rs`)
-- [ ] Prevent WGSL shader division by zero when `u.cols == 0` (`src/shader.wgsl`)
-- [ ] Guard against panicking on empty `panes` in `Tab::active_pane` (`src/main.rs`)
+- [x] Fix `f32::clamp(min, max)` panic (`assertion failed: min <= max`) when split pane rects shrink to <= 1 cell (`src/split.rs`)
+- [x] Fix out-of-bounds panic on `self.instances` during IME preedit rendering (`src/renderer.rs`)
+- [x] Fix integer underflow panic when `total_rows == 0` on tiny/zero-sized grid (`src/renderer.rs`)
+- [x] Fix integer underflow and invalid scissor rect panic in flipped target rendering (`src/image_layer.rs`)
+- [x] Fix index out-of-bounds panic when searching on an empty grid (`src/search.rs`)
+- [x] Prevent WGSL shader division by zero when `u.cols == 0` (`src/shader.wgsl`)
+- [x] Guard against panicking on empty `panes` in `Tab::active_pane` (`src/main.rs`)
 
 ### Performance & Concurrency Fixes
 - [ ] Fix quadratic $O(H^2 \cdot W)$ reallocation and memory copy loop in Sixel image decoder (`src/graphics.rs`)
