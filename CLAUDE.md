@@ -1,8 +1,8 @@
-# Laplace Terminal — Claude Code Rules
+# Litty Terminal — Claude Code Rules
 
 ## Cross-Platform Keyboard Shortcuts & Modifier Mapping Rules
 
-Laplace is designed to run natively and with zero latency on both **macOS** (Metal) and **Linux** (Vulkan/Wayland/X11). Every time a new shortcut, mouse gesture, or window interaction is added or modified, you **MUST** ensure full feature parity between macOS and Linux.
+Litty is designed to run natively and with zero latency on both **macOS** (Metal) and **Linux** (Vulkan/Wayland/X11). Every time a new shortcut, mouse gesture, or window interaction is added or modified, you **MUST** ensure full feature parity between macOS and Linux.
 
 ---
 
@@ -28,7 +28,7 @@ In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readl
 | **Paste Clipboard** | `Cmd + V` | `Ctrl + Shift + V` *(or `Super + V`)* | Bare `Ctrl+V` sends verbatim escape (`\x16`). |
 | **Quit Application** | `Cmd + Q` | `Ctrl + Shift + Q` *(or `Super + Q`)* | Bare `Ctrl+Q` is XON resume flow control. |
 | **Minimize Window** | `Cmd + M` | `Ctrl + Shift + M` *(or `Super + M`)* | Bare `Ctrl+M` is carriage return (`\r`) in terminal. |
-| **Open Config** | `Cmd + ,` | `Ctrl + ,` *(or `Super + ,`)* | Opens `~/.laplace/config` in `$EDITOR`. |
+| **Open Config** | `Cmd + ,` | `Ctrl + ,` *(or `Super + ,`)* | Opens `~/.litty/config` in `$EDITOR`. |
 | **Reload Config** | `Cmd + Shift + ,` (or `Cmd + <`) | `Ctrl + Shift + ,` (or `Ctrl + <`) | Reloads config on the fly. |
 | **Select Tab 1..9** | `Cmd + 1..9` | `Ctrl + 1..9` *(matches `^1..^9` badge)*, `Alt + 1..9`, `Super + 1..9` | Tab 9 jumps to last tab if $\ge 9$ tabs. |
 | **Cycle Tabs (Prev / Next)** | `Cmd + Shift + [` / `Cmd + Shift + ]` | `Ctrl + Shift + [` / `Ctrl + Shift + ]` | Works alongside `Ctrl + Tab` and `Ctrl + PageUp / PageDown`. |

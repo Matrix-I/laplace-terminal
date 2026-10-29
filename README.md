@@ -1,4 +1,4 @@
-# Laplace Terminal ⚡
+# Litty Terminal ⚡
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue.svg)]()
@@ -7,7 +7,7 @@
 [![Idle RAM](https://img.shields.io/badge/idle%20RAM-~68MB-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Laplace** is an ultra-fast, lightweight, GPU-accelerated terminal emulator written in Rust. It delivers sub-millisecond input response, silky-smooth 120Hz ProMotion rendering, and an exceptionally small memory footprint without sacrificing modern developer ergonomics.
+**Litty** is an ultra-fast, lightweight, GPU-accelerated terminal emulator written in Rust. It delivers sub-millisecond input response, silky-smooth 120Hz ProMotion rendering, and an exceptionally small memory footprint without sacrificing modern developer ergonomics.
 
 ---
 
@@ -15,9 +15,9 @@
 
 - **Native GPU Rendering:** Powered by `wgpu` targeting native **Metal** on macOS and **Vulkan** on Linux. Renders the entire terminal grid in a **single instanced draw call** using a custom WGSL shader.
 - **Zero-Allocation Ring Buffer:** Character cells are packed into just **12 bytes** (`codepoint`, packed `fg`, packed `bg`). Scrolling and heavy logging stream directly through an in-place circular ring buffer without runtime heap thrashing.
-- **True 0.0% Idle CPU:** Pure event-driven execution using `ControlFlow::Wait`. Laplace sleeps completely when inactive, never running unnecessary polling loops.
-- **Ghostty-Compatible Configuration:** Reads `~/.laplace/config` and automatically falls back to `~/.config/ghostty/config`. Supports live config reloading (`Cmd+,` / `Ctrl+,` and `Cmd+Shift+,` / `Ctrl+Shift+,`) and auto-reloads on window focus.
-- **Native macOS Lifecycle:** Closing the last tab or window keeps Laplace running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Laplace` immediately restores a fresh tab. Press `Cmd+Q` (or `Ctrl+Shift+Q` on Linux) to quit; with `confirm-close-surface` (default) Laplace asks first while a program is still running. A native menu bar exposes the main actions, including **Secure Keyboard Entry**.
+- **True 0.0% Idle CPU:** Pure event-driven execution using `ControlFlow::Wait`. Litty sleeps completely when inactive, never running unnecessary polling loops.
+- **Ghostty-Compatible Configuration:** Reads `~/.litty/config` and automatically falls back to `~/.config/ghostty/config`. Supports live config reloading (`Cmd+,` / `Ctrl+,` and `Cmd+Shift+,` / `Ctrl+Shift+,`) and auto-reloads on window focus.
+- **Native macOS Lifecycle:** Closing the last tab or window keeps Litty running in the background (Dock) at 0% CPU. Clicking the Dock icon or running `open -a Litty` immediately restores a fresh tab. Press `Cmd+Q` (or `Ctrl+Shift+Q` on Linux) to quit; with `confirm-close-surface` (default) Litty asks first while a program is still running. A native menu bar exposes the main actions, including **Secure Keyboard Entry**.
 - **Multiple Windows:** `Cmd+N` / `Ctrl+Shift+N` opens another window in the current directory; each window has its own tabs and splits.
 - **Tabs with CWD Inheritance:** Seamless multi-tab experience (`Cmd+T`/`Ctrl+Shift+T`, `Cmd+W`/`Ctrl+Shift+W`, tab cycling, 1..9 direct jumps). New tabs automatically open in the current working directory of the active tab.
 - **Ghostty-Style Splits / Panes:** Split any tab horizontally or vertically (`Cmd+D` / `Cmd+Shift+D` on macOS, `Ctrl+Shift+D` / `Ctrl+Shift+E` on Linux). Seamlessly navigate between panes (`Cmd+Option+Arrows` / `Cmd+[` / `Cmd+]`), resize splits (`Cmd+Ctrl+Arrows`), toggle zoom (`Cmd+Shift+Enter`), or equalize ratios (`Cmd+Option+=`). Renders sleek hairline divider borders with zero overhead in the same single GPU instanced draw call.
@@ -26,12 +26,12 @@
 - **Find in Terminal (Regex):** Press `Cmd+F` (macOS) or `Ctrl+Shift+F` / `Super+F` (Linux) to open a search box in the top-right corner. Queries are regular expressions by default (`Ctrl+R` toggles literal mode) with smart case. All matches in the scrollback are highlighted; `Enter` / `↑` / `Cmd+G` jump to the previous (older) match, `Shift+Enter` / `↓` / `Cmd+Shift+G` to the next, and `Esc` closes.
 - **Click-to-Position Cursor:** Click anywhere on the active command line to immediately move the shell cursor to that character, with automatic alignment for wide Unicode glyphs, CJK characters, and multi-byte prompt symbols (`❯`, `🦀`, emojis).
 - **Ergonomic Line & Word Editing:** Out-of-the-box support for word jumping (`Option+Left/Right` on macOS without interfering with Mission Control Spaces, `Ctrl+Left/Right` on Linux), prompt-aware deletion before cursor (`Ctrl+U`), delete to line end (`Ctrl+K`), and instant scrollback clear (`Cmd+K` / `Ctrl+Shift+K`).
-- **Automatic Shell Integration:** zsh, bash (including macOS's 3.2), fish and nushell (0.101+) get OSC 133 prompt marks and OSC 7 directory reports without editing any dotfile (injected via `ZDOTDIR`, `bash --rcfile`, or `XDG_DATA_DIRS`); elvish needs one line, `use laplace`, in `rc.elv`. This powers jumping between prompts (`Cmd+Shift+↑/↓`), selecting the last command's output (`Cmd+Shift+O`), new tabs in the current directory, and optionally a bar cursor at the prompt and the window title (`shell-integration-features = cursor,title`).
+- **Automatic Shell Integration:** zsh, bash (including macOS's 3.2), fish and nushell (0.101+) get OSC 133 prompt marks and OSC 7 directory reports without editing any dotfile (injected via `ZDOTDIR`, `bash --rcfile`, or `XDG_DATA_DIRS`); elvish needs one line, `use litty`, in `rc.elv`. This powers jumping between prompts (`Cmd+Shift+↑/↓`), selecting the last command's output (`Cmd+Shift+O`), new tabs in the current directory, and optionally a bar cursor at the prompt and the window title (`shell-integration-features = cursor,title`).
 - **Kitty Keyboard Protocol:** Full support for all five progressive enhancements (`CSI > flags u`): disambiguated `Esc`/`Ctrl`/`Alt` keys, key repeat & release events, alternate (shifted and US-layout) keys, every key as an escape code, and associated text — with separate flag stacks for the main and alternate screens. Neovim, Helix, fish 4 and Kakoune can tell `Ctrl+I` from `Tab`, `Ctrl+Shift+<key>` from `Ctrl+<key>`, and see key releases.
 - **xterm `modifyOtherKeys`:** levels 1 and 2 (`CSI > 4 ; n m`) encode modified keys such as `Ctrl+Enter`, `Ctrl+1` or `Ctrl+Tab` as `CSI 27 ; mods ; code ~` for applications that do not speak the Kitty protocol. Unbound `Cmd`/`Super` combinations reach Kitty-protocol applications (e.g. Neovim `<D-…>` mappings).
 - **Full-Screen App & Unicode Support:** Mouse reporting (X10/SGR, click, drag and motion tracking) for vim, tmux and htop; focus events; alternate scroll in `less`/`man`; IME input (Vietnamese Telex/VNI, CJK); combining-mark composition; double-width CJK glyphs; color emoji (Apple Color Emoji on macOS, Noto Color Emoji bitmaps on Linux) with grapheme clustering (DEC mode 2027: ZWJ sequences, flags, skin tones, VS16 and keycaps share one cell pair, marks without a precomposed form stay with their base); right-to-left Hebrew and Arabic shown in visual order with joined Arabic letters on the primary screen; bold/italic text; strikethrough (SGR 9) and styled underlines (SGR `4:1`..`4:5` single/double/curly/dotted/dashed, `21` double) with their own color (SGR 58/59), as used by Neovim diagnostics; reflow of wrapped lines on resize; synchronized output; XTGETTCAP / DECRQSS / XTWINOPS replies, SGR pixel mouse (1016), light/dark color scheme reports (2031, DSR 996), OSC 9 / OSC 777 desktop notifications, OSC 9;4 progress in the tab title, OSC 22 pointer shape, a bell that bounces the Dock and marks the tab with 🔔, OSC 4 / 10 / 11 / 12 (set and query the palette, default foreground/background and cursor color per terminal, reset with OSC 104 / 110 / 111 / 112), OSC 7 (cwd), OSC 8 (hyperlinks), OSC 52 (set clipboard) and OSC 133 (prompt marks).
 - **Inline Images:** the Kitty graphics protocol (PNG / RGB / RGBA, chunked, file, temp-file or shared-memory transfers — `kitten icat`, `timg`, `chafa`, yazi previews; images under the text with `z < 0`; unicode placeholders for tmux and other multiplexers; animation frames) and Sixel (`img2sixel`, `chafa -f sixel`); images scroll with the text and survive reflow.
-- **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and 860+ bundled themes from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (`laplace +list-themes`; files in `~/.laplace/themes` or `~/.config/ghostty/themes` override them). As in Ghostty, a theme is applied before the rest of the config, so your own colors always win.
+- **Aesthetics & Window Effects:** Native macOS vibrancy blur, transparent backgrounds, 24-bit TrueColor support, and 860+ bundled themes from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (`litty +list-themes`; files in `~/.litty/themes` or `~/.config/ghostty/themes` override them). As in Ghostty, a theme is applied before the rest of the config, so your own colors always win.
 
 ---
 
@@ -41,7 +41,7 @@ Tested on macOS Sonoma (Apple Silicon M-series, empty idle shell):
 
 | Terminal Emulator | Idle RAM (RSS) | Idle CPU | Startup Time | GPU Backend |
 | :--- | :---: | :---: | :---: | :---: |
-| **Laplace** | **~68 – 86 MB** | **0.0%** | **< 30 ms** | Metal (Direct) |
+| **Litty** | **~68 – 86 MB** | **0.0%** | **< 30 ms** | Metal (Direct) |
 | Ghostty | ~105 – 120 MB | 0.0% | ~50 ms | Metal |
 | Alacritty | ~110 – 130 MB | 0.0% | ~60 ms | OpenGL / Metal |
 | WezTerm | ~170 – 210 MB | 0.0% – 0.5% | ~120 ms | OpenGL / Vulkan |
@@ -50,7 +50,7 @@ Tested on macOS Sonoma (Apple Silicon M-series, empty idle shell):
 
 ## 🏗 Architecture
 
-Laplace decouples I/O throughput from rendering to guarantee smooth UI interaction even during heavy terminal output:
+Litty decouples I/O throughput from rendering to guarantee smooth UI interaction even during heavy terminal output:
 
 ```text
                ┌──────────────────────────────┐
@@ -80,7 +80,7 @@ Laplace decouples I/O throughput from rendering to guarantee smooth UI interacti
 
 ## ⌨️ Default Shortcuts
 
-Laplace provides complete shortcut parity across macOS and Linux, adhering strictly to terminal conventions on each platform:
+Litty provides complete shortcut parity across macOS and Linux, adhering strictly to terminal conventions on each platform:
 
 | Action | macOS (`Cmd`) | Linux (`Ctrl` / `Super`) | Notes |
 | :--- | :--- | :--- | :--- |
@@ -94,7 +94,7 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 | **Navigate splits / tabs** | <kbd>Cmd</kbd> + <kbd>←</kbd> / <kbd>→</kbd> / <kbd>↑</kbd> / <kbd>↓</kbd> *(or + <kbd>Option</kbd>)* | <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + Arrows *(or <kbd>Super</kbd> + Arrows)* | Spatial focus navigation (falls back to cycling tabs at edge) |
 | **Cycle splits (Prev / Next)** | <kbd>Cmd</kbd> + <kbd>[</kbd> / <kbd>]</kbd> | <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>[</kbd> / <kbd>]</kbd> *(or <kbd>Super</kbd> + <kbd>[</kbd> / <kbd>]</kbd>)* | Cycles focus across split panes in active tab |
 | **Resize active split** | <kbd>Cmd</kbd> + <kbd>Ctrl</kbd> + Arrows | <kbd>Super</kbd> + <kbd>Ctrl</kbd> + Arrows / <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + Arrows | Dynamically expands or shrinks active split pane |
-| **Quit Laplace** | <kbd>Cmd</kbd> + <kbd>Q</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> *(or <kbd>Super</kbd> + <kbd>Q</kbd>)* | Preserves bare `Ctrl+Q` (XON flow control) |
+| **Quit Litty** | <kbd>Cmd</kbd> + <kbd>Q</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> *(or <kbd>Super</kbd> + <kbd>Q</kbd>)* | Preserves bare `Ctrl+Q` (XON flow control) |
 | **Minimize window** | <kbd>Cmd</kbd> + <kbd>M</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>M</kbd> *(or <kbd>Super</kbd> + <kbd>M</kbd>)* | Preserves bare `Ctrl+M` (Enter / Carriage return) |
 | **Cycle tabs (Prev / Next)** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>[</kbd> / <kbd>]</kbd> | Circular tab switching |
 | **Cycle tabs (Next / Prev)** | <kbd>Ctrl</kbd> + <kbd>Tab</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Tab</kbd> | <kbd>Ctrl</kbd> + <kbd>Tab</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Tab</kbd> | Cross-platform standard |
@@ -105,7 +105,7 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 | **Zoom in (+1.0 pt)** | <kbd>Cmd</kbd> + <kbd>+</kbd> / <kbd>=</kbd> | <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>=</kbd> *(with/without Shift, or Super)* | Font size clamps between 6.0 – 72.0 pt |
 | **Zoom out (-1.0 pt)** | <kbd>Cmd</kbd> + <kbd>-</kbd> | <kbd>Ctrl</kbd> + <kbd>-</kbd> / <kbd>_</kbd> *(with/without Shift, or Super)* | Font size clamps between 6.0 – 72.0 pt |
 | **Reset zoom** | <kbd>Cmd</kbd> + <kbd>0</kbd> | <kbd>Ctrl</kbd> + <kbd>0</kbd> *(with/without Shift, or Super)* | Resets to configured default font size |
-| **Open config editor** | <kbd>Cmd</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>,</kbd> *(or <kbd>Super</kbd> + <kbd>,</kbd>)* | Opens `~/.laplace/config` in `$EDITOR` |
+| **Open config editor** | <kbd>Cmd</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>,</kbd> *(or <kbd>Super</kbd> + <kbd>,</kbd>)* | Opens `~/.litty/config` in `$EDITOR` |
 | **Reload config file** | <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>,</kbd> | Live reload without losing shell session |
 | **Open URL or path** | <kbd>Cmd</kbd> + <kbd>Click</kbd> | <kbd>Ctrl</kbd> + <kbd>Click</kbd> *(or <kbd>Super</kbd> + <kbd>Click</kbd>)* | Opens in default browser / editor via `open` or `xdg-open` |
 | **Hover URL preview** | <kbd>Cmd</kbd> + <kbd>Mouse Move</kbd> | <kbd>Ctrl</kbd> + <kbd>Mouse Move</kbd> *(or <kbd>Super</kbd>)* | Underlines URL and displays preview pill |
@@ -128,13 +128,13 @@ Laplace provides complete shortcut parity across macOS and Linux, adhering stric
 
 ## ⚙️ Configuration
 
-Laplace looks for its configuration file in the following order:
-1. `~/.laplace/config`
+Litty looks for its configuration file in the following order:
+1. `~/.litty/config`
 2. `~/.config/ghostty/config` *(automatic Ghostty drop-in support)*
 
-Press <kbd>Cmd</kbd> + <kbd>,</kbd> inside Laplace to create/open your configuration file.
+Press <kbd>Cmd</kbd> + <kbd>,</kbd> inside Litty to create/open your configuration file.
 
-### Example `~/.laplace/config`
+### Example `~/.litty/config`
 
 ```ini
 # Font Configuration
@@ -153,7 +153,7 @@ window-colorspace = "display-p3"
 # Colors & Palette
 background = #121316
 foreground = #e6e6e6
-# theme = "Catppuccin Mocha"     # any name from `laplace +list-themes`
+# theme = "Catppuccin Mocha"     # any name from `litty +list-themes`
 
 # Cursor
 cursor-style = "block"          # "block", "bar", "underline", "block_hollow"
@@ -186,9 +186,9 @@ window-padding-balance = true
 # adjust-cell-height = 10%       # or pixels: 2 / -1; also adjust-cell-width
 # font-thicken = true
 # keybind = global:cmd+grave_accent=toggle_quick_terminal   # drop-down Quick Terminal (macOS; X11 on Linux)
-#   Wayland: bind `laplace +toggle-quick-terminal` to a desktop shortcut instead
+#   Wayland: bind `litty +toggle-quick-terminal` to a desktop shortcut instead
 # grapheme-width-method = legacy  # one width per codepoint (default `unicode`: emoji sequences are one grapheme)
-# custom-shader = ~/.laplace/shaders/crt.glsl   # Ghostty/Shadertoy GLSL (mainImage, iChannel0, iTime); repeat to chain
+# custom-shader = ~/.litty/shaders/crt.glsl   # Ghostty/Shadertoy GLSL (mainImage, iChannel0, iTime); repeat to chain
 # macos-native-tabs = true       # Cmd+T opens native macOS window tabs
 # confirm-close-surface = true   # ask before closing a running program (false / always)
 # scrollback-limit = 10000000    # bytes, as in Ghostty (default: 5000 lines)
@@ -208,16 +208,16 @@ keybind = cmd+d=unbind
 
 ## 🔄 Auto-Update & CLI Commands
 
-Laplace includes a built-in, zero-dependency self-updater that checks for releases on GitHub, validates SHA-256 checksums from `SHA256SUMS.txt`, and safely updates `Laplace.app` (with ad-hoc codesigning) or standalone binaries in-place.
+Litty includes a built-in, zero-dependency self-updater that checks for releases on GitHub, validates SHA-256 checksums from `SHA256SUMS.txt`, and safely updates `Litty.app` (with ad-hoc codesigning) or standalone binaries in-place.
 
-- **macOS Menu Bar**: Choose **Laplace ▸ Check for Updates…** to check and install updates interactively with native Cocoa alerts.
+- **macOS Menu Bar**: Choose **Litty ▸ Check for Updates…** to check and install updates interactively with native Cocoa alerts.
 - **CLI Commands**:
-  - `laplace +check-update` (or `--check-update`): Check if a new version is available without installing.
-  - `laplace +update` (or `--update`): Download and install the newest release directly in your terminal (use `--force` to reinstall current version).
-- **Background checks** (at most once a day, at startup): `auto-update = check` notifies when a release is out; `auto-update = download` also downloads and verifies it, and the next **Check for Updates…** / `laplace +update` installs that copy without downloading again. Nothing is installed without asking.
+  - `litty +check-update` (or `--check-update`): Check if a new version is available without installing.
+  - `litty +update` (or `--update`): Download and install the newest release directly in your terminal (use `--force` to reinstall current version).
+- **Background checks** (at most once a day, at startup): `auto-update = check` notifies when a release is out; `auto-update = download` also downloads and verifies it, and the next **Check for Updates…** / `litty +update` installs that copy without downloading again. Nothing is installed without asking.
 - **Channels**: `stable` follows the latest release; `tip` also considers prereleases and picks the highest version.
-- **Architecture-safe**: the updater picks the asset for this machine's CPU (`laplace-macos-<arch>`, `Laplace-macos-<arch>.zip`, `laplace-linux-<arch>`, with `<arch>` = `aarch64` or `x86_64`; the unsuffixed names of older releases count as arm64 on macOS and x86_64 on Linux) and refuses a binary whose Mach-O / ELF header is built for another CPU.
-- Only one update runs at a time (a lock in `~/.cache/laplace/updates`, shared with `laplace +update`), and every network request has connect and transfer timeouts.
+- **Architecture-safe**: the updater picks the asset for this machine's CPU (`litty-macos-<arch>`, `Litty-macos-<arch>.zip`, `litty-linux-<arch>`, with `<arch>` = `aarch64` or `x86_64`; the unsuffixed names of older releases count as arm64 on macOS and x86_64 on Linux) and refuses a binary whose Mach-O / ELF header is built for another CPU.
+- Only one update runs at a time (a lock in `~/.cache/litty/updates`, shared with `litty +update`), and every network request has connect and transfer timeouts.
 
 ---
 
@@ -225,24 +225,24 @@ Laplace includes a built-in, zero-dependency self-updater that checks for releas
 
 ### macOS (Pre-built DMG / App)
 
-1. Download **`Laplace.dmg`** (or `Laplace-macos.zip`) from the [Latest Release](https://github.com/Matrix-I/laplace-terminal/releases/latest).
-2. Open `Laplace.dmg` and drag `Laplace.app` into your `/Applications` folder.
-3. **macOS Gatekeeper Notice**: Because Laplace is not yet notarized with an Apple Developer Certificate, macOS will mark downloaded apps with a quarantine attribute. Run the following command in Terminal to allow it to open:
+1. Download **`Litty.dmg`** (or `Litty-macos.zip`) from the [Latest Release](https://github.com/Matrix-I/litty-terminal/releases/latest).
+2. Open `Litty.dmg` and drag `Litty.app` into your `/Applications` folder.
+3. **macOS Gatekeeper Notice**: Because Litty is not yet notarized with an Apple Developer Certificate, macOS will mark downloaded apps with a quarantine attribute. Run the following command in Terminal to allow it to open:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/Laplace.app
+xattr -dr com.apple.quarantine /Applications/Litty.app
 ```
 
-Now you can launch Laplace from Spotlight, Launchpad, or the Applications folder!
+Now you can launch Litty from Spotlight, Launchpad, or the Applications folder!
 
 ### Linux (Pre-built Binary)
 
-1. Download **`laplace-linux`** (or `laplace-linux-x86_64.tar.gz`) from the [Latest Release](https://github.com/Matrix-I/laplace-terminal/releases/latest).
+1. Download **`litty-linux`** (or `litty-linux-x86_64.tar.gz`) from the [Latest Release](https://github.com/Matrix-I/litty-terminal/releases/latest).
 2. Make it executable and place it in your `$PATH`:
 
 ```bash
-chmod +x laplace-linux
-sudo mv laplace-linux /usr/local/bin/laplace
+chmod +x litty-linux
+sudo mv litty-linux /usr/local/bin/litty
 ```
 
 ---
@@ -259,8 +259,8 @@ sudo mv laplace-linux /usr/local/bin/laplace
 
 ```bash
 # Clone the repository
-git clone https://github.com/Matrix-I/laplace-terminal.git
-cd laplace-terminal
+git clone https://github.com/Matrix-I/litty-terminal.git
+cd litty-terminal
 
 # Run tests
 cargo test
@@ -278,10 +278,10 @@ Run the automated bundling script:
 ```
 
 This will:
-1. Build Laplace with aggressive LTO and size stripping.
-2. Generate `Laplace.app` signed with ad-hoc certificates.
-3. Install `Laplace.app` to `~/Applications/Laplace.app`.
-4. Create an installable drag-and-drop disk image: `dist/Laplace.dmg`.
+1. Build Litty with aggressive LTO and size stripping.
+2. Generate `Litty.app` signed with ad-hoc certificates.
+3. Install `Litty.app` to `~/Applications/Litty.app`.
+4. Create an installable drag-and-drop disk image: `dist/Litty.dmg`.
 
 
 ---

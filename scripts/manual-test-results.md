@@ -36,7 +36,7 @@
 | modifyOtherKeys + Cmd/Super for Kitty | auto-pass | Ctrl+1 (mode 1) | ^[[27;5;49~ |
 | modifyOtherKeys + Cmd/Super for Kitty | AUTO-FAIL | Cmd+J (kitty flags 1) | got: ^[[106;5u want: ^\[\[106;9u |
 | modifyOtherKeys + Cmd/Super for Kitty | auto-pass | Cmd+J (no mode, wait 4 s) | <nothing> |
-| Notifications, progress, pointer, bell | pass | notification 'Laplace / Build finished' |  |
+| Notifications, progress, pointer, bell | pass | notification 'Litty / Build finished' |  |
 | Notifications, progress, pointer, bell | pass | notification titled 'Tests' |  |
 | Notifications, progress, pointer, bell | pass | title starts with '45% ' |  |
 | Notifications, progress, pointer, bell | pass | title starts with '⋯ ' |  |
@@ -46,7 +46,7 @@
 | Notifications, progress, pointer, bell | pass | I-beam |  |
 | Notifications, progress, pointer, bell | pass | arrow |  |
 | Notifications, progress, pointer, bell | pass | that tab gets 🔔, cleared when you visit it |  |
-| Notifications, progress, pointer, bell | pass | Laplace bounces in the Dock |  |
+| Notifications, progress, pointer, bell | pass | Litty bounces in the Dock |  |
 | XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | XTGETTCAP TN | ^[P1+r544E=787465726D2D323536636F6C6F72^[\ |
 | XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DECRQSS SGR | ^[P1$r0;1;38;2;233;86;120m^[\ |
 | XTGETTCAP, DECRQSS, pixel mouse, color scheme | auto-pass | DA1 advertises sixel | ^[[?62;4;22c |
@@ -64,7 +64,7 @@
 | Config: padding, theme, keybind, colors, title, copy-on-select | pass | orange cursor, green selection with yellow text |  |
 | Config: padding, theme, keybind, colors, title, copy-on-select | pass | dragging doesn't touch clipboard, Cmd+C still copies |  |
 | Config: padding, theme, keybind, colors, title, copy-on-select | pass | title stays Work |  |
-| Shell integration, prompt jump, output selection | auto-pass | LAPLACE_SHELL_INTEGRATION_DIR set | /Users/linh.nguyen/.cache/laplace/shell-integration/0.3.0 |
+| Shell integration, prompt jump, output selection | auto-pass | LITTY_SHELL_INTEGRATION_DIR set | /Users/linh.nguyen/.cache/litty/shell-integration/0.3.0 |
 | Shell integration, prompt jump, output selection | pass | prompt jump |  |
 | Shell integration, prompt jump, output selection | pass | Cmd+Shift+O selects ls output |  |
 | Shell integration, prompt jump, output selection | pass | Cmd+T inherits cwd |  |
@@ -110,9 +110,9 @@
 | Bundled themes | pass | old alias works |  |
 | confirm-close-surface | pass | alert; Cancel keeps, Close closes |  |
 | confirm-close-surface | pass | idle prompt Cmd+W closes without asking |  |
-| confirm-close-surface | pass | Cmd+Q asks 'Quit Laplace?', red button asks 'Close this window?' |  |
+| confirm-close-surface | pass | Cmd+Q asks 'Quit Litty?', red button asks 'Close this window?' |  |
 | confirm-close-surface | pass | false never asks, always always asks |  |
-| macOS menu bar | pass | Laplace/Shell/Edit/View/Window menus, every item works |  |
+| macOS menu bar | pass | Litty/Shell/Edit/View/Window menus, every item works |  |
 | macOS menu bar | pass | Secure Keyboard Entry menu item toggles ✓ and 🔒 |  |
 | macOS menu bar | pass | Cmd+H, Ctrl+Cmd+F, Minimize, Window menu lists windows |  |
 | macOS menu bar | pass | close all windows, Shell ▸ New Window opens one |  |

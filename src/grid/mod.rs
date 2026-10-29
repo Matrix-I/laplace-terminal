@@ -3944,32 +3944,32 @@ mod tests {
         let mut g = Grid::new(80, 5);
         feed(
             &mut g,
-            " ~/Desktop/personal/laplace-terninal \u{e0b0} \u{e0a0} main \u{00b1} \u{e0b0}\r\n\
-             $ cd Desktop/personal/laplace-terninal\r\n\
-             $ ./target/release/laplace",
+            " ~/Desktop/personal/litty-terminal \u{e0b0} \u{e0a0} main \u{00b1} \u{e0b0}\r\n\
+             $ cd Desktop/personal/litty-terminal\r\n\
+             $ ./target/release/litty",
         );
-        // Double-click on prompt line selects only ~/Desktop/personal/laplace-terninal
+        // Double-click on prompt line selects only ~/Desktop/personal/litty-terminal
         assert_eq!(
             g.select_smart_line(0, 10),
-            "~/Desktop/personal/laplace-terninal"
+            "~/Desktop/personal/litty-terminal"
         );
         assert_eq!(
             g.select_smart_line(0, 0),
-            "~/Desktop/personal/laplace-terninal"
+            "~/Desktop/personal/litty-terminal"
         );
         // Double-click on command line selects full line minus "$ "
         assert_eq!(
             g.select_smart_line(1, 15),
-            "cd Desktop/personal/laplace-terninal"
+            "cd Desktop/personal/litty-terminal"
         );
         assert_eq!(
             g.select_smart_line(1, 2),
-            "cd Desktop/personal/laplace-terninal"
+            "cd Desktop/personal/litty-terminal"
         );
-        // Double-click on ./target/release/laplace line selects ./target/release/laplace
-        assert_eq!(g.select_smart_line(2, 10), "./target/release/laplace");
+        // Double-click on ./target/release/litty line selects ./target/release/litty
+        assert_eq!(g.select_smart_line(2, 10), "./target/release/litty");
         // Triple-click selects raw full line
-        assert_eq!(g.select_line(1), "$ cd Desktop/personal/laplace-terninal");
+        assert_eq!(g.select_line(1), "$ cd Desktop/personal/litty-terminal");
     }
 
     #[test]
@@ -3995,7 +3995,7 @@ mod tests {
         feed(
             &mut g,
             "Docs at https://ghostty.org/docs and repo (http://github.com/ghostty-org).\r\n\
-             ~/Desktop/personal/laplace-terminal \u{e0b0} main\r\n\
+             ~/Desktop/personal/litty-terminal \u{e0b0} main\r\n\
              $ cd ./src",
         );
         let link1 = g.find_hyperlink_at(0, 15, None).expect("find https url");
@@ -4010,9 +4010,9 @@ mod tests {
 
         // Path detection on prompt
         let path1 = g.find_hyperlink_at(1, 10, None).expect("find path");
-        assert_eq!(path1.url, "~/Desktop/personal/laplace-terminal");
+        assert_eq!(path1.url, "~/Desktop/personal/litty-terminal");
         assert_eq!(path1.start_col, 0);
-        assert_eq!(path1.end_col, 34);
+        assert_eq!(path1.end_col, 32);
         assert!(path1.is_path);
 
         // Relative path detection

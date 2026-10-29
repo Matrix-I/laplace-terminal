@@ -1106,12 +1106,12 @@ mod tests {
 
     #[test]
     fn fzf_smart_case_matching() {
-        let terms_lower = parse_fzf_query("laplace");
-        assert!(match_fzf_terms(&terms_lower, "Laplace Terminal", 0).is_some());
+        let terms_lower = parse_fzf_query("litty");
+        assert!(match_fzf_terms(&terms_lower, "Litty Terminal", 0).is_some());
 
-        let terms_upper = parse_fzf_query("Laplace");
-        assert!(match_fzf_terms(&terms_upper, "Laplace Terminal", 0).is_some());
-        assert!(match_fzf_terms(&terms_upper, "laplace terminal", 0).is_none());
+        let terms_upper = parse_fzf_query("Litty");
+        assert!(match_fzf_terms(&terms_upper, "Litty Terminal", 0).is_some());
+        assert!(match_fzf_terms(&terms_upper, "litty terminal", 0).is_none());
     }
 
     #[test]
@@ -1188,7 +1188,7 @@ mod tests {
     #[test]
     fn parse_zsh_history_format() {
         let content = b": 1729835400:0;echo first\n: 1729835405:0;git commit -m \\\n  \"multiline commit\"\n: 1729835410:0;ls -la\n";
-        let temp = std::env::temp_dir().join("laplace_test_zsh_hist");
+        let temp = std::env::temp_dir().join("litty_test_zsh_hist");
         std::fs::write(&temp, content).expect("write temp hist");
         let mut out = Vec::new();
         parse_history_file(&temp, &mut out);
@@ -1203,7 +1203,7 @@ mod tests {
     #[test]
     fn parse_bash_history_format() {
         let content = b"#1729835400\ncargo check\n#1729835405\ngit status\n";
-        let temp = std::env::temp_dir().join("laplace_test_bash_hist");
+        let temp = std::env::temp_dir().join("litty_test_bash_hist");
         std::fs::write(&temp, content).expect("write temp hist");
         let mut out = Vec::new();
         parse_history_file(&temp, &mut out);
@@ -1217,7 +1217,7 @@ mod tests {
     fn temp_history(name: &str, content: &[u8]) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("laplace_hist_{}_{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("litty_hist_{}_{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join(name);
         std::fs::write(&path, content).expect("write temp hist");

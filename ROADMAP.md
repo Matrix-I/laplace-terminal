@@ -1,6 +1,6 @@
-# Laplace Roadmap — Ghostty Feature Gaps
+# Litty Roadmap — Ghostty Feature Gaps
 
-Features Ghostty has that Laplace does not yet, grouped by area. Roughly ordered
+Features Ghostty has that Litty does not yet, grouped by area. Roughly ordered
 by priority inside each group. Tick an item when it lands on `main`.
 
 ## Done
@@ -13,7 +13,7 @@ by priority inside each group. Tick an item when it lands on `main`.
 
 ## Manual test
 
-Each item lists what to run inside a Laplace window and the expected result.
+Each item lists what to run inside a Litty window and the expected result.
 `bash scripts/manual-test.sh [group…]` walks through them and records results in
 `scripts/manual-test-results.md`.
 
@@ -34,12 +34,12 @@ Each item lists what to run inside a Laplace window and the expected result.
   - Without any of these modes `Cmd+J` still sends nothing to the shell
 
 - [x] **Notifications, progress, pointer shape, bell**
-  - `sleep 3; printf '\e]9;Build finished\a'`, switch to another app within 3 s → a macOS notification "Laplace / Build finished"
+  - `sleep 3; printf '\e]9;Build finished\a'`, switch to another app within 3 s → a macOS notification "Litty / Build finished"
   - `sleep 3; printf '\e]777;notify;Tests;All passed\a'`, switch away → notification titled "Tests"
   - `printf '\e]9;4;1;45\a'` → window / tab title starts with `45% `; `printf '\e]9;4;3\a'` → `⋯ `; `printf '\e]9;4;2;80\a'` → `✖ 80% `; `printf '\e]9;4;0\a'` → prefix gone
   - `printf '\e]22;pointer\a'` then move the mouse over the terminal → hand cursor; `printf '\e]22;text\a'` → I-beam; `printf '\e]22;\a'` → arrow
   - Open a 2nd tab, run `sleep 2; printf '\a'` in it and switch to tab 1 → that tab's title gets `🔔 `, cleared when you switch back
-  - `sleep 3; printf '\a'` and switch to another app → Laplace bounces in the Dock
+  - `sleep 3; printf '\a'` and switch to another app → Litty bounces in the Dock
 
 - [x] **XTGETTCAP, DECRQSS, pixel mouse, color scheme**
   - In `nvim`: `:checkhealth` shows no terminal warnings about true color / undercurl, and `:lua print(vim.o.termguicolors)` → `true`
@@ -48,7 +48,7 @@ Each item lists what to run inside a Laplace window and the expected result.
   - `printf '\e[?1016h\e[?1003h'; cat -v`, move the mouse → `^[[<35;X;YM` with X/Y in pixels (hundreds, not cell numbers); `Ctrl+C`, then `printf '\e[?1016l\e[?1003l'`
   - `printf '\e[?2031h'; cat -v`, switch macOS Appearance between Light and Dark → `^[[?997;2n` / `^[[?997;1n`; `Ctrl+C`, then `printf '\e[?2031l'`
 
-- [x] **Config: padding, light/dark theme, keybind, colors, title, copy-on-select** (edit `~/.laplace/config`, then `Cmd+Shift+,` to reload)
+- [x] **Config: padding, light/dark theme, keybind, colors, title, copy-on-select** (edit `~/.litty/config`, then `Cmd+Shift+,` to reload)
   - `window-padding-x = 24` + `window-padding-y = 12` → wider margins; `window-padding-balance = true` → the grid is centered (equal leftover on both sides)
   - `theme = light:Horizon Bright,dark:Dracula` → Dracula colors; switch macOS Appearance to Light → Horizon Bright immediately, back to Dark → Dracula
   - `keybind = cmd+t=new_split:right` → `Cmd+T` splits instead of opening a tab; `keybind = cmd+d=unbind` → `Cmd+D` no longer splits; `keybind = ctrl+shift+h=text:hello\n` → types `hello` + Enter; `keybind = clear` → defaults back
@@ -56,14 +56,14 @@ Each item lists what to run inside a Laplace window and the expected result.
   - `copy-on-select = false` → dragging a selection no longer changes the clipboard; `Cmd+C` still copies
   - `title = Work` → window title stays "Work" whatever runs
 
-- [x] **Shell integration, prompt jump, output selection** (open a new Laplace window so the shell starts with the integration)
-  - `echo $LAPLACE_SHELL_INTEGRATION_DIR` → `~/.cache/laplace/shell-integration/<version>`; your usual prompt, aliases and `.zshrc` all still load
+- [x] **Shell integration, prompt jump, output selection** (open a new Litty window so the shell starts with the integration)
+  - `echo $LITTY_SHELL_INTEGRATION_DIR` → `~/.cache/litty/shell-integration/<version>`; your usual prompt, aliases and `.zshrc` all still load
   - `seq 50; ls; seq 30`, then `Cmd+Shift+↑` repeatedly → the view jumps prompt by prompt; `Cmd+Shift+↓` back down, past the last one returns to live
   - `ls -la` then `Cmd+Shift+O` → exactly the `ls -la` output is highlighted and in the clipboard (not the prompt, not the command line)
   - `cd /tmp` then `Cmd+T` → the new tab opens in `/tmp`
   - With `shell-integration-features = cursor,title`: bar cursor while typing at the prompt, block cursor inside `vim`; the title shows the directory, then the running command
-  - `shell-integration = none` in the config + new window → `echo $LAPLACE_SHELL_INTEGRATION_DIR` is empty and nothing above works
-  - bash: run `SHELL=/bin/bash ./target/release/laplace` from the repo → your `.bash_profile` loads without errors, prompt jump works (output selection needs bash 4.4+, e.g. `SHELL=/opt/homebrew/bin/bash`)
+  - `shell-integration = none` in the config + new window → `echo $LITTY_SHELL_INTEGRATION_DIR` is empty and nothing above works
+  - bash: run `SHELL=/bin/bash ./target/release/litty` from the repo → your `.bash_profile` loads without errors, prompt jump works (output selection needs bash 4.4+, e.g. `SHELL=/opt/homebrew/bin/bash`)
 
 - [x] **Drag & drop, scrollbar, secure input, bell-features**
   - Drag a file whose name has spaces from Finder into the window → `'/path/My File.txt' ` is typed at the prompt
@@ -99,12 +99,12 @@ Each item lists what to run inside a Laplace window and the expected result.
 
 - [x] **Shell integration additions** (nushell / elvish not installed: untested)
   - `seq 50; ls`, resize the window narrower and wider, then `Cmd+Shift+↑` → still jumps to each prompt; `Cmd+Shift+O` → still selects the `ls` output
-  - `SHELL=/bin/bash ./target/release/laplace`: `ls -la` then `Cmd+Shift+O` → the output is selected (bash 3.2 now has the C mark); Enter on an empty prompt, then `Cmd+Shift+O` → still the `ls -la` output
-  - nushell 0.101+ (if installed): `SHELL=$(which nu) ./target/release/laplace` → prompt jump and output selection work, `$env.XDG_DATA_DIRS` does not contain `laplace`
-  - elvish (if installed): add `use laplace` to `~/.config/elvish/rc.elv`, start with `SHELL=$(which elvish)` → prompt jump works
+  - `SHELL=/bin/bash ./target/release/litty`: `ls -la` then `Cmd+Shift+O` → the output is selected (bash 3.2 now has the C mark); Enter on an empty prompt, then `Cmd+Shift+O` → still the `ls -la` output
+  - nushell 0.101+ (if installed): `SHELL=$(which nu) ./target/release/litty` → prompt jump and output selection work, `$env.XDG_DATA_DIRS` does not contain `litty`
+  - elvish (if installed): add `use litty` to `~/.config/elvish/rc.elv`, start with `SHELL=$(which elvish)` → prompt jump works
 
 - [x] **Bundled themes**
-  - `./target/release/laplace +list-themes | wc -l` → 861; `| grep -i gruvbox` lists several
+  - `./target/release/litty +list-themes | wc -l` → 861; `| grep -i gruvbox` lists several
   - `theme = Gruvbox Dark` (or any listed name, any case) + reload → colors change, including cursor and selection colors from the theme
   - `background = #000000` placed *before* `theme = Dracula` → background stays black, the rest is Dracula
   - `theme = catppuccin-mocha` / `tokyonight` (old aliases) still work
@@ -112,14 +112,14 @@ Each item lists what to run inside a Laplace window and the expected result.
 - [x] **confirm-close-surface**
   - Run `sleep 100`, press `Cmd+W` → "Close this terminal?" alert; Cancel keeps it, Close closes it
   - At an idle prompt `Cmd+W` closes without asking
-  - `sleep 100` in one window, `Cmd+Q` → "Quit Laplace?"; the red close button on that window → "Close this window?"
+  - `sleep 100` in one window, `Cmd+Q` → "Quit Litty?"; the red close button on that window → "Close this window?"
   - `confirm-close-surface = false` → never asks; `= always` → asks even at an idle prompt
 
 - [x] **macOS menu bar**
-  - The menu bar shows Laplace / Shell / Edit / View / Window; every item works on the focused window (New Window, New Tab, Split Right/Down, Close, Copy, Paste, Select All, Find, Clear Screen, Bigger/Smaller/Actual Size, Settings…)
-  - Laplace ▸ Secure Keyboard Entry → check mark + 🔒 in the title; again → off
+  - The menu bar shows Litty / Shell / Edit / View / Window; every item works on the focused window (New Window, New Tab, Split Right/Down, Close, Copy, Paste, Select All, Find, Clear Screen, Bigger/Smaller/Actual Size, Settings…)
+  - Litty ▸ Secure Keyboard Entry → check mark + 🔒 in the title; again → off
   - `Cmd+H` hides, `Ctrl+Cmd+F` toggles full screen, Window ▸ Minimize works and the Window menu lists open windows
-  - `sleep 100` then `Cmd+Q` → "Quit Laplace?" (before, `Cmd+Q` quit immediately)
+  - `sleep 100` then `Cmd+Q` → "Quit Litty?" (before, `Cmd+Q` quit immediately)
   - Close every window, then Shell ▸ New Window from the menu bar → a window opens
 
 - [x] **Kitty Caps Lock**
@@ -134,10 +134,10 @@ Each item lists what to run inside a Laplace window and the expected result.
 - [x] **Native macOS tabs**
   - `macos-native-tabs = true` + reload, `cd /tmp`, `Cmd+T` → a native tab appears in the title bar, its shell is in `/tmp`
   - `Cmd+Shift+]` / `Cmd+Shift+[` and `Cmd+1` / `Cmd+2` switch between native tabs; `Cmd+W` closes one, the others stay
-  - Without the option: `Cmd+T` uses Laplace's own tab bar as before
+  - Without the option: `Cmd+T` uses Litty's own tab bar as before
 
 - [x] **Quick Terminal (macOS)**
-  - `keybind = global:ctrl+grave_accent=toggle_quick_terminal` + reload; from another app press `Ctrl+\`` → a borderless Laplace panel drops in at the top of the screen (full width, ~40% height) and has focus
+  - `keybind = global:ctrl+grave_accent=toggle_quick_terminal` + reload; from another app press `Ctrl+\`` → a borderless Litty panel drops in at the top of the screen (full width, ~40% height) and has focus
   - Press it again → hidden, focus goes back to the previous app; again → same shell, history intact
   - Click another app while it is shown → it hides (`quick-terminal-autohide = false` keeps it)
   - `exit` in it → closed; the hotkey opens a fresh one; normal windows are unaffected
@@ -145,7 +145,7 @@ Each item lists what to run inside a Laplace window and the expected result.
 - [x] **Custom shaders**
   - `custom-shader = <repo>/examples/shaders/invert.glsl` + reload → colors inverted, text upright (not mirrored), selection / cursor / tab bar still line up with the mouse
   - Add `custom-shader = <repo>/examples/shaders/scanlines.glsl` → inverted *and* moving scanlines while focused; switch to another app → animation stops (CPU back to ~0%); `custom-shader-animation = false` → static
-  - A shader with a typo → Laplace still starts, the error is printed on stderr (run from a terminal) and that shader is skipped
+  - A shader with a typo → Litty still starts, the error is printed on stderr (run from a terminal) and that shader is skipped
   - Remove the lines + reload → normal rendering
 
 - [x] **OSC 4 recolors existing text**
@@ -153,7 +153,7 @@ Each item lists what to run inside a Laplace window and the expected result.
   - `ls --color` output follows a palette change too
 
 - [x] **Ligatures and font-feature**
-  - Install a ligature font (e.g. JetBrains Mono, Fira Code; a copy is at `/private/tmp/claude-501/-Users-linh-nguyen-Desktop-personal-laplace-terminal/d22b6e14-bfe2-4859-821c-3e2b0b0c6257/scratchpad/fonts/JetBrainsMono-Regular.ttf`) and set `font-family = JetBrains Mono` (or run `LAPLACE_FONT=<that .ttf> ./target/release/laplace` with no `font-family` in the config)
+  - Install a ligature font (e.g. JetBrains Mono, Fira Code; a copy is at `/private/tmp/claude-501/-Users-linh-nguyen-Desktop-personal-litty-terminal/d22b6e14-bfe2-4859-821c-3e2b0b0c6257/scratchpad/fonts/JetBrainsMono-Regular.ttf`) and set `font-family = JetBrains Mono` (or run `LITTY_FONT=<that .ttf> ./target/release/litty` with no `font-family` in the config)
   - `echo '-> => != === <= >= :: |> www 0xFF'` → arrows and comparison operators render as joined ligatures, each still occupying its own cells; plain words unchanged
   - Select half a ligature with the mouse, move the cursor across it → no garbage, selection colors per cell
   - Bold (`printf '\e[1m-> !=\e[0m\n'`) and italic ligatures render
@@ -197,8 +197,8 @@ Each item lists what to run inside a Laplace window and the expected result.
 - [ ] **Needs a Linux machine: Kitty lock modifiers (Linux)**
   - `kitten show-key -m kitty`, Caps Lock on, press `a` → modifiers include `caps_lock`; off → not; Num Lock on + keypad `7` → `num_lock`
 - [ ] **Needs a Linux machine: Quick Terminal (Linux)**
-  - X11: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` + reload; from another window press it → a borderless Laplace panel at the top, again → hidden
-  - Wayland: create a desktop shortcut running `laplace +toggle-quick-terminal` → toggles the same way; with Laplace not running it prints "no running Laplace"
+  - X11: `keybind = global:ctrl+grave_accent=toggle_quick_terminal` + reload; from another window press it → a borderless Litty panel at the top, again → hidden
+  - Wayland: create a desktop shortcut running `litty +toggle-quick-terminal` → toggles the same way; with Litty not running it prints "no running Litty"
 
 ## Tech debt (v0.4.1)
 
@@ -226,7 +226,7 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
   - Fix: Validate that `hex_name` contains strictly valid ASCII hexadecimal characters (`0-9`, `a-f`, `A-F`); drop or ignore requests containing invalid characters.
 - [x] **High: Restrict Kitty graphics protocol local file access & temporary file deletion (`src/graphics.rs`)**
   - Vulnerability: `t=f` / `t=t` loads arbitrary filesystem paths, allowing remote SSH sessions or untrusted output to probe local file existence/errors. `t=t` unlinks any file containing `tty-graphics-protocol`.
-  - Fix: Restrict `t=f` and `t=t` file reads to local secure temporary directories (e.g. `$TMPDIR`, `/tmp`) or private cache; ensure `t=t` unlinks only files strictly within Laplace's designated temporary directory.
+  - Fix: Restrict `t=f` and `t=t` file reads to local secure temporary directories (e.g. `$TMPDIR`, `/tmp`) or private cache; ensure `t=t` unlinks only files strictly within Litty's designated temporary directory.
 - [x] **Medium: Positional argument delimiter `--` and executable guard in `open_target` (`src/main.rs`)**
   - Vulnerability: Direct argument passing to `open` (macOS) and `xdg-open` (Linux) without `--` permits flag injection for targets starting with `-`. On macOS, clicking `.app` / `.command` files via `open` executes them directly.
   - Fix: Pass `--` delimiter before targets (`open -- <path>`). Guard or confirm opening executable files/scripts from terminal clicks or OSC 8 hyperlinks.
@@ -234,8 +234,8 @@ Baseline status: 186 unit/integration tests passing, clean `cargo clippy --all-t
   - Vulnerability: Child processes close only `master` and `slave`. Any descriptors opened without `O_CLOEXEC` by drivers, threads, or concurrent PTY allocations leak into child shells.
   - Fix: Call `closefrom(3)` (macOS/BSD) or `close_range(3, !0, 0)` (Linux) in the child process immediately after `fork()`.
 - [x] **Low: Control socket placement in user-private directory (`src/hotkey.rs`)**
-  - Vulnerability: When `XDG_RUNTIME_DIR` is missing, `/tmp/laplace-{uid}.sock` can be pre-created by other users in `/tmp` (sticky bit), causing `bind` to fail (local DoS on global hotkey).
-  - Fix: Store the control socket in a secure private directory (e.g., `~/.cache/laplace/` or Darwin user temp directory).
+  - Vulnerability: When `XDG_RUNTIME_DIR` is missing, `/tmp/litty-{uid}.sock` can be pre-created by other users in `/tmp` (sticky bit), causing `bind` to fail (local DoS on global hotkey).
+  - Fix: Store the control socket in a secure private directory (e.g., `~/.cache/litty/` or Darwin user temp directory).
 - [x] **Quality / Memory: Font Mmap lifecycle on configuration reload (`src/atlas.rs`)**
   - Debt: `Box::leak` in `shaper_for` leaks `memmap2::Mmap` on every config reload (`Cmd+Shift+,`).
   - Fix: Manage mmap lifetimes using reference-counted or owning structures (`Arc<memmap2::Mmap>`) so reloads reclaim memory.
@@ -405,11 +405,11 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 
 - [x] Multiple windows (New Window, `Cmd+N` / `Ctrl+Shift+N`)
 - [x] Quick Terminal on macOS (`keybind = global:cmd+grave_accent=toggle_quick_terminal`, `quick-terminal-autohide`)
-- [x] Quick Terminal global hotkey on Linux: X11 key grab (`keybind = global:...`), and `laplace +toggle-quick-terminal` over a control socket for a Wayland desktop shortcut
-- [x] macOS menu bar (Laplace / Shell / Edit / View / Window; `Cmd+Q` goes through `confirm-close-surface`)
+- [x] Quick Terminal global hotkey on Linux: X11 key grab (`keybind = global:...`), and `litty +toggle-quick-terminal` over a control socket for a Wayland desktop shortcut
+- [x] macOS menu bar (Litty / Shell / Edit / View / Window; `Cmd+Q` goes through `confirm-close-surface`)
 - [x] Native macOS tabs (`macos-native-tabs = true`: `Cmd+T` opens a window tab; `Cmd+1..9` / `Cmd+Shift+[ ]` switch them)
 - [x] Secure Keyboard Entry (macOS): `keybind = <trigger>=toggle_secure_input`, 🔒 in the title, released while unfocused
-- [x] Secure Keyboard Entry from a menu bar item (Laplace ▸ Secure Keyboard Entry, with check mark)
+- [x] Secure Keyboard Entry from a menu bar item (Litty ▸ Secure Keyboard Entry, with check mark)
 - [x] Drag and drop files to paste their shell-quoted paths
 - [x] Scrollbar (overlay thumb while scrolled back)
 - [x] Draggable scrollbar
@@ -421,7 +421,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 ## Shell integration
 
 - [x] Automatic zsh, bash and fish integration (scripts injected, no dotfile edits; previously only env vars were exported)
-- [x] nushell (vendor autoload) and elvish (`use laplace`) integration
+- [x] nushell (vendor autoload) and elvish (`use litty`) integration
 - [x] bash 3.2 (macOS `/bin/bash`): OSC 133;C from a DEBUG trap (skipped if another tool owns the trap)
 - [x] Jump to previous / next prompt using OSC 133 marks
 - [x] Select or copy the output of the last command using OSC 133 marks
@@ -432,7 +432,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 ### Security Fixes
 - [ ] Fix token leak in process table: pass GitHub API token via header file/stdin instead of command line flags in `curl` (`src/update.rs`)
 - [ ] Restrict Kitty graphics file protocol (`medium=f`) to user-configured safe directories instead of loose blacklist (`src/graphics.rs`)
-- [ ] Restrict / validate POSIX shared memory unlinking (`shm_unlink`) to Laplace-owned prefixes (`src/graphics.rs`)
+- [ ] Restrict / validate POSIX shared memory unlinking (`shm_unlink`) to Litty-owned prefixes (`src/graphics.rs`)
 - [ ] Gate OSC 52 clipboard write behind user confirmation or configuration flag (`src/grid.rs`, `src/main.rs`)
 - [ ] Add cryptographic signature verification (Minisign / GPG) for auto-updates (`src/update.rs`)
 - [ ] Fix Unix domain socket creation permission race window (`src/hotkey.rs`)

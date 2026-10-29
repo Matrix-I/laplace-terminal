@@ -1111,15 +1111,15 @@ mod tests {
     /// Shape of a real `/releases/latest` response: each asset nests an `uploader` object
     /// between `name` and `browser_download_url`, which defeated the old regex.
     const LATEST_JSON: &str = r#"{
-        "html_url": "https://github.com/Matrix-I/laplace-terminal/releases/tag/v0.4.0",
+        "html_url": "https://github.com/Matrix-I/litty-terminal/releases/tag/v0.4.0",
         "author": {"login": "Matrix-I", "html_url": "https://github.com/Matrix-I", "id": 1},
-        "tag_name": "v0.4.0", "draft": false, "prerelease": false, "name": "Laplace ⚡ v0.4.0",
+        "tag_name": "v0.4.0", "draft": false, "prerelease": false, "name": "Litty ⚡ v0.4.0",
         "assets": [
-            {"id": 1, "name": "laplace-linux", "label": "", "size": 123,
+            {"id": 1, "name": "litty-linux", "label": "", "size": 123,
              "uploader": {"login": "Matrix-I", "site_admin": false},
-             "browser_download_url": "https://github.com/Matrix-I/laplace-terminal/releases/download/v0.4.0/laplace-linux"},
+             "browser_download_url": "https://github.com/Matrix-I/litty-terminal/releases/download/v0.4.0/litty-linux"},
             {"id": 2, "name": "SHA256SUMS.txt", "uploader": {"login": "Matrix-I"},
-             "browser_download_url": "https://github.com/Matrix-I/laplace-terminal/releases/download/v0.4.0/SHA256SUMS.txt"}
+             "browser_download_url": "https://github.com/Matrix-I/litty-terminal/releases/download/v0.4.0/SHA256SUMS.txt"}
         ],
         "body": "Notes with \"quotes\", braces {} and a newline\n"
     }"#;
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("laplace-update-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("litty-update-test-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -1204,10 +1204,10 @@ mod tests {
         let r = parse_release_json(LATEST_JSON, AutoUpdateChannel::Stable).unwrap();
         assert_eq!(r.tag_name, "v0.4.0");
         assert_eq!(r.version, Version { major: 0, minor: 4, patch: 0 });
-        assert_eq!(r.html_url, "https://github.com/Matrix-I/laplace-terminal/releases/tag/v0.4.0");
+        assert_eq!(r.html_url, "https://github.com/Matrix-I/litty-terminal/releases/tag/v0.4.0");
         let names: Vec<_> = r.assets.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["laplace-linux", "SHA256SUMS.txt"]);
-        assert!(r.assets[0].download_url.ends_with("/v0.4.0/laplace-linux"));
+        assert_eq!(names, ["litty-linux", "SHA256SUMS.txt"]);
+        assert!(r.assets[0].download_url.ends_with("/v0.4.0/litty-linux"));
     }
 
     #[test]
@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     fn test_tag_from_release_url() {
         assert_eq!(tag_from_release_url(&format!("{WEB_TAG_PREFIX}v0.3.0\n")), Some("v0.3.0"));
-        assert_eq!(tag_from_release_url("https://github.com/Matrix-I/laplace-terminal/releases"), None);
+        assert_eq!(tag_from_release_url("https://github.com/Matrix-I/litty-terminal/releases"), None);
         assert_eq!(tag_from_release_url(&format!("{WEB_TAG_PREFIX}..")), None);
         assert_eq!(tag_from_release_url("https://evil.example/releases/tag/v9.9.9"), None);
     }
@@ -1328,16 +1328,16 @@ mod tests {
     #[test]
     fn test_download_reuses_verified_cache_without_network() {
         let dir = temp_dir("cache");
-        let r = release("v9.9.9", &["laplace-test", SUMS_NAME]);
+        let r = release("v9.9.9", &["litty-test", SUMS_NAME]);
         let release_dir = dir.join(&r.tag_name);
         fs::create_dir_all(&release_dir).unwrap();
-        fs::write(release_dir.join("laplace-test"), b"binary").unwrap();
-        fs::write(release_dir.join(SUMS_NAME), format!("{}  laplace-test\n", sha256_digest(b"binary"))).unwrap();
+        fs::write(release_dir.join("litty-test"), b"binary").unwrap();
+        fs::write(release_dir.join(SUMS_NAME), format!("{}  litty-test\n", sha256_digest(b"binary"))).unwrap();
 
         // Asset URLs are unreachable, so success proves the cached copy was used.
-        let (path, name) = download_and_verify_in(&dir, &r, &["laplace-test".to_string()]).unwrap();
-        assert_eq!(name, "laplace-test");
-        assert_eq!(path, release_dir.join("laplace-test"));
+        let (path, name) = download_and_verify_in(&dir, &r, &["litty-test".to_string()]).unwrap();
+        assert_eq!(name, "litty-test");
+        assert_eq!(path, release_dir.join("litty-test"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1348,7 +1348,7 @@ mod tests {
             fs::create_dir_all(dir.join(sub)).unwrap();
         }
         fs::write(dir.join(".lock"), b"").unwrap();
-        fs::write(dir.join("laplace-macos"), b"old layout").unwrap();
+        fs::write(dir.join("litty-macos"), b"old layout").unwrap();
         prune_other_releases(&dir, "v0.4.0");
         let mut left: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
         left.sort();

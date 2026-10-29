@@ -1,6 +1,6 @@
 #!/bin/bash
 # Interactive manual test runner for the "Pending manual test" items in ROADMAP.md.
-# Run it inside a Laplace window:
+# Run it inside a Litty window:
 #   bash scripts/manual-test.sh          # every group
 #   bash scripts/manual-test.sh 2 7 24   # only these groups
 #   bash scripts/manual-test.sh -l       # list the groups
@@ -9,8 +9,8 @@
 # scripts/manual-test-results.md.
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-LOG=${LAPLACE_TEST_LOG:-$REPO/scripts/manual-test-results.md}
-BIN=$REPO/target/release/laplace
+LOG=${LITTY_TEST_LOG:-${LAPLACE_TEST_LOG:-$REPO/scripts/manual-test-results.md}}
+BIN=$REPO/target/release/litty
 export LC_ALL=en_US.UTF-8
 OS=$(uname -s)
 
@@ -165,7 +165,7 @@ g2() { GROUP="modifyOtherKeys + Cmd/Super for Kitty"
 }
 
 g3() { GROUP="Notifications, progress, pointer, bell"
-    say "switch to another app within 3 s…"; sleep 3; printf '\e]9;Build finished\a'; verdict "notification 'Laplace / Build finished'"
+    say "switch to another app within 3 s…"; sleep 3; printf '\e]9;Build finished\a'; verdict "notification 'Litty / Build finished'"
     say "switch to another app within 3 s…"; sleep 3; printf '\e]777;notify;Tests;All passed\a'; verdict "notification titled 'Tests'"
     run "printf '\e]9;4;1;45\a'"; verdict "title starts with '45% '"
     run "printf '\e]9;4;3\a'"; verdict "title starts with '⋯ '"
@@ -175,7 +175,7 @@ g3() { GROUP="Notifications, progress, pointer, bell"
     run "printf '\e]22;text\a'"; verdict "I-beam"
     run "printf '\e]22;\a'"; verdict "arrow"
     say "open a 2nd tab, run this there, then switch to this tab:"; echo "sleep 2; printf '\a'" | paste_box; pause; verdict "that tab gets 🔔, cleared when you visit it"
-    say "switch to another app within 3 s…"; sleep 3; printf '\a'; verdict "Laplace bounces in the Dock"
+    say "switch to another app within 3 s…"; sleep 3; printf '\a'; verdict "Litty bounces in the Dock"
 }
 
 g4() { GROUP="XTGETTCAP, DECRQSS, pixel mouse, color scheme"
@@ -192,7 +192,7 @@ g4() { GROUP="XTGETTCAP, DECRQSS, pixel mouse, color scheme"
 }
 
 g5() { GROUP="Config: padding, theme, keybind, colors, title, copy-on-select"
-    say "Add each block to ~/.laplace/config, Cmd+Shift+, to reload, check, then remove it."
+    say "Add each block to ~/.litty/config, Cmd+Shift+, to reload, check, then remove it."
     printf '%s\n' 'window-padding-x = 24' 'window-padding-y = 12' 'window-padding-balance = true' | paste_box; pause; verdict "wider margins, grid centered"
     echo 'theme = light:Horizon Bright,dark:Dracula' | paste_box; note "(your config sets background/foreground after theme: comment them out for this one)"; pause; verdict "Dracula; Light appearance → Horizon Bright live"
     printf '%s\n' 'keybind = cmd+t=new_split:right' 'keybind = cmd+d=unbind' 'keybind = ctrl+shift+h=text:hello\n' | paste_box; pause; verdict "Cmd+T splits, Cmd+D nothing, Ctrl+Shift+H types hello+Enter"
@@ -203,12 +203,12 @@ g5() { GROUP="Config: padding, theme, keybind, colors, title, copy-on-select"
 }
 
 g6() { GROUP="Shell integration, prompt jump, output selection"
-    auto "LAPLACE_SHELL_INTEGRATION_DIR set" "${LAPLACE_SHELL_INTEGRATION_DIR:-<empty>}" '*/laplace/shell-integration/*'
+    auto "LITTY_SHELL_INTEGRATION_DIR set" "${LITTY_SHELL_INTEGRATION_DIR:-${LAPLACE_SHELL_INTEGRATION_DIR:-<empty>}}" '*/litty/shell-integration/*'
     say "Quit this script (Ctrl+C) or do these in another tab:"
     printf '%s\n' 'seq 50; ls; seq 30' '# Cmd+Shift+↑ repeatedly, Cmd+Shift+↓ back to live' 'ls -la' '# Cmd+Shift+O → only the ls output is selected and copied' 'cd /tmp' '# Cmd+T → new tab in /tmp' | paste_box; pause
     verdict "prompt jump"; verdict "Cmd+Shift+O selects ls output"; verdict "Cmd+T inherits cwd"
     echo 'shell-integration-features = cursor,title' | paste_box; pause; verdict "bar cursor at prompt, block in vim, title shows dir then command"
-    echo 'shell-integration = none' | paste_box; note "(new window, then echo \$LAPLACE_SHELL_INTEGRATION_DIR is empty)"; pause; verdict "integration off"
+    echo 'shell-integration = none' | paste_box; note "(new window, then echo \$LITTY_SHELL_INTEGRATION_DIR is empty)"; pause; verdict "integration off"
     echo "SHELL=/bin/bash $BIN" | paste_box; pause; verdict "bash: profile loads, prompt jump works"
 }
 
@@ -274,12 +274,12 @@ g13() { GROUP="Bundled themes"
 g14() { GROUP="confirm-close-surface"
     say "in another tab: sleep 100, then Cmd+W"; pause; verdict "alert; Cancel keeps, Close closes"
     verdict "idle prompt Cmd+W closes without asking"
-    verdict "Cmd+Q asks 'Quit Laplace?', red button asks 'Close this window?'"
+    verdict "Cmd+Q asks 'Quit Litty?', red button asks 'Close this window?'"
     printf '%s\n' 'confirm-close-surface = false' '# then = always' | paste_box; pause; verdict "false never asks, always always asks"
 }
 
 g15() { GROUP="macOS menu bar"
-    verdict "Laplace/Shell/Edit/View/Window menus, every item works"
+    verdict "Litty/Shell/Edit/View/Window menus, every item works"
     verdict "Secure Keyboard Entry menu item toggles ✓ and 🔒"
     verdict "Cmd+H, Ctrl+Cmd+F, Minimize, Window menu lists windows"
     verdict "close all windows, Shell ▸ New Window opens one"
@@ -311,7 +311,7 @@ g20() { GROUP="Custom shaders"
     echo "custom-shader = $REPO/examples/shaders/invert.glsl" | paste_box; pause; verdict "inverted, upright, mouse lines up"
     echo "custom-shader = $REPO/examples/shaders/scanlines.glsl" | paste_box; pause; verdict "scanlines animate only while focused"
     echo 'custom-shader-animation = false' | paste_box; pause; verdict "static"
-    note "a shader with a typo: Laplace still starts, error on stderr"; verdict "broken shader skipped"
+    note "a shader with a typo: Litty still starts, error on stderr"; verdict "broken shader skipped"
 }
 
 g21() { GROUP="OSC 4 recolors existing text"
@@ -371,7 +371,7 @@ g27() { GROUP="Kitty lock modifiers (Linux)"
 
 g28() { GROUP="Quick Terminal (Linux)"
     [ "$OS" = Linux ] || { note "Linux only"; log skip "all" "not on Linux"; return; }
-    verdict "X11 global hotkey toggles"; verdict "laplace +toggle-quick-terminal toggles"
+    verdict "X11 global hotkey toggles"; verdict "litty +toggle-quick-terminal toggles"
 }
 
 g29() { GROUP="Debt: Kitty keys in the real app"
