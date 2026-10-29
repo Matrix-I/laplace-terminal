@@ -493,7 +493,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Throttle and rate-limit thread/process spawning in `copy_to_clipboard` and `spawn_detached` (`src/main.rs`)
 - [x] Eliminate synchronous main-thread 750ms blocking on clipboard paste (`src/main.rs`)
 - [x] Memoize parsed font metadata in `fontdb.rs` to eliminate massive synchronous disk I/O on font cache miss (`src/fontdb.rs`)
-- [ ] Increase default glyph atlas dimensions and prevent invisible `BLANK_SLOT` drops under high Unicode/CJK glyph diversity (`src/atlas.rs`, `src/renderer.rs`)
+- [x] Increase default glyph atlas dimensions and prevent invisible `BLANK_SLOT` drops under high Unicode/CJK glyph diversity (`src/atlas.rs`, `src/renderer.rs`)
 
 ### Code Quality & Logic Integrity
 - [x] Fix zero-width character column calculation (`char_width(c).max(1)`) in search match selections (`src/search.rs`)

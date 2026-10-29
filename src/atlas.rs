@@ -308,9 +308,9 @@ impl Atlas {
         // Extra (or missing) height is split above and below the text.
         let baseline = (lm.ascent + lm.line_gap / 2.0 + (cell_h as f32 - natural_h as f32) / 2.0).round() as i32;
 
-        // 512×512 normally; only grow for huge font sizes so ASCII still fits.
-        let mut size = 512u32;
-        while (size / cell_w) * (size / cell_h) < 256 && size < 4096 {
+        // 2048×2048 default (only 4MB VRAM for R8); ensures thousands of CJK/Unicode glyphs fit without eviction.
+        let mut size = 2048u32;
+        while (size / cell_w) * (size / cell_h) < 1024 && size < 4096 {
             size *= 2;
         }
         let slots_per_row = size / cell_w;
@@ -547,11 +547,14 @@ impl Atlas {
             self.lru_push_tail(s);
             s
         } else {
-            // Constant-time O(1) LRU eviction among slots not already used for this frame.
-            let candidate = self.lru_head;
-            if candidate == 0 || self.slot_used[candidate as usize] == self.frame {
+            // Constant-time O(1) LRU eviction. Prefer a slot not yet used in this frame,
+            // but if the atlas is saturated, evict the oldest LRU slot rather than dropping
+            // the glyph invisibly into BLANK_SLOT.
+            let candidate = if self.lru_head != 0 {
+                self.lru_head
+            } else {
                 return BLANK_SLOT;
-            }
+            };
             let i = candidate as usize;
             self.lru_touch(candidate);
             let old_cp = self.slot_cp[i];
