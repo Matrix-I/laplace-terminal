@@ -6,18 +6,14 @@
 
 /// Bidi class of a cell's (base) character, reduced to what the implicit
 /// rules need.
+#[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Class {
-    /// Left-to-right letter.
-    L,
-    /// Right-to-left letter (Hebrew, Arabic, Syriac, Thaana, N'Ko, ...).
-    R,
-    /// European digit.
-    En,
-    /// Arabic-Indic digit.
-    An,
-    /// Everything else: spaces, punctuation, symbols, empty cells.
-    N,
+    N = 0,
+    L = 1,
+    R = 2,
+    En = 3,
+    An = 4,
 }
 
 /// Whether `c` is a strong right-to-left character.
@@ -48,53 +44,49 @@ pub fn visual_order(chars: &[char], levels: &mut Vec<u8>, order: &mut Vec<u16>) 
     }
     let n = chars.len();
     levels.clear();
-    levels.resize(n, 0);
-    // W rules + I1: R -> 1, digits after a right-to-left letter -> 2 (else
-    // they are left-to-right, level 0), L -> 0. Neutrals resolved below.
+    // W rules + I1: store classes in levels first as scratch space to avoid heap allocations.
     let mut last_strong = Class::L;
-    let classes: Vec<Class> = chars
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| {
-            // A wide character's second cell goes with it.
-            if c == '\0' && i > 0 && chars[i - 1] != '\0' && crate::grid::char_width(chars[i - 1]) == 2 {
-                return Class::N;
-            }
-            let k = class(c);
-            match k {
-                Class::L | Class::R => last_strong = k,
-                Class::En if last_strong == Class::L => return Class::L,
-                _ => {}
-            }
-            k
-        })
-        .collect();
-    for (lvl, k) in levels.iter_mut().zip(&classes) {
-        *lvl = match k {
-            Class::R => 1,
-            Class::En | Class::An => 2,
-            _ => 0,
-        };
-    }
+    levels.extend(chars.iter().enumerate().map(|(i, &c)| {
+        if c == '\0' && i > 0 && chars[i - 1] != '\0' && crate::grid::char_width(chars[i - 1]) == 2 {
+            return Class::N as u8;
+        }
+        let mut k = class(c);
+        match k {
+            Class::L | Class::R => last_strong = k,
+            Class::En if last_strong == Class::L => k = Class::L,
+            _ => {}
+        }
+        k as u8
+    }));
+
     // N1 / N2: a run of neutrals between two right-to-left sides (digits
     // count as right-to-left) is right-to-left, else it takes the paragraph's
     // left-to-right level.
-    let rtl_side = |k: Class| matches!(k, Class::R | Class::En | Class::An);
+    let rtl_side = |k: u8| k == Class::R as u8 || k == Class::En as u8 || k == Class::An as u8;
     let mut i = 0;
     while i < n {
-        if classes[i] != Class::N {
+        if levels[i] != Class::N as u8 {
             i += 1;
             continue;
         }
         let start = i;
-        while i < n && classes[i] == Class::N {
+        while i < n && levels[i] == Class::N as u8 {
             i += 1;
         }
-        let before = start.checked_sub(1).map(|j| classes[j]);
-        let after = (i < n).then(|| classes[i]);
+        let before = start.checked_sub(1).map(|j| levels[j]);
+        let after = (i < n).then(|| levels[i]);
         if before.is_some_and(rtl_side) && after.is_some_and(rtl_side) {
-            levels[start..i].fill(1);
+            levels[start..i].fill(Class::R as u8);
         }
+    }
+
+    // Convert classes to bidi levels: R -> 1, En/An -> 2, others -> 0.
+    for lvl in levels.iter_mut() {
+        *lvl = match *lvl {
+            k if k == Class::R as u8 => 1,
+            k if k == Class::En as u8 || k == Class::An as u8 => 2,
+            _ => 0,
+        };
     }
     // Keep a wide character's two cells in order: same level as the first.
     for j in 1..n {

@@ -333,6 +333,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Eliminate heap allocations in mouse event encoding (`src/mouse.rs`, `src/main.rs`)**
   - Vulnerability / Event loop allocation churn: `mouse::encode()` allocated a heap `Vec<u8>` on every mouse event (motion, drag, press, release) via `format!(...).into_bytes()` or `vec![...]`. In terminal applications tracking mouse motion (e.g. Vim, Tmux, Micro, Kakoune), this triggered hundreds of transient heap allocations per second.
   - Fix: Encode directly into a 32-byte stack buffer returning `Option<([u8; 32], usize)>`, passing slice `&bytes[..len]` to `pane.pty.write()`.
+- [x] **Low: Eliminate heap allocation churn in visual order and bidi column lookups (`src/bidi.rs`, `src/grid.rs`)**
+  - Vulnerability / Render loop allocation churn: In `bidi::visual_order`, `let classes: Vec<Class> = ... .collect();` allocated a heap vector every frame for each row containing right-to-left text. In `Grid::logical_col` and `Grid::cursor_visual_col`, every mouse movement, link hover, or cursor update allocated 3 temporary `Vec` instances on RTL rows.
+  - Fix: Store character classes directly in the `levels` scratch buffer to resolve neutrals before mapping to bidi levels (zero allocations in `visual_order`). Introduce thread-local reusable scratch buffers in `Grid::logical_col` and `Grid::cursor_visual_col`.
 
 
 

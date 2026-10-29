@@ -492,6 +492,11 @@ pub struct Grid {
     joiner: bool,
 }
 
+thread_local! {
+    static BIDI_SCRATCH: std::cell::RefCell<(Vec<char>, Vec<u8>, Vec<u16>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
+}
+
 impl Grid {
     pub fn new(cols: usize, rows: usize) -> Self {
         let cols = cols.max(1);
@@ -1469,13 +1474,20 @@ impl Grid {
         crate::bidi::visual_order(chars, levels, order)
     }
 
+
     /// The logical column drawn at visual column `col` of display row `r`.
     pub fn logical_col(&self, r: usize, col: usize) -> usize {
-        let mut order = Vec::new();
-        if r < self.rows && self.bidi_order(r, &mut Vec::new(), &mut Vec::new(), &mut order) {
-            return order.get(col).map_or(col, |&l| l as usize);
+        if r >= self.rows {
+            return col;
         }
-        col
+        BIDI_SCRATCH.with(|scratch| {
+            let (chars, levels, order) = &mut *scratch.borrow_mut();
+            if self.bidi_order(r, chars, levels, order) {
+                order.get(col).map_or(col, |&l| l as usize)
+            } else {
+                col
+            }
+        })
     }
 
     /// The visual column the cursor at logical column `col` of display row
@@ -1484,17 +1496,23 @@ impl Grid {
     /// (drawn at the run's right end): typing `echo '` before a right-to-left
     /// autosuggestion keeps the cursor next to the quote.
     pub fn cursor_visual_col(&self, r: usize, col: usize) -> usize {
-        let (mut levels, mut order) = (Vec::new(), Vec::new());
-        if r < self.rows && self.bidi_order(r, &mut Vec::new(), &mut levels, &mut order) {
-            let visual = |l: usize| order.iter().position(|&o| o as usize == l);
-            if let Some(prev) = col.checked_sub(1).filter(|&p| levels.get(p) == Some(&0)) {
-                if let Some(v) = visual(prev).map(|v| v + 1).filter(|&v| v < order.len()) {
-                    return v;
-                }
-            }
-            return visual(col).unwrap_or(col);
+        if r >= self.rows {
+            return col;
         }
-        col
+        BIDI_SCRATCH.with(|scratch| {
+            let (chars, levels, order) = &mut *scratch.borrow_mut();
+            if self.bidi_order(r, chars, levels, order) {
+                let visual = |l: usize| order.iter().position(|&o| o as usize == l);
+                if let Some(prev) = col.checked_sub(1).filter(|&p| levels.get(p) == Some(&0)) {
+                    if let Some(v) = visual(prev).map(|v| v + 1).filter(|&v| v < order.len()) {
+                        return v;
+                    }
+                }
+                visual(col).unwrap_or(col)
+            } else {
+                col
+            }
+        })
     }
 
     /// The grapheme cluster text of a cell's `codepoint`, if it holds one.
