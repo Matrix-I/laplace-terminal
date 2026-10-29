@@ -313,14 +313,23 @@ mod imp {
         }
     }
 
-    static BLUR_SETUP: AtomicBool = AtomicBool::new(false);
-
     /// Background blur: an NSVisualEffectView behind the window content.
     unsafe fn setup_visual_effect_view(ns_window: Id) {
-        if BLUR_SETUP.swap(true, Ordering::SeqCst) {
-            return;
-        }
         let Some(content_view) = send_id(ns_window, c"contentView") else { return };
+        // Avoid duplicate effect views if config is re-applied to the same window
+        if let Some(effect_cls) = class(c"NSVisualEffectView") {
+            let mut already_has_blur = false;
+            if let Some(subviews) = send_id(content_view, c"subviews") {
+                for_each_in_array(subviews, |subview| {
+                    if msg_send!(subview, c"isKindOfClass:", effect_cls => Id; -> bool) {
+                        already_has_blur = true;
+                    }
+                });
+            }
+            if already_has_blur {
+                return;
+            }
+        }
         let Some(alloc) = class(c"NSVisualEffectView").and_then(|cls| send_id(cls, c"alloc")) else { return };
 
         let bounds = msg_send!(content_view, c"bounds"; -> NSRect);

@@ -306,6 +306,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Cache GPU BindGroups in PostFx to prevent per-frame allocations (`src/postfx.rs`)**
   - Vulnerability / GPU allocation churn: In `PostFx::run()`, `device.create_bind_group` was called every frame for each shader pipeline pass, allocating hundreds of transient GPU bind groups per second.
   - Fix: Pre-create `bind_groups` inside `cell_target()` when render targets resize, reuse them in `run()`, and release them in `shrink()`.
+- [x] **Low: Support vibrancy & background blur across multiple windows (`src/macos.rs`)**
+  - Vulnerability / State bug: `setup_visual_effect_view` used a global process-wide `AtomicBool` (`BLUR_SETUP`), which prevented vibrancy and blur from ever being attached to secondary windows (`Cmd+N`).
+  - Fix: Remove `BLUR_SETUP` and check the window's `contentView.subviews` for existing `NSVisualEffectView` instances before attaching, ensuring every window receives blur without duplicates.
 
 
 
