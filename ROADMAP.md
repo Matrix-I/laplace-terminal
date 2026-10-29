@@ -297,9 +297,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prune on-screen image placements and orphaned auto-id images on screen clear & alt-screen exit (`src/graphics.rs`, `src/grid.rs`)**
   - Vulnerability / VRAM & RAM leak: On `Cmd+K` (`clear_screen_and_history`), placements on visible rows (`lines_pushed..lines_pushed + rows`) were never deleted, leaving phantom image placements and unreferenced image buffers in RAM. Furthermore, on exiting the alternate screen or clearing lines, auto-assigned images (`id >= (1 << 24)`) whose placements were deleted remained in `self.graphics.images` indefinitely until byte-budget eviction.
   - Fix: Add `Store::prune_dead_auto_ids()` and invoke it in `delete_lines()`, `set_alt(false, ...)`, and `clear_screen_and_history()`.
-- [x] **Low: Release macOS secure keyboard input on window Drop (`src/main.rs`)**
-  - Vulnerability / OS state leak: If a window with secure keyboard input enabled was closed while focused, `macos::set_secure_input(false)` was not called, leaving secure input engaged across the entire operating system.
-  - Fix: Implement `Drop` for `State` to guarantee `macos::set_secure_input(false)` is invoked whenever a focused window with secure input is dropped.
+- [x] **Medium: Prevent system-wide macOS Secure Event Input leak on window drop / dock hide (`src/main.rs`)**
+  - Vulnerability / OS resource leak: When a window with `secure_input: true` and `focused: true` was closed or hidden into the Dock without tabs, `macos::set_secure_input(false)` was never called because `State` lacked a `Drop` implementation. Because `EnableSecureEventInput()` is an OS-wide reference-counted Carbon API, this left the entire operating system permanently locked in Secure Keyboard Entry mode, breaking global hotkeys and accessibility utilities across all applications.
+  - Fix: Implement `Drop for State` to guarantee `macos::set_secure_input(false)` on drop, and explicitly release secure input and close search popups in `hide_or_exit_last_window()`.
 
 
 
