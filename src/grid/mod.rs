@@ -1657,6 +1657,9 @@ impl Grid {
                 self.copy_row(r + n, r);
             }
             self.clear_rows(b + 1 - n, b + 1);
+            if self.alt_active && !self.graphics.placements.is_empty() {
+                self.graphics.scroll_alt(self.lines_pushed + t, self.lines_pushed + b, n);
+            }
         }
     }
 
@@ -1669,6 +1672,9 @@ impl Grid {
             self.copy_row(r - n, r);
         }
         self.clear_rows(t, t + n);
+        if self.alt_active && !self.graphics.placements.is_empty() {
+            self.graphics.scroll_alt_down(self.lines_pushed + t, self.lines_pushed + b, n);
+        }
     }
 
     /// Feed one byte from the PTY. APC strings (the Kitty graphics protocol)
@@ -4445,5 +4451,31 @@ mod tests {
         g.clear_history();
         assert_eq!(g.graphics.virtuals.len(), 0, "virtual placement pruned on clear_history");
         assert!(g.graphics.image(id).is_none(), "auto-id image freed on clear_history");
+    }
+
+    #[test]
+    fn alt_screen_linefeed_scroll_prunes_stale_placements() {
+        let mut g = Grid::new(20, 4);
+        g.set_alt(true, false);
+        assert!(g.alt_active);
+
+        // Insert auto-id image and place it on row 0 covering 2 rows
+        let id = g.graphics.insert(0, 20, 40, vec![0; 20 * 40 * 4]);
+        g.place_image(id, [0, 0, 20, 40], 2, 2, 0, 1, true, false);
+        assert_eq!(g.graphics.placements.len(), 1);
+        assert_eq!(g.graphics.placements[0].rows, 2);
+        assert_eq!(g.graphics.placements[0].line, g.lines_pushed);
+
+        // Scroll up by 1 line on the alternate screen (rows 0..=3)
+        g.scroll_up_in(0, 3, 1, true);
+        assert_eq!(g.graphics.placements.len(), 1);
+        assert_eq!(g.graphics.placements[0].rows, 1, "top row clipped");
+        assert_eq!(g.graphics.placements[0].line, g.lines_pushed);
+        assert!(g.graphics.image(id).is_some());
+
+        // Scroll up by 1 more line: placement completely scrolled off top of alt screen
+        g.scroll_up_in(0, 3, 1, true);
+        assert!(g.graphics.placements.is_empty(), "placement pruned after scrolling off alt screen");
+        assert!(g.graphics.image(id).is_none(), "auto-id image freed after placement pruned");
     }
 }

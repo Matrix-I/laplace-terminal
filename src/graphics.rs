@@ -494,6 +494,71 @@ impl Store {
         self.placements.retain(|p| p.alt != alt || p.line + p.rows <= lines.start || p.line >= lines.end);
         self.prune_dead_auto_ids();
     }
+
+    /// Scroll alternate-screen placements in region `top_line..=bot_line` up by `n` lines.
+    /// Placements scrolled out of the region are pruned, and auto-id images are freed.
+    pub fn scroll_alt(&mut self, top_line: usize, bot_line: usize, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.placements.retain_mut(|p| {
+            if !p.alt {
+                return true;
+            }
+            let p_end = p.line + p.rows;
+            if p.line > bot_line || p_end <= top_line {
+                return true;
+            }
+            if p.line < top_line + n {
+                if p_end <= top_line + n {
+                    // Completely scrolled off the top of the region
+                    return false;
+                }
+                let dy = (top_line + n) - p.line;
+                let cell_h = p.src[3] as f32 / p.rows as f32;
+                let clipped_px = (dy as f32 * cell_h).round() as u32;
+                p.src[1] += clipped_px;
+                p.src[3] = p.src[3].saturating_sub(clipped_px);
+                p.rows -= dy;
+                p.line = top_line;
+                p.rows > 0 && p.src[3] > 0
+            } else {
+                p.line -= n;
+                true
+            }
+        });
+        self.prune_dead_auto_ids();
+    }
+
+    /// Scroll alternate-screen placements in region `top_line..=bot_line` down by `n` lines.
+    pub fn scroll_alt_down(&mut self, top_line: usize, bot_line: usize, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.placements.retain_mut(|p| {
+            if !p.alt {
+                return true;
+            }
+            let p_end = p.line + p.rows;
+            if p.line > bot_line || p_end <= top_line {
+                return true;
+            }
+            if p.line + n > bot_line {
+                // Scrolled entirely off the bottom
+                return false;
+            }
+            p.line += n;
+            if p.line + p.rows > bot_line + 1 {
+                let overflow = (p.line + p.rows) - (bot_line + 1);
+                let cell_h = p.src[3] as f32 / p.rows as f32;
+                let clipped_px = (overflow as f32 * cell_h).round() as u32;
+                p.src[3] = p.src[3].saturating_sub(clipped_px);
+                p.rows -= overflow;
+            }
+            p.rows > 0 && p.src[3] > 0
+        });
+        self.prune_dead_auto_ids();
+    }
 }
 
 // ---------------------------------------------------------------------------
