@@ -2172,7 +2172,7 @@ fn hide_or_exit_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
             macos::set_secure_input(false);
         }
         s.history_search.close();
-        s.search.close();
+        close_search(s);
         s.tab_titles.clear();
         s.hovered_link = None;
         s.selecting = false;

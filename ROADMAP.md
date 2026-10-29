@@ -327,6 +327,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prune orphaned auto-id images during grid resize reflow (`src/grid.rs`)**
   - Vulnerability / VRAM leak: During `Grid::resize()`, placements in scrollback truncated by text reflow were dropped from `self.graphics.placements`, but `prune_dead_auto_ids()` was never called. Auto-id images whose placements were dropped lingered in memory and VRAM until store limit eviction.
   - Fix: Invoke `self.graphics.prune_dead_auto_ids()` at the end of the text reflow block in `Grid::resize()`.
+- [x] **Low: Clear grid search matches on dock hide (`src/main.rs`)**
+  - Vulnerability / Idle RAM retention: In `hide_or_exit_last_window()`, `s.search.close()` was called instead of `close_search(s)`. This closed the search overlay without calling `grid.clear_search()`, leaving up to 10,000 `Selection` instances in `search_matches` on the active pane while sitting idle in the Dock.
+  - Fix: Call `close_search(s)` to clear all grid search matches when hiding the window into the Dock.
 
 
 
