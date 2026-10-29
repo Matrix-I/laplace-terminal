@@ -29,9 +29,29 @@ pub struct Mods {
     pub ctrl: bool,
 }
 
+#[inline]
+fn write_u32(buf: &mut [u8], mut n: u32) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut temp = [0u8; 10];
+    let mut i = 0;
+    while n > 0 {
+        temp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    for j in 0..i {
+        buf[j] = temp[i - 1 - j];
+    }
+    i
+}
+
 /// Encode a mouse event at 0-based cell `(row, col)`. Returns `None` when the
 /// legacy encoding cannot represent the position (beyond column/row 223).
-pub fn encode(button: Button, action: Action, mods: Mods, row: usize, col: usize, sgr: bool) -> Option<Vec<u8>> {
+/// Writes directly into a fixed 32-byte stack buffer without heap allocations.
+pub fn encode(button: Button, action: Action, mods: Mods, row: usize, col: usize, sgr: bool) -> Option<([u8; 32], usize)> {
     let mut code: u32 = match button {
         Button::Left => 0,
         Button::Middle => 1,
@@ -53,9 +73,22 @@ pub fn encode(button: Button, action: Action, mods: Mods, row: usize, col: usize
         code += 16;
     }
 
+    let mut buf = [0u8; 32];
     if sgr {
-        let suffix = if action == Action::Release { 'm' } else { 'M' };
-        return Some(format!("\x1b[<{code};{};{}{suffix}", col + 1, row + 1).into_bytes());
+        buf[0] = 0x1b;
+        buf[1] = b'[';
+        buf[2] = b'<';
+        let mut pos = 3;
+        pos += write_u32(&mut buf[pos..], code);
+        buf[pos] = b';';
+        pos += 1;
+        pos += write_u32(&mut buf[pos..], (col + 1) as u32);
+        buf[pos] = b';';
+        pos += 1;
+        pos += write_u32(&mut buf[pos..], (row + 1) as u32);
+        buf[pos] = if action == Action::Release { b'm' } else { b'M' };
+        pos += 1;
+        return Some((buf, pos));
     }
 
     // Legacy encoding reports every release as button 3.
@@ -66,7 +99,13 @@ pub fn encode(button: Button, action: Action, mods: Mods, row: usize, col: usize
     if cx > 255 || cy > 255 {
         return None;
     }
-    Some(vec![0x1b, b'[', b'M', (code + 32) as u8, cx as u8, cy as u8])
+    buf[0] = 0x1b;
+    buf[1] = b'[';
+    buf[2] = b'M';
+    buf[3] = (code + 32) as u8;
+    buf[4] = cx as u8;
+    buf[5] = cy as u8;
+    Some((buf, 6))
 }
 
 #[cfg(test)]
@@ -76,20 +115,28 @@ mod tests {
     #[test]
     fn sgr_press_release_and_modifiers() {
         let none = Mods::default();
-        assert_eq!(encode(Button::Left, Action::Press, none, 4, 9, true).unwrap(), b"\x1b[<0;10;5M");
-        assert_eq!(encode(Button::Left, Action::Release, none, 4, 9, true).unwrap(), b"\x1b[<0;10;5m");
+        let (buf, len) = encode(Button::Left, Action::Press, none, 4, 9, true).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[<0;10;5M");
+        let (buf, len) = encode(Button::Left, Action::Release, none, 4, 9, true).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[<0;10;5m");
         let ctrl = Mods { ctrl: true, ..Mods::default() };
-        assert_eq!(encode(Button::Right, Action::Press, ctrl, 0, 0, true).unwrap(), b"\x1b[<18;1;1M");
-        assert_eq!(encode(Button::WheelDown, Action::Press, none, 1, 1, true).unwrap(), b"\x1b[<65;2;2M");
-        assert_eq!(encode(Button::Left, Action::Motion, none, 0, 2, true).unwrap(), b"\x1b[<32;3;1M");
-        assert_eq!(encode(Button::None, Action::Motion, none, 0, 0, true).unwrap(), b"\x1b[<35;1;1M");
+        let (buf, len) = encode(Button::Right, Action::Press, ctrl, 0, 0, true).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[<18;1;1M");
+        let (buf, len) = encode(Button::WheelDown, Action::Press, none, 1, 1, true).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[<65;2;2M");
+        let (buf, len) = encode(Button::Left, Action::Motion, none, 0, 2, true).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[<32;3;1M");
+        let (buf, len) = encode(Button::None, Action::Motion, none, 0, 0, true).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[<35;1;1M");
     }
 
     #[test]
     fn legacy_encoding_and_limits() {
         let none = Mods::default();
-        assert_eq!(encode(Button::Left, Action::Press, none, 0, 0, false).unwrap(), b"\x1b[M\x20\x21\x21");
-        assert_eq!(encode(Button::Middle, Action::Release, none, 2, 3, false).unwrap(), b"\x1b[M\x23\x24\x23");
+        let (buf, len) = encode(Button::Left, Action::Press, none, 0, 0, false).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[M\x20\x21\x21");
+        let (buf, len) = encode(Button::Middle, Action::Release, none, 2, 3, false).unwrap();
+        assert_eq!(&buf[..len], b"\x1b[M\x23\x24\x23");
         assert!(encode(Button::Left, Action::Press, none, 0, 300, false).is_none());
         assert!(encode(Button::Left, Action::Press, none, 0, 300, true).is_some());
     }

@@ -1909,8 +1909,8 @@ fn report_mouse(s: &mut State, button: mouse::Button, action: mouse::Action) -> 
     };
     if wanted {
         let mods = mouse::Mods { shift: false, alt: s.mods.alt_key(), ctrl: s.mods.control_key() };
-        if let Some(bytes) = mouse::encode(button, action, mods, row, col, sgr || pixels) {
-            pane.pty.write(&bytes);
+        if let Some((bytes, len)) = mouse::encode(button, action, mods, row, col, sgr || pixels) {
+            pane.pty.write(&bytes[..len]);
         }
         s.last_mouse_report = Some((pane_id, row, col));
     }

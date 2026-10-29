@@ -330,6 +330,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Clear grid search matches on dock hide (`src/main.rs`)**
   - Vulnerability / Idle RAM retention: In `hide_or_exit_last_window()`, `s.search.close()` was called instead of `close_search(s)`. This closed the search overlay without calling `grid.clear_search()`, leaving up to 10,000 `Selection` instances in `search_matches` on the active pane while sitting idle in the Dock.
   - Fix: Call `close_search(s)` to clear all grid search matches when hiding the window into the Dock.
+- [x] **Low: Eliminate heap allocations in mouse event encoding (`src/mouse.rs`, `src/main.rs`)**
+  - Vulnerability / Event loop allocation churn: `mouse::encode()` allocated a heap `Vec<u8>` on every mouse event (motion, drag, press, release) via `format!(...).into_bytes()` or `vec![...]`. In terminal applications tracking mouse motion (e.g. Vim, Tmux, Micro, Kakoune), this triggered hundreds of transient heap allocations per second.
+  - Fix: Encode directly into a 32-byte stack buffer returning `Option<([u8; 32], usize)>`, passing slice `&bytes[..len]` to `pane.pty.write()`.
 
 
 
