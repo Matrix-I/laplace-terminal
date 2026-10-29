@@ -128,10 +128,20 @@ pub fn mark_checked() {
     let _ = fs::write(last_check_file(), now.to_string());
 }
 
+/// System binary path resolution with fallback.
+fn resolve_system_bin(name: &'static str) -> &'static str {
+    match name {
+        "curl" => if Path::new("/usr/bin/curl").exists() { "/usr/bin/curl" } else { "curl" },
+        "codesign" => if Path::new("/usr/bin/codesign").exists() { "/usr/bin/codesign" } else { "codesign" },
+        "touch" => if Path::new("/usr/bin/touch").exists() { "/usr/bin/touch" } else { "touch" },
+        _ => name,
+    }
+}
+
 /// `curl` with the flags every update request shares: fail on HTTP errors, report them on
 /// stderr, follow redirects over HTTPS only, and give up on unreachable hosts.
 fn curl() -> Command {
-    let mut cmd = Command::new("curl");
+    let mut cmd = Command::new(resolve_system_bin("curl"));
     cmd.args([
         "--silent",
         "--show-error",
@@ -149,7 +159,24 @@ fn curl() -> Command {
 
 /// Run a `curl` command and return its stdout, or its stderr as the error.
 fn run_curl(cmd: &mut Command, what: &str) -> Result<Vec<u8>, String> {
-    let output = cmd.output().map_err(|e| format!("cannot run curl: {e}"))?;
+    run_curl_with_stdin(cmd, what, None)
+}
+
+fn run_curl_with_stdin(cmd: &mut Command, what: &str, input: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let output = if let Some(data) = input {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("cannot run curl: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(data);
+        }
+        child.wait_with_output().map_err(|e| format!("cannot read curl output: {e}"))?
+    } else {
+        cmd.output().map_err(|e| format!("cannot run curl: {e}"))?
+    };
+
     if output.status.success() {
         return Ok(output.stdout);
     }
@@ -452,14 +479,16 @@ fn fetch_release_from_api(channel: AutoUpdateChannel) -> Result<ReleaseInfo, Str
         "-H",
         "Accept: application/vnd.github+json",
     ]);
+    let mut stdin_config: Option<Vec<u8>> = None;
     if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
         if !token.is_empty() {
-            cmd.arg("-H").arg(format!("Authorization: Bearer {token}"));
+            cmd.arg("-K").arg("-");
+            stdin_config = Some(format!("header = \"Authorization: Bearer {token}\"\n").into_bytes());
         }
     }
     cmd.arg(url);
 
-    let body = run_curl(&mut cmd, "GitHub API request")?;
+    let body = run_curl_with_stdin(&mut cmd, "GitHub API request", stdin_config.as_deref())?;
     let body = String::from_utf8(body).map_err(|_| "GitHub API returned invalid UTF-8".to_string())?;
     parse_release_json(&body, channel)
 }
@@ -608,6 +637,40 @@ fn verify_checksum(sums: &str, asset_name: &str, downloaded_file: &Path) -> Resu
         return Err(format!(
             "checksum mismatch for {asset_name}!\nExpected: {expected}\nActual:   {actual}"
         ));
+    }
+    Ok(())
+}
+
+/// Optional cryptographic signature verification (Minisign or GPG).
+fn verify_signature(sums_path: &Path, sig_path: &Path) -> Result<(), String> {
+    for bin in ["/usr/bin/minisign", "/usr/local/bin/minisign", "/opt/homebrew/bin/minisign"] {
+        if Path::new(bin).exists() {
+            if let Ok(status) = Command::new(bin)
+                .args(["-V", "-m"])
+                .arg(sums_path)
+                .arg("-x")
+                .arg(sig_path)
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    for bin in ["/usr/bin/gpg", "/usr/local/bin/gpg", "/opt/homebrew/bin/gpg"] {
+        if Path::new(bin).exists() {
+            if let Ok(status) = Command::new(bin)
+                .args(["--verify"])
+                .arg(sig_path)
+                .arg(sums_path)
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -781,6 +844,17 @@ fn download_and_verify_in(
     download_file(&sums_asset.download_url, &sums_path)?;
     let sums = fs::read_to_string(&sums_path).map_err(|e| format!("cannot read {SUMS_NAME}: {e}"))?;
 
+    if let Some(sig_asset) = release
+        .assets
+        .iter()
+        .find(|a| a.name == "SHA256SUMS.txt.minisig" || a.name == "SHA256SUMS.txt.sig")
+    {
+        let sig_path = release_dir.join(&sig_asset.name);
+        if download_file(&sig_asset.download_url, &sig_path).is_ok() {
+            let _ = verify_signature(&sums_path, &sig_path);
+        }
+    }
+
     let asset = pick_asset(release, &sums, candidates)?;
     let path = release_dir.join(&asset.name);
     // Only a verified file ever carries the final name, so the reuse check above can trust it.
@@ -893,12 +967,12 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
         }
 
         // Ad-hoc sign so Gatekeeper does not block the updated bundle
-        let _ = Command::new("codesign")
+        let _ = Command::new(resolve_system_bin("codesign"))
             .args(["--force", "--deep", "--sign", "-"])
             .arg(&app_path)
             .status();
 
-        let _ = Command::new("touch").arg(&app_path).status();
+        let _ = Command::new(resolve_system_bin("touch")).arg(&app_path).status();
         return Ok(());
     }
 
@@ -928,7 +1002,7 @@ pub fn apply_update(downloaded_file: &Path, asset_name: &str) -> Result<(), Stri
 
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("codesign")
+        let _ = Command::new(resolve_system_bin("codesign"))
             .args(["--force", "--deep", "--sign", "-"])
             .arg(&temp_dest)
             .status();

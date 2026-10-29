@@ -628,9 +628,9 @@ impl ApplicationHandler<AppEvent> for App {
                                 }
                                 1 => {
                                     #[cfg(target_os = "macos")]
-                                    let _ = spawn_detached(std::process::Command::new("open").arg(&release.html_url));
+                                    let _ = spawn_detached(std::process::Command::new("/usr/bin/open").arg("--").arg(&release.html_url));
                                     #[cfg(not(target_os = "macos"))]
-                                    let _ = spawn_detached(std::process::Command::new("xdg-open").arg(&release.html_url));
+                                    let _ = spawn_detached(std::process::Command::new(if std::path::Path::new("/usr/bin/xdg-open").exists() { "/usr/bin/xdg-open" } else { "xdg-open" }).arg("--").arg(&release.html_url));
                                 }
                                 _ => {}
                             }
@@ -1285,7 +1285,9 @@ fn handle_terminal_requests(s: &mut State) {
                 (g.notification.take(), std::mem::take(&mut g.bell), g.clipboard_request.take())
             };
             if let Some(text) = clip {
-                copy_to_clipboard(&text);
+                if s.config.clipboard_write {
+                    copy_to_clipboard(&text);
+                }
             }
             if let Some((title, body)) = notification {
                 // At most one per second, so a runaway loop cannot flood the desktop.
@@ -1335,6 +1337,20 @@ fn handle_terminal_requests(s: &mut State) {
     }
 }
 
+/// Resolve system utility to an absolute path when available to prevent PATH hijacking.
+fn system_bin(name: &'static str) -> &'static str {
+    match name {
+        "open" => "/usr/bin/open",
+        "osascript" => "/usr/bin/osascript",
+        "afplay" => "/usr/bin/afplay",
+        "xdg-open" => if std::path::Path::new("/usr/bin/xdg-open").exists() { "/usr/bin/xdg-open" } else { "xdg-open" },
+        "notify-send" => if std::path::Path::new("/usr/bin/notify-send").exists() { "/usr/bin/notify-send" } else { "notify-send" },
+        "paplay" => if std::path::Path::new("/usr/bin/paplay").exists() { "/usr/bin/paplay" } else { "paplay" },
+        "zenity" => if std::path::Path::new("/usr/bin/zenity").exists() { "/usr/bin/zenity" } else { "zenity" },
+        _ => name,
+    }
+}
+
 /// Play a sound file in the background (`afplay` on macOS, PulseAudio's
 /// `paplay` elsewhere); the path is a single argument, never parsed by a shell.
 fn play_sound(path: &std::path::Path, volume: f32) {
@@ -1348,7 +1364,7 @@ fn play_sound(path: &std::path::Path, volume: f32) {
     );
     #[cfg(not(target_os = "macos"))]
     let res = spawn_detached(
-        std::process::Command::new("paplay")
+        std::process::Command::new(system_bin("paplay"))
             .arg(format!("--volume={}", (volume * 65536.0) as u32))
             .arg("--")
             .arg(path),
@@ -1383,14 +1399,14 @@ pub(crate) fn show_notification(title: &str, body: &str) {
     let body = body.trim_start_matches('-');
     #[cfg(target_os = "macos")]
     let res = spawn_detached(
-        std::process::Command::new("osascript")
+        std::process::Command::new(system_bin("osascript"))
             .args(["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)"])
             .args(["-e", "end run"])
             .arg(title)
             .arg(body),
     );
     #[cfg(not(target_os = "macos"))]
-    let res = spawn_detached(std::process::Command::new("notify-send").arg("--").arg(title).arg(body));
+    let res = spawn_detached(std::process::Command::new(system_bin("notify-send")).arg("--").arg(title).arg(body));
     if let Err(e) = res {
         eprintln!("litty: failed to show notification: {e}");
     }
@@ -1650,7 +1666,7 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
 
         #[cfg(target_os = "macos")]
         let res = {
-            let mut cmd = std::process::Command::new("open");
+            let mut cmd = std::process::Command::new(system_bin("open"));
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1667,7 +1683,7 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
             spawn_detached(&mut cmd)
         };
         #[cfg(target_os = "linux")]
-        let res = spawn_detached(std::process::Command::new("xdg-open").arg("--").arg(&path));
+        let res = spawn_detached(std::process::Command::new(system_bin("xdg-open")).arg("--").arg(&path));
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", path.to_str().unwrap_or(target)])
@@ -1678,9 +1694,9 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
         }
     } else {
         #[cfg(target_os = "macos")]
-        let res = spawn_detached(std::process::Command::new("open").arg("-u").arg(target));
+        let res = spawn_detached(std::process::Command::new(system_bin("open")).arg("-u").arg(target));
         #[cfg(target_os = "linux")]
-        let res = spawn_detached(std::process::Command::new("xdg-open").arg("--").arg(target));
+        let res = spawn_detached(std::process::Command::new(system_bin("xdg-open")).arg("--").arg(target));
         #[cfg(windows)]
         let res = std::process::Command::new("cmd")
             .args(["/c", "start", "", target])
@@ -2026,7 +2042,7 @@ fn confirm_close<'a>(cfg: &config::Config, mut panes: impl Iterator<Item = &'a P
     return macos::confirm(&title, text, button);
     // Linux: zenity when installed; without a dialog tool, close as asked.
     #[cfg(not(target_os = "macos"))]
-    std::process::Command::new("zenity")
+    std::process::Command::new(system_bin("zenity"))
         .args(["--question", "--title", &title, "--text", text, "--ok-label", button])
         .status()
         .map_or(true, |status| status.success())

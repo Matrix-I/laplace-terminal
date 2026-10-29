@@ -430,13 +430,13 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 ## Code Health & Hardening (Audit Backlog)
 
 ### Security Fixes
-- [ ] Fix token leak in process table: pass GitHub API token via header file/stdin instead of command line flags in `curl` (`src/update.rs`)
-- [ ] Restrict Kitty graphics file protocol (`medium=f`) to user-configured safe directories instead of loose blacklist (`src/graphics.rs`)
-- [ ] Restrict / validate POSIX shared memory unlinking (`shm_unlink`) to Litty-owned prefixes (`src/graphics.rs`)
-- [ ] Gate OSC 52 clipboard write behind user confirmation or configuration flag (`src/grid.rs`, `src/main.rs`)
-- [ ] Add cryptographic signature verification (Minisign / GPG) for auto-updates (`src/update.rs`)
-- [ ] Fix Unix domain socket creation permission race window (`src/hotkey.rs`)
-- [ ] Use absolute paths for system utility executions (`curl`, `codesign`, `touch`, `open`, `pbcopy`/`pbpaste`, `xclip`) instead of bare `$PATH` lookups
+- [x] Fix token leak in process table: pass GitHub API token via header file/stdin instead of command line flags in `curl` (`src/update.rs`)
+- [x] Restrict Kitty graphics file protocol (`medium=f`) to user-configured safe directories instead of loose blacklist (`src/graphics.rs`)
+- [x] Restrict / validate POSIX shared memory unlinking (`shm_unlink`) to Litty-owned prefixes (`src/graphics.rs`)
+- [x] Gate OSC 52 clipboard write behind user confirmation or configuration flag (`src/grid.rs`, `src/main.rs`)
+- [x] Add cryptographic signature verification (Minisign / GPG) for auto-updates (`src/update.rs`)
+- [x] Fix Unix domain socket creation permission race window (`src/hotkey.rs`)
+- [x] Use absolute paths for system utility executions (`curl`, `codesign`, `touch`, `open`, `pbcopy`/`pbpaste`, `xclip`) instead of bare `$PATH` lookups
 
 ### Crash & Panic Fixes
 - [x] Fix `f32::clamp(min, max)` panic (`assertion failed: min <= max`) when split pane rects shrink to <= 1 cell (`src/split.rs`)

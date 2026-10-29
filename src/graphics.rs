@@ -715,10 +715,7 @@ fn is_sensitive_path(path: &std::path::Path) -> bool {
     let path_str = path.to_string_lossy();
     for c in path.components() {
         let name = c.as_os_str().to_string_lossy();
-        if matches!(
-            name.as_ref(),
-            ".ssh" | ".gnupg" | ".aws" | ".config" | ".bash_history" | ".zsh_history"
-        ) {
+        if name.starts_with('.') && name != "." && name != ".." {
             return true;
         }
     }
@@ -727,6 +724,8 @@ fn is_sensitive_path(path: &std::path::Path) -> bool {
         || path_str.starts_with("/dev")
         || path_str.starts_with("/proc")
         || path_str.starts_with("/sys")
+        || path_str.starts_with("/var/root")
+        || path_str.starts_with("/root")
 }
 
 /// Decode a transmission into `(width, height, rgba)`.
@@ -767,6 +766,15 @@ fn decode_kitty(c: &KittyCommand, payload: &[u8]) -> Result<(u32, u32, Vec<u8>),
         }
         b's' => {
             // POSIX shared memory, unlinked once read (as kitty does).
+            let name_str = String::from_utf8(raw.clone()).map_err(|_| "EINVAL:bad name")?;
+            let valid_prefix = name_str.starts_with("/kitty-")
+                || name_str.starts_with("/litty-")
+                || name_str.starts_with("/ghostty-")
+                || name_str.starts_with("/shm-");
+            if !valid_prefix {
+                return Err("EPERM:unauthorized shared memory prefix".into());
+            }
+
             let name = std::ffi::CString::new(raw).map_err(|_| "EINVAL:bad name")?;
             // SAFETY: a NUL-terminated name; the descriptor is owned by `file`.
             let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
@@ -1255,11 +1263,17 @@ mod tests {
         let res = run(&mut store, &format!("Ga=t,t=t,f=24,s=1,v=1,i=10;{}", b64(fake_temp)));
         assert!(res.as_deref().unwrap_or("").contains("EPERM") || res.as_deref().unwrap_or("").contains("ENOENT"));
 
-        // 2. Sensitive paths (t=f) like /etc/passwd or .ssh must be rejected
+        // 2. Sensitive paths (t=f) like /etc/passwd or .ssh or hidden dotfiles must be rejected
         let res = run(&mut store, &format!("Ga=t,t=f,f=24,s=1,v=1,i=11;{}", b64("/etc/passwd")));
         assert_eq!(res.as_deref(), Some("i=11;EPERM:access denied"));
+        let res_hidden = run(&mut store, &format!("Ga=t,t=f,f=24,s=1,v=1,i=13;{}", b64("/tmp/.env")));
+        assert!(res_hidden.as_deref().unwrap_or("").contains("EPERM") || res_hidden.as_deref().unwrap_or("").contains("ENOENT"));
 
-        // 3. Temporary file inside temp dir with tty-graphics-protocol in name is allowed and unlinked
+        // 3. Unauthorized shared memory prefix must be rejected
+        let res_shm = run(&mut store, &format!("Ga=t,t=s,f=24,s=1,v=1,i=14;{}", b64("/arbitrary_shm_seg")));
+        assert_eq!(res_shm.as_deref(), Some("i=14;EPERM:unauthorized shared memory prefix"));
+
+        // 4. Temporary file inside temp dir with tty-graphics-protocol in name is allowed and unlinked
         let temp_path = std::env::temp_dir().join("tty-graphics-protocol-unittest.raw");
         std::fs::write(&temp_path, [255u8, 0, 0]).expect("write temp file");
         let path_str = temp_path.to_str().unwrap();

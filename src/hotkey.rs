@@ -87,16 +87,18 @@ pub fn listen(proxy: EventLoopProxy<AppEvent>) {
     let path = socket_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
     }
     if UnixStream::connect(&path).is_ok() {
         return;
     }
     let _ = std::fs::remove_file(&path);
-    let Ok(listener) = UnixListener::bind(&path) else { return };
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    // Set restrictive umask 0o177 so socket is created with 0o600 atomically (zero race window)
+    let old_umask = unsafe { libc::umask(0o177) };
+    let bound = UnixListener::bind(&path);
+    unsafe { libc::umask(old_umask) };
+    let Ok(listener) = bound else { return };
     // Also try to symlink legacy socket path for backward compatibility
     let legacy = legacy_socket_path();
     let _ = std::fs::remove_file(&legacy);

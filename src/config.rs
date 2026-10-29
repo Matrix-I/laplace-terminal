@@ -134,6 +134,8 @@ pub struct Config {
     pub selection_foreground: Option<u32>,
     /// Copy a mouse selection to the clipboard as soon as it is made.
     pub copy_on_select: bool,
+    /// Allow programs to write to the system clipboard via OSC 52 (default true).
+    pub clipboard_write: bool,
     /// Fixed window title instead of the running program's.
     pub title: Option<String>,
     pub bell_features: BellFeatures,
@@ -215,6 +217,7 @@ impl Default for Config {
             selection_background: None,
             selection_foreground: None,
             copy_on_select: true,
+            clipboard_write: true,
             title: None,
             bell_features: BellFeatures { system: false, attention: true, title: true, audio: false, border: false },
             bell_audio_path: None,
@@ -476,6 +479,13 @@ impl Config {
                     "" | "true" | "clipboard" => true,
                     "false" => false,
                     v => return Err(format!("expected true, false or clipboard, got `{v}`")),
+                }
+            }
+            "clipboard-write" => {
+                self.clipboard_write = match value {
+                    "" | "true" | "allow" => true,
+                    "false" | "deny" => false,
+                    v => return Err(format!("expected allow or deny, got `{v}`")),
                 }
             }
             "title" => self.title = (!empty).then(|| value.to_string()),
@@ -914,7 +924,7 @@ pub fn open_config_in_editor() {
     #[cfg(target_os = "macos")]
     let res = crate::spawn_detached(std::process::Command::new("/usr/bin/open").arg("-t").arg(&path));
     #[cfg(not(target_os = "macos"))]
-    let res = crate::spawn_detached(std::process::Command::new("xdg-open").arg(&path));
+    let res = crate::spawn_detached(std::process::Command::new(if std::path::Path::new("/usr/bin/xdg-open").exists() { "/usr/bin/xdg-open" } else { "xdg-open" }).arg(&path));
     if let Err(e) = res {
         eprintln!("litty: failed to open {}: {e}", path.display());
     }
