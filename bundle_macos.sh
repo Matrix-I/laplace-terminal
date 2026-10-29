@@ -12,6 +12,9 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 
 echo "==> Building optimized macOS release binary..."
+if [ -z "${SDKROOT:-}" ]; then
+    export SDKROOT="$(xcrun --show-sdk-path 2>/dev/null || true)"
+fi
 if [ -f "$HOME/.cargo/env" ]; then
     . "$HOME/.cargo/env"
 fi
