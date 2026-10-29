@@ -255,6 +255,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Critical / Safety: Prevent premature unmap and dangling pointer in Linux color emoji shaper (`src/atlas.rs`)**
   - Vulnerability / Safety: In `rasterize_color()` on Linux (`not(target_os = "macos")`), `shaper_for(&face.path, face.index).map(|(f, _)| f)` discarded the `Arc<memmap2::Mmap>`, immediately unmapping the font file while `rustybuzz::Face` retained a dangling pointer to unmapped memory.
   - Fix: Store `(rustybuzz::Face<'static>, Arc<memmap2::Mmap>)` inside `OnceLock` so the memory-mapped bytes remain alive.
+- [x] **Medium: Prune Kitty image placements on scroll and free unreferenced image data (`src/graphics.rs`, `src/grid.rs`)**
+  - Vulnerability / Leak: `graphics.prune()` was only called on image placement or history clear; normal text scrolling (`scroll_up_in`) never invoked `prune()`, leaving placements of long-scrolled-off images in memory. Furthermore, `prune()` filtered `placements` but never cleaned up orphaned images in `self.images` (retaining up to `STORE_LIMIT = 64 MB` per terminal).
+  - Fix: Invoke `prune(first_line)` during scrollback eviction in `scroll_up_in()`, and clean up images in `self.images` that have no remaining standard or virtual placements.
 
 
 ## Terminal protocols

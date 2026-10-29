@@ -1830,6 +1830,9 @@ impl Grid {
                 // Keep the user's scrolled-back view anchored on the same lines.
                 self.display_offset = (self.display_offset + n).min(self.history);
             }
+            if !self.graphics.placements.is_empty() {
+                self.graphics.prune(self.lines_pushed - self.history);
+            }
             self.all_dirty = true;
         } else {
             for r in t..(b + 1 - n) {

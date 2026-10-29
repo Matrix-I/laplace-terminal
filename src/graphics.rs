@@ -432,6 +432,16 @@ impl Store {
     /// placement shows that were only ever meant for display.
     pub fn prune(&mut self, first_line: usize) {
         self.placements.retain(|p| p.alt || p.line + p.rows > first_line);
+        let dead: Vec<u32> = self
+            .images
+            .keys()
+            .copied()
+            .filter(|&id| id >= (1 << 24))
+            .filter(|&id| !self.placements.iter().any(|p| p.image_id == id) && !self.virtuals.iter().any(|v| v.image_id == id))
+            .collect();
+        for id in dead {
+            self.remove_image(id, false);
+        }
     }
 
     /// Placements visible in `top..top + rows` on the current screen.
@@ -1217,5 +1227,35 @@ mod tests {
         let res = run(&mut store, &format!("Ga=t,t=t,f=24,s=1,v=1,i=12;{}", b64(path_str)));
         assert_eq!(res.as_deref(), Some("i=12;OK"));
         assert!(!temp_path.exists(), "temp file must be deleted after reading");
+    }
+
+    #[test]
+    fn auto_id_image_pruning() {
+        let mut store = Store::default();
+        let id = store.insert(0, 10, 10, vec![0; 400]);
+        assert!(id >= (1 << 24), "auto id starts high");
+        store.placements.push(Placement {
+            image_id: id,
+            placement_id: 1,
+            line: 5,
+            col: 0,
+            cols: 2,
+            rows: 2,
+            src: [0, 0, 10, 10],
+            z: 0,
+            alt: false,
+            fit: false,
+        });
+        assert!(store.image(id).is_some());
+
+        // Prune before line 5: still kept
+        store.prune(4);
+        assert!(store.image(id).is_some());
+        assert_eq!(store.placements.len(), 1);
+
+        // Prune past line 5 + 2: placement removed and image freed
+        store.prune(7);
+        assert!(store.placements.is_empty());
+        assert!(store.image(id).is_none(), "auto-assigned image must be removed when placements are gone");
     }
 }
