@@ -555,6 +555,12 @@ impl Renderer {
         self.force_full = true;
     }
 
+    /// Prune unplaced GPU image textures that have been idle past KEEP_DURATION.
+    /// Returns the deadline when the next texture will expire, if any remain.
+    pub fn prune_idle_images(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        self.images.prune_idle(now)
+    }
+
     /// Present a few 1×1 frames before the window is hidden or closed. macOS keeps the
     /// last drawables of a layer alive (about 30 MB for a Retina window),
     /// so leave it holding tiny ones instead.

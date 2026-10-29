@@ -713,7 +713,10 @@ impl ApplicationHandler<AppEvent> for App {
         }
         let mut deadline: Option<std::time::Instant> = None;
         let now = std::time::Instant::now();
-        for s in &self.windows {
+        for s in &mut self.windows {
+            if let Some(next_prune) = s.renderer.prune_idle_images(now) {
+                deadline = Some(deadline.map_or(next_prune, |d| d.min(next_prune)));
+            }
             if s.sync_pending {
                 let sync = now + std::time::Duration::from_millis(16);
                 deadline = Some(deadline.map_or(sync, |d| d.min(sync)));

@@ -3,11 +3,14 @@
 //! drawn in the cell render pass below or above the cells by z.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::graphics::ImageDraw;
 
-/// Renders without an image before its texture is freed.
-const KEEP_FRAMES: u64 = 600;
+/// Frame count without being rendered before an unplaced texture is freed during active rendering.
+const KEEP_FRAMES: u64 = 60;
+/// Maximum duration an unplaced texture is retained in GPU VRAM before eager eviction.
+const KEEP_DURATION: Duration = Duration::from_secs(5);
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -33,6 +36,12 @@ pub struct Placed {
     pub clip: [u32; 4],
 }
 
+struct TextureEntry {
+    bind_group: wgpu::BindGroup,
+    last_frame: u64,
+    last_seen: Instant,
+}
+
 pub struct ImageLayer {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
@@ -41,8 +50,8 @@ pub struct ImageLayer {
     quads: wgpu::Buffer,
     quads_cap: usize,
     texture_format: wgpu::TextureFormat,
-    /// Image key → bind group with its texture, and the frame it was last drawn.
-    textures: HashMap<u64, (wgpu::BindGroup, u64)>,
+    /// Image key → bind group with its texture, last frame, and timestamp.
+    textures: HashMap<u64, TextureEntry>,
     frame: u64,
     /// This frame's draws: image key, scissor rectangle and z, in quad order.
     batch: Vec<(u64, [u32; 4], i32)>,
@@ -154,8 +163,12 @@ impl ImageLayer {
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, placed: &[Placed], screen: (u32, u32), flip: bool) {
         self.frame += 1;
         self.batch.clear();
+        let now = Instant::now();
         if placed.is_empty() {
-            self.textures.retain(|_, (_, used)| self.frame - *used < KEEP_FRAMES);
+            self.textures.retain(|_, entry| {
+                self.frame.saturating_sub(entry.last_frame) < KEEP_FRAMES
+                    && now.saturating_duration_since(entry.last_seen) < KEEP_DURATION
+            });
             return;
         }
         let u = Uniforms { screen: [screen.0 as f32, screen.1 as f32], flip_y: flip as u32, _pad: 0 };
@@ -169,10 +182,11 @@ impl ImageLayer {
             let d = &p.draw;
             if !self.textures.contains_key(&d.key) {
                 let bind_group = self.upload(device, queue, d);
-                self.textures.insert(d.key, (bind_group, self.frame));
+                self.textures.insert(d.key, TextureEntry { bind_group, last_frame: self.frame, last_seen: now });
             }
             if let Some(entry) = self.textures.get_mut(&d.key) {
-                entry.1 = self.frame;
+                entry.last_frame = self.frame;
+                entry.last_seen = now;
             }
             let (w, h) = (d.width as f32, d.height as f32);
             let [sx, sy, sw, sh] = d.src;
@@ -184,7 +198,18 @@ impl ImageLayer {
             self.batch.push((d.key, clip, d.z));
         }
         queue.write_buffer(&self.quads, 0, bytemuck::cast_slice(&quads));
-        self.textures.retain(|_, (_, used)| self.frame - *used < KEEP_FRAMES);
+        self.textures.retain(|_, entry| {
+            entry.last_frame == self.frame
+                || (self.frame.saturating_sub(entry.last_frame) < KEEP_FRAMES
+                    && now.saturating_duration_since(entry.last_seen) < KEEP_DURATION)
+        });
+    }
+
+    /// Prune any textures not rendered recently, freeing GPU VRAM on idle terminals.
+    /// Returns the deadline for the next texture eviction, if any unplaced textures remain.
+    pub fn prune_idle(&mut self, now: Instant) -> Option<Instant> {
+        self.textures.retain(|_, entry| now.saturating_duration_since(entry.last_seen) < KEEP_DURATION);
+        self.textures.values().map(|entry| entry.last_seen + KEEP_DURATION).min()
     }
 
     fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, d: &ImageDraw) -> wgpu::BindGroup {
@@ -230,7 +255,7 @@ impl ImageLayer {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.quads.slice(..));
         for (i, (key, clip, zi)) in self.batch.iter().enumerate() {
-            let Some((bind_group, _)) = self.textures.get(key) else { continue };
+            let Some(entry) = self.textures.get(key) else { continue };
             if !z.contains(zi) {
                 continue;
             }
@@ -238,7 +263,7 @@ impl ImageLayer {
                 continue;
             };
             pass.set_scissor_rect(sx, sy, sw, sh);
-            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_bind_group(0, &entry.bind_group, &[]);
             pass.draw(0..4, i as u32..i as u32 + 1);
         }
     }
@@ -294,5 +319,51 @@ mod tests {
         assert_eq!(compute_scissor_rect([10, 0, 30, 50], true, 0), None);
         assert_eq!(compute_scissor_rect([10, 20, 0, 40], true, 100), None);
         assert_eq!(compute_scissor_rect([10, 20, 30, 0], true, 100), None);
+    }
+
+    #[test]
+    fn test_image_layer_prune_idle() {
+        let instance = wgpu::Instance::default();
+        let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+            return;
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default(), None)).unwrap();
+        let mut layer = ImageLayer::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb);
+
+        let draw = ImageDraw {
+            key: 42,
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16].into(),
+            src: [0.0, 0.0, 2.0, 2.0],
+            row: 0,
+            col: 0,
+            cols: 1,
+            rows: 1,
+            fit: false,
+            z: 0,
+            px: None,
+        };
+        let placed = Placed {
+            draw,
+            rect: [0.0, 0.0, 10.0, 10.0],
+            clip: [0, 0, 100, 100],
+        };
+
+        // Prepare once: texture uploaded
+        layer.prepare(&device, &queue, &[placed], (100, 100), false);
+        assert_eq!(layer.textures.len(), 1);
+
+        let now = Instant::now();
+        // Prune immediately: still fresh (< 5s), returns deadline for 5s in the future
+        let next = layer.prune_idle(now);
+        assert_eq!(layer.textures.len(), 1);
+        assert!(next.is_some());
+
+        // Prune 6 seconds later without rendering: aged past KEEP_DURATION, texture evicted
+        let future = now + Duration::from_secs(6);
+        let next_future = layer.prune_idle(future);
+        assert_eq!(layer.textures.len(), 0, "idle texture must be evicted past KEEP_DURATION");
+        assert!(next_future.is_none());
     }
 }

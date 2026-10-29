@@ -485,7 +485,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Prune dead `VirtualPlacement` entries from `Store.virtuals` on scrollback eviction to free auto-id images (`src/graphics.rs`, `src/grid/mod.rs`)
 - [x] Prune stale `Placement.alt` entries during linefeed scroll in alternate screen (`src/graphics.rs`, `src/grid/mod.rs`)
 - [x] Prevent Carbon `EnableSecureEventInput` reference counter drift on duplicate focus events (`src/macos.rs`, `src/main.rs`)
-- [ ] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
+- [x] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
 
 ### Performance & Concurrency Fixes
 - [x] Reduce `grid.lock()` mutex hold duration in `renderer.rs` across rasterization and GPU texture uploads (`src/renderer.rs`)
