@@ -2005,7 +2005,14 @@ impl Grid {
         let (cw, ch) = self.image_cell_px();
         let cols = if cols > 0 { cols } else { img.width.div_ceil(cw) }.clamp(1, 1000) as usize;
         let rows = if rows > 0 { rows } else { img.height.div_ceil(ch) }.clamp(1, 1000) as usize;
-        self.graphics.place_virtual(crate::graphics::VirtualPlacement { image_id: id, placement_id, cols, rows, z });
+        self.graphics.place_virtual(crate::graphics::VirtualPlacement {
+            image_id: id,
+            placement_id,
+            cols,
+            rows,
+            z,
+            alt: self.alt_active,
+        });
         self.all_dirty = true;
     }
 
@@ -2225,6 +2232,7 @@ impl Grid {
                 self.clamp_cursor();
             }
             self.graphics.placements.retain(|p| !p.alt);
+            self.graphics.virtuals.retain(|v| !v.alt);
             self.graphics.prune_dead_auto_ids();
         }
         self.wrap_pending = false;
@@ -4891,6 +4899,7 @@ mod tests {
             cols: 2,
             rows: 2,
             z: 0,
+            alt: false,
         });
         assert_eq!(g.graphics.virtuals.len(), 1);
         assert!(g.graphics.image(id).is_some());
@@ -4898,5 +4907,34 @@ mod tests {
         g.clear_screen_and_history();
         assert!(g.graphics.virtuals.is_empty(), "virtuals cleared");
         assert!(g.graphics.image(id).is_none(), "auto-assigned image freed after virtual cleared");
+    }
+
+    #[test]
+    fn alt_screen_exit_prunes_virtual_placements_and_frees_auto_ids() {
+        let mut g = Grid::new(20, 5);
+        let main_id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        g.graphics.virtuals.push(crate::graphics::VirtualPlacement {
+            image_id: main_id,
+            placement_id: 1,
+            cols: 2,
+            rows: 2,
+            z: 0,
+            alt: false,
+        });
+
+        // Switch to alternate screen
+        g.set_alt(true, false);
+        let alt_id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        g.place_virtual(alt_id, 3, 3, 0, 2);
+        assert_eq!(g.graphics.virtuals.len(), 2);
+        assert!(g.graphics.image(main_id).is_some());
+        assert!(g.graphics.image(alt_id).is_some());
+
+        // Exit alternate screen
+        g.set_alt(false, false);
+        assert_eq!(g.graphics.virtuals.len(), 1, "alt virtual placement pruned");
+        assert_eq!(g.graphics.virtuals[0].image_id, main_id, "main virtual placement preserved");
+        assert!(g.graphics.image(main_id).is_some(), "main image retained");
+        assert!(g.graphics.image(alt_id).is_none(), "alt auto-id image freed");
     }
 }

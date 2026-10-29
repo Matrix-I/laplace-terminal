@@ -337,6 +337,18 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
   - Vulnerability / Render loop allocation churn: In `bidi::visual_order`, `let classes: Vec<Class> = ... .collect();` allocated a heap vector every frame for each row containing right-to-left text. In `Grid::logical_col` and `Grid::cursor_visual_col`, every mouse movement, link hover, or cursor update allocated 3 temporary `Vec` instances on RTL rows.
   - Fix: Store character classes directly in the `levels` scratch buffer to resolve neutrals before mapping to bidi levels (zero allocations in `visual_order`). Introduce thread-local reusable scratch buffers in `Grid::logical_col` and `Grid::cursor_visual_col`.
 
+## Deep Audit & Resource Management (v0.5.0)
+
+- [x] **High: Kitty virtual placements leak and VRAM retention on alternate screen exit (`src/grid.rs`, `src/graphics.rs`)**
+  - Vulnerability / VRAM & RAM leak: When TUI applications in the alternate screen (e.g. Neovim, Yazi, Ranger) place images with Unicode placeholders (`U=1`), a `VirtualPlacement` is registered. Unlike standard `Placement`, `VirtualPlacement` lacks an `alt: bool` flag. When exiting the alternate screen, `self.graphics.virtuals` is not pruned. Because `prune_dead_auto_ids()` checks `!self.virtuals.iter().any(|v| v.image_id == id)`, auto-assigned image buffers in RAM and textures in GPU VRAM are retained indefinitely across sessions.
+  - Fix: Add `pub alt: bool` to `VirtualPlacement`, record `alt: self.alt_active` in `place_virtual()`, and filter `self.graphics.virtuals.retain(|v| !v.alt)` before calling `prune_dead_auto_ids()` on alternate screen exit.
+- [ ] **Medium: Hyperlink & SGR 58 underline color slots (`CellExtra`) stale retention on `clear_history` (`src/grid.rs`)**
+  - Vulnerability / Slot exhaustion: `clear_history()` resets `self.history = 0` but does not zero out evicted cells in the circular ring buffer `self.cells`, nor does it invoke `trim_extras()`. Furthermore, `collect_extras()` scans all physical rows in `self.cells.iter()`, marking dead cells outside `0..(self.history + self.rows)` as active and permanently exhausting the 255 hyperlink/color slots.
+  - Fix: Limit `collect_extras()` row traversal to active visible and scrollback rows (`0..(self.history + self.rows)`), and call `trim_extras()` inside `clear_history()`.
+- [ ] **Low: Inverted nested split ratio adjustment in multi-pane layouts (`src/split.rs`)**
+  - Bug / Usability: In `SplitNode::adjust_ratio()`, `first.contains(target_id)` evaluates to `true` at the root split node if `target_id` is located anywhere inside the first subtree. As a result, the outermost root split ratio is adjusted rather than recursing down to the innermost split containing the active pane.
+  - Fix: Recurse into child subtrees first (`first.adjust_ratio(...) || second.adjust_ratio(...)`), and only adjust the local ratio if the target is an immediate direct leaf of the node.
+
 
 
 ## Terminal protocols

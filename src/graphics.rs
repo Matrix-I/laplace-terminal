@@ -179,6 +179,7 @@ pub struct VirtualPlacement {
     pub cols: usize,
     pub rows: usize,
     pub z: i32,
+    pub alt: bool,
 }
 
 /// Combining marks that number the rows / columns of unicode placeholder
