@@ -232,6 +232,26 @@ struct State {
     inspector_key: String,
 }
 
+impl State {
+    fn invalidate_pane_state(&mut self, pane_id: u64) {
+        if self.search.pane_id == Some(pane_id) {
+            self.search.close();
+        }
+        if self.hovered_link.as_ref().is_some_and(|h| h.pane_id == pane_id) {
+            self.hovered_link = None;
+        }
+        if self.scrollbar_drag == Some(pane_id) {
+            self.scrollbar_drag = None;
+        }
+        if self.active_click_pane_id == Some(pane_id) {
+            self.active_click_pane_id = None;
+        }
+        if self.last_mouse_report.as_ref().is_some_and(|(id, ..)| *id == pane_id) {
+            self.last_mouse_report = None;
+        }
+    }
+}
+
 /// Tab and pane ids are unique across windows, so `ChildExit` finds its pane.
 fn next_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -629,6 +649,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 tab.active_pane_id = p.id;
                             }
                         }
+                        s.invalidate_pane_state(exited_id);
                         sync_size(s);
                         refresh_tab_titles(s);
                         s.renderer.invalidate();
@@ -2270,6 +2291,7 @@ fn close_active_pane_or_tab(s: &mut State) {
         } else if let Some(first_pane) = tab.panes.first() {
             tab.active_pane_id = first_pane.id;
         }
+        s.invalidate_pane_state(closing_id);
         sync_size(s);
         refresh_tab_titles(s);
         s.renderer.invalidate();

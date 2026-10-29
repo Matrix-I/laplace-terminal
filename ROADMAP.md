@@ -291,6 +291,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Bound in-session command history to `MAX_HISTORY_ITEMS` (`src/history.rs`)**
   - Vulnerability / Memory leak: In `HistorySearch::add_session_command()`, `self.session_commands` was capped to 500 entries, but `self.items.insert(0, trimmed.to_string())` did not check `MAX_HISTORY_ITEMS` (10,000). In long-running sessions, `self.items` grew unboundedly without trimming older items.
   - Fix: Pop excess items from `self.items` whenever length exceeds `MAX_HISTORY_ITEMS`.
+- [x] **Medium: Invalidate stale pane-scoped state on pane exit and tab close (`src/main.rs`)**
+  - Vulnerability / State leak: When a split pane was closed or its child exited, the window `State` continued holding references to the dead pane ID in `search.pane_id`, `hovered_link`, `scrollbar_drag`, `active_click_pane_id`, and `last_mouse_report`.
+  - Fix: Add `State::invalidate_pane_state(pane_id)` and invoke it whenever a pane exits or is closed, clearing search state, hovered hyperlinks, drag states, and mouse reporting coordinates.
 
 
 ## Terminal protocols
