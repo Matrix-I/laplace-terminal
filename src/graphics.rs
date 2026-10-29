@@ -856,7 +856,11 @@ pub fn decode_png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
         return Err("EINVAL:bad image size".into());
     }
-    let mut buf = vec![0; reader.output_buffer_size().ok_or("EINVAL:bad PNG")?];
+    let buf_size = reader.output_buffer_size().ok_or("EINVAL:bad PNG")?;
+    if buf_size > STORE_LIMIT || (w as usize).saturating_mul(h as usize).saturating_mul(4) > STORE_LIMIT {
+        return Err("EINVAL:image too large".into());
+    }
+    let mut buf = vec![0; buf_size];
     let info = reader.next_frame(&mut buf).map_err(|_| "EINVAL:bad PNG")?;
     let buf = &buf[..info.buffer_size()];
     let rgba = match info.color_type {
@@ -1328,5 +1332,36 @@ mod tests {
         store.prune(7);
         assert!(store.placements.is_empty());
         assert!(store.image(id).is_none(), "auto-assigned image must be removed when placements are gone");
+    }
+
+    #[test]
+    fn decode_png_bounds_check() {
+        // Build a minimal PNG header that declares dimensions exceeding STORE_LIMIT
+        // 8192 x 8192 x 4 = 256MB > STORE_LIMIT (64MB)
+        let mut png_data = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_data, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0, 0, 0, 255]).unwrap();
+        }
+        // Patch width and height in IHDR (offsets 16..20 and 20..24) to 8192
+        png_data[16..20].copy_from_slice(&8192u32.to_be_bytes());
+        png_data[20..24].copy_from_slice(&8192u32.to_be_bytes());
+        // Recompute IHDR CRC (chunk type + data: bytes 12..29)
+        let mut crc = 0xffff_ffffu32;
+        for &b in &png_data[12..29] {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+            }
+        }
+        let crc = !crc;
+        png_data[29..33].copy_from_slice(&crc.to_be_bytes());
+
+        let res = decode_png(&png_data);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "EINVAL:image too large");
     }
 }
