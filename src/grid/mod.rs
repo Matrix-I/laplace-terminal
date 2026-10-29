@@ -11,6 +11,14 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use vte::{Params, Perform};
 
+pub mod cell;
+pub mod prompt;
+pub mod selection;
+
+pub use cell::*;
+pub use prompt::*;
+pub use selection::*;
+
 use crate::search::SearchText;
 
 /// Number of scrollback lines kept above the visible screen by default.
@@ -105,67 +113,8 @@ pub fn set_palette(pal: &[u32; 16]) {
     }
 }
 
-/// `fg` low byte bit: explicit foreground color (otherwise default fg).
-pub const FG_SET: u32 = 0x80;
-/// `fg` low byte bit: bold glyph.
-pub const FG_BOLD: u32 = 0x01;
-/// `fg` low byte bit: italic glyph.
-pub const FG_ITALIC: u32 = 0x02;
-/// `fg` low byte bits 2..=6: low 5 bits of the cell's extra-attribute index.
-pub const FG_EXTRA: u32 = 0x7C;
-/// `bg` low byte bit: explicit background color (otherwise default bg).
-pub const BG_SET: u32 = 0x80;
-/// `bg` low byte bits 0..=2: underline style (`UNDERLINE_*`, 0 = none).
-pub const BG_UNDERLINE_MASK: u32 = 0x07;
-/// `bg` low byte bit: single underline (`UNDERLINE_SINGLE` in the style bits).
-pub const BG_UNDERLINE: u32 = UNDERLINE_SINGLE as u32;
-/// `bg` low byte bit: strikethrough.
-pub const BG_STRIKE: u32 = 0x08;
-/// `bg` low byte bits 4..=6: high 3 bits of the cell's extra-attribute index.
-pub const BG_EXTRA: u32 = 0x70;
 
-/// Underline styles (SGR `4:x`), stored in `BG_UNDERLINE_MASK`:
-/// 1 single, 2 double, 3 curly, 4 dotted, 5 dashed.
-pub const UNDERLINE_SINGLE: u8 = 1;
-const UNDERLINE_DOUBLE: u8 = 2;
-const UNDERLINE_DASHED: u8 = 5;
 
-const ATTR_BOLD: u8 = 1 << 0;
-const ATTR_DIM: u8 = 1 << 1;
-const ATTR_ITALIC: u8 = 1 << 2;
-const ATTR_STRIKE: u8 = 1 << 3;
-const ATTR_INVERSE: u8 = 1 << 4;
-const ATTR_HIDDEN: u8 = 1 << 5;
-
-/// Prompts remembered for jump-to-prompt and output selection.
-const MAX_PROMPTS: usize = 1000;
-
-/// One shell prompt from OSC 133 marks, as absolute lines.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct PromptMark {
-    /// Line of the prompt (OSC 133;A).
-    prompt: usize,
-    /// First output line (OSC 133;C) and the line after the last (OSC 133;D).
-    output: Option<(usize, Option<usize>)>,
-}
-
-/// Kitty unicode placeholder: a cell showing part of a virtual image placement.
-const PLACEHOLDER: char = '\u{10EEEE}';
-/// A placeholder cell's `codepoint`: `PH_FLAG | count << 27 | msb << 18 | row << 9 | col`,
-/// outside the Unicode range. `count` is how many of the row / column / image id
-/// high byte diacritics followed it (each an index into `PLACEHOLDER_DIACRITICS`).
-pub const PH_FLAG: u32 = 1 << 31;
-
-/// A multi-codepoint grapheme (emoji ZWJ sequence, flag, skin tone, a base
-/// with marks that have no precomposed form): `codepoint` is
-/// `CLUSTER_FLAG | CLUSTER_WIDE? | index into Grid::clusters`.
-pub const CLUSTER_FLAG: u32 = 1 << 30;
-pub const CLUSTER_WIDE: u32 = 1 << 29;
-const CLUSTER_ID: u32 = CLUSTER_WIDE - 1;
-/// Distinct clusters one grid keeps; past that, marks are dropped as before.
-const MAX_CLUSTERS: usize = 1 << 16;
-/// Longest cluster kept (UTF-8 bytes); longer sequences stop growing.
-const MAX_CLUSTER_BYTES: usize = 64;
 
 /// `grapheme-width-method = unicode`: new terminals start in DEC mode 2027.
 static GRAPHEME_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -175,191 +124,7 @@ pub fn set_grapheme_default(on: bool) {
     GRAPHEME_DEFAULT.store(on, Ordering::Relaxed);
 }
 
-/// Upper bound on an OSC 8 URI; longer links are ignored.
-const MAX_LINK_LEN: usize = 2048;
 
-/// One terminal cell: exactly 12 bytes.
-#[repr(C)]
-#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Cell {
-    /// Unicode scalar value (0 = empty).
-    pub codepoint: u32,
-    /// Packed `0xRRGGBB` + flags in the low byte (`FG_SET`, `FG_BOLD`, `FG_ITALIC`,
-    /// low bits of the extra index).
-    pub fg: u32,
-    /// Packed `0xRRGGBB` + style flags in the low byte (`BG_SET`, underline style,
-    /// `BG_STRIKE`, high bits of the extra index).
-    pub bg: u32,
-}
-
-const _: () = assert!(std::mem::size_of::<Cell>() == 12);
-
-impl Cell {
-    /// Index into `Grid::extras` (0 = no hyperlink and default underline color).
-    #[inline]
-    pub fn extra(&self) -> u8 {
-        (((self.fg & FG_EXTRA) >> 2) | ((self.bg & BG_EXTRA) << 1)) as u8
-    }
-}
-
-/// Pack an extra-attribute index into the spare low bits of `fg` / `bg`.
-#[inline]
-fn with_extra(fg: u32, bg: u32, extra: u8) -> (u32, u32) {
-    let e = extra as u32;
-    ((fg & !FG_EXTRA) | ((e & 0x1F) << 2), (bg & !BG_EXTRA) | ((e >> 5) << 4))
-}
-
-/// Attributes too large for a `Cell`, shared by every cell that uses them: an
-/// OSC 8 hyperlink and an SGR 58 underline color. Cells refer to them by index.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct CellExtra {
-    link: Option<OscLink>,
-    /// `0xRRGGBB00` | 1, or 0 for "same as the text color".
-    underline_color: u32,
-}
-
-/// An OSC 8 hyperlink: `ESC ] 8 ; id=... ; URI ST`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OscLink {
-    id: Box<str>,
-    uri: Box<str>,
-}
-
-#[derive(Copy, Clone, Default)]
-struct Pen {
-    fg: u32, // 0 = default, else rgb<<8 | FG_SET
-    bg: u32, // 0 = default, else rgb<<8 | BG_SET
-    attrs: u8,
-    /// Underline style (`UNDERLINE_*`).
-    underline: u8,
-    /// Index into `Grid::extras` (hyperlink + underline color), 0 = none.
-    extra: u8,
-}
-
-#[derive(Copy, Clone, Default)]
-struct Cursor {
-    row: usize,
-    col: usize,
-    pen: Pen,
-    line_drawing: bool,
-    origin_mode: bool,
-}
-
-/// Kitty keyboard protocol flags for one screen: the active flags plus the
-/// entries saved below them by `CSI > flags u` (at most 8, oldest dropped first).
-#[derive(Copy, Clone, Debug, Default)]
-struct KittyKeyboard {
-    flags: u8,
-    saved: [u8; 8],
-    len: usize,
-}
-
-impl KittyKeyboard {
-    /// The five progressive-enhancement bits the protocol defines.
-    const MASK: u8 = 0b1_1111;
-
-    fn push(&mut self, flags: u8) {
-        if self.len == self.saved.len() {
-            self.saved.copy_within(1.., 0);
-            self.len -= 1;
-        }
-        self.saved[self.len] = self.flags;
-        self.len += 1;
-        self.flags = flags & Self::MASK;
-    }
-
-    fn pop(&mut self, n: usize) {
-        for _ in 0..n {
-            if self.len == 0 {
-                self.flags = 0;
-                return;
-            }
-            self.len -= 1;
-            self.flags = self.saved[self.len];
-        }
-    }
-
-    /// `CSI = flags ; mode u`: 1 replaces, 2 sets bits, 3 clears bits.
-    fn set(&mut self, flags: u8, mode: usize) {
-        let flags = flags & Self::MASK;
-        match mode {
-            1 => self.flags = flags,
-            2 => self.flags |= flags,
-            3 => self.flags &= !flags,
-            _ => {}
-        }
-    }
-}
-
-/// Mouse reporting requested by the application (DECSET 9 / 1000 / 1002 / 1003).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum MouseTracking {
-    #[default]
-    Off,
-    /// Button presses and releases only.
-    Click,
-    /// Presses, releases, and motion while a button is held.
-    Drag,
-    /// All motion, with or without a button held.
-    Motion,
-}
-
-/// A text selection. The public API uses visible `(row, col)` coordinates; the grid
-/// stores rows as absolute line numbers so the selection stays on its text while
-/// output scrolls and while the viewport moves through history.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct Selection {
-    pub start: (usize, usize), // (row, col)
-    pub end: (usize, usize),   // (row, col)
-}
-
-/// Search matches on one visible row (see `Grid::search_hits`).
-pub struct SearchHits<'a> {
-    line: usize,
-    /// Index of the focused match within `hits`, if it is on this row.
-    current: Option<usize>,
-    hits: &'a [Selection],
-}
-
-/// How a cell is highlighted by find-in-terminal.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SearchHit {
-    None,
-    Match,
-    Current,
-}
-
-impl SearchHits<'_> {
-    #[inline]
-    pub fn at(&self, col: usize) -> SearchHit {
-        let pos = (self.line, col);
-        match self.hits.iter().position(|m| m.start <= pos && pos <= m.end) {
-            None => SearchHit::None,
-            Some(i) if Some(i) == self.current => SearchHit::Current,
-            Some(_) => SearchHit::Match,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Hyperlink {
-    pub row: usize,
-    pub start_col: usize,
-    pub end_col: usize,
-    pub url: String,
-    pub is_path: bool,
-}
-
-impl Selection {
-    #[inline]
-    pub fn ordered(self) -> ((usize, usize), (usize, usize)) {
-        if self.start <= self.end {
-            (self.start, self.end)
-        } else {
-            (self.end, self.start)
-        }
-    }
-}
 
 pub struct Grid {
     pub cols: usize,
