@@ -131,6 +131,8 @@ pub struct PostFx {
     uniforms: Vec<wgpu::Buffer>,
     /// Ping-pong targets; `targets[0]` receives the cell pass.
     targets: Vec<wgpu::TextureView>,
+    /// Cached bind groups per pass, created alongside targets when size changes.
+    bind_groups: Vec<wgpu::BindGroup>,
     format: wgpu::TextureFormat,
     size: (u32, u32),
     start: std::time::Instant,
@@ -245,6 +247,7 @@ impl PostFx {
             sampler,
             uniforms,
             targets: Vec::new(),
+            bind_groups: Vec::new(),
             format,
             size: (0, 0),
             start: now,
@@ -253,9 +256,10 @@ impl PostFx {
         })
     }
 
-    /// Discard offscreen ping-pong render targets to release VRAM when window shrinks.
+    /// Discard offscreen ping-pong render targets and cached bind groups to release VRAM when window shrinks.
     pub fn shrink(&mut self) {
         self.targets.clear();
+        self.bind_groups.clear();
         self.size = (0, 0);
     }
 
@@ -280,6 +284,20 @@ impl PostFx {
                     texture.create_view(&Default::default())
                 })
                 .collect();
+            self.bind_groups = (0..self.pipelines.len())
+                .map(|i| {
+                    let source = &self.targets[i % 2];
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("postfx"),
+                        layout: &self.bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.uniforms[i].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(source) },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        ],
+                    })
+                })
+                .collect();
         }
         &self.targets[0]
     }
@@ -287,7 +305,7 @@ impl PostFx {
     /// Run every pass after the cell pass, ending on `screen`.
     pub fn run(
         &mut self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         screen: &wgpu::TextureView,
@@ -312,16 +330,6 @@ impl PostFx {
         for (i, pipeline) in self.pipelines.iter().enumerate() {
             globals.to_screen = (i == last) as u32;
             queue.write_buffer(&self.uniforms[i], 0, bytemuck::bytes_of(&globals));
-            let source = &self.targets[i % 2];
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("postfx"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.uniforms[i].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(source) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            });
             let dest = if i == last { screen } else { &self.targets[(i + 1) % 2] };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("custom-shader"),
@@ -335,7 +343,7 @@ impl PostFx {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, &self.bind_groups[i], &[]);
             pass.draw(0..3, 0..1);
         }
     }

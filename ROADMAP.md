@@ -303,6 +303,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Ensure update staging directory & temporary binary cleanup on error (`src/update.rs`)**
   - Vulnerability / Disk leak: In `install_release()`, if extraction (`ditto`), architecture verification (`check_binary_arch`), or installation failed, `staging_dir` (on macOS) and `temp_dest` (standalone binary) were left behind in the updates cache without cleanup.
   - Fix: Guard both temporary locations with RAII drop guards so they are guaranteed to be cleaned up immediately whenever an error occurs.
+- [x] **Low: Cache GPU BindGroups in PostFx to prevent per-frame allocations (`src/postfx.rs`)**
+  - Vulnerability / GPU allocation churn: In `PostFx::run()`, `device.create_bind_group` was called every frame for each shader pipeline pass, allocating hundreds of transient GPU bind groups per second.
+  - Fix: Pre-create `bind_groups` inside `cell_target()` when render targets resize, reuse them in `run()`, and release them in `shrink()`.
 
 
 
