@@ -696,6 +696,8 @@ mod imp {
             (
                 "Litty",
                 vec![
+                    Native("About Litty", c"orderFrontStandardAboutPanel:", "", 0),
+                    Separator,
                     Litty("Settings…", Action::OpenConfig),
                     Litty("Check for Updates…", Action::CheckUpdate),
                     Litty("Secure Keyboard Entry", Action::ToggleSecureInput),
@@ -791,8 +793,12 @@ mod imp {
                     let entry = match item {
                         Separator => send_id(item_cls, c"separatorItem"),
                         Litty(label, action) => {
-                            // Quit needs Cmd+Q here: AppKit would otherwise terminate.
-                            let key = if action == Action::Quit { "q" } else { "" };
+                            // Standard macOS shortcuts: Cmd+Q for Quit, Cmd+, for Settings.
+                            let key = match action {
+                                Action::Quit => "q",
+                                Action::OpenConfig => ",",
+                                _ => "",
+                            };
                             new_item(label, sel(c"littyMenu:"), key).inspect(|&it| {
                                 msg_send!(it, c"setTarget:", target => Id);
                                 msg_send!(it, c"setTag:", menu_tag(action) => isize);
