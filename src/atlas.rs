@@ -272,6 +272,18 @@ impl Atlas {
         (underline, strike)
     }
 
+    /// Cell dimensions in logical points for a given font and point size.
+    pub fn cell_size_pt(fonts: &FontSet, pt: f32) -> (f64, f64) {
+        let font = &fonts.primary;
+        let lm = font
+            .horizontal_line_metrics(pt)
+            .expect("font has no horizontal line metrics");
+        let natural_w = font.metrics('M', pt).advance_width.round().max(1.0) as u32;
+        let natural_h = (lm.ascent - lm.descent + lm.line_gap).ceil().max(1.0) as u32;
+        let (adjust_w, adjust_h) = *CELL_ADJUST.lock();
+        (adjust_w.apply(natural_w) as f64, adjust_h.apply(natural_h) as f64)
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, fonts: Arc<FontSet>, px: f32) -> Self {
         let font = &fonts.primary;
         let lm = font
@@ -2399,6 +2411,15 @@ fn discover_nerd_fonts() -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cell_size_pt_values() {
+        let fonts = load_font(&["SFMono Nerd Font".to_string()]);
+        let (cw, ch) = Atlas::cell_size_pt(&fonts, 15.0);
+        println!("cell_size_pt for 15.0: cw = {cw}, ch = {ch}");
+        println!("For 143x41: inner_w = {}, inner_h = {}", 143.0 * cw + 8.0, 41.0 * ch + 8.0);
+        assert!(cw > 0.0 && ch > 0.0);
+    }
 
     #[test]
     fn blit_fit_scales_premultiplies_and_centers() {

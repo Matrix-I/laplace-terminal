@@ -29,6 +29,13 @@ mod imp {
         h: f64,
     }
 
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, Default)]
+    struct NSPoint {
+        x: f64,
+        y: f64,
+    }
+
     #[link(name = "objc", kind = "dylib")]
     extern "C" {
         fn objc_getClass(name: *const std::ffi::c_char) -> Id;
@@ -37,6 +44,7 @@ mod imp {
         fn class_addMethod(cls: Id, name: Id, imp: *const (), types: *const std::ffi::c_char) -> bool;
         fn class_getInstanceMethod(cls: Id, name: Id) -> Id;
         fn method_setImplementation(m: Id, imp: *const ()) -> *const ();
+        fn method_getImplementation(m: Id) -> *const ();
         fn objc_allocateClassPair(superclass: Id, name: *const std::ffi::c_char, extra: usize) -> Id;
         fn objc_registerClassPair(cls: Id);
     }
@@ -271,6 +279,177 @@ mod imp {
             if cfg.background_blur > 0 && cfg.background_opacity < 1.0 {
                 setup_visual_effect_view(ns_window);
             }
+
+            install_header_double_click_hook(ns_window);
+        }
+    }
+
+    static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+    static ORIGINAL_SEND_EVENT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static ORIGINAL_ZOOM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static SAVED_FRAMES: parking_lot::Mutex<Option<std::collections::HashMap<usize, NSRect>>> =
+        parking_lot::Mutex::new(None);
+
+    fn default_unzoomed_frame(vis: NSRect) -> NSRect {
+        let w = (vis.w * 0.70).round().max(600.0).min(vis.w);
+        let h = (vis.h * 0.70).round().max(400.0).min(vis.h);
+        let x = vis.x + ((vis.w - w) / 2.0).round();
+        let y = vis.y + ((vis.h - h) / 2.0).round();
+        NSRect { x, y, w, h }
+    }
+
+    unsafe fn toggle_window_zoom(this: Id) {
+        let screen = send_id(this, c"screen").or_else(|| {
+            let sc_cls = class(c"NSScreen")?;
+            send_id(sc_cls, c"mainScreen")
+        });
+        let Some(screen) = screen else { return };
+
+        let visible_frame = msg_send!(screen, c"visibleFrame"; -> NSRect);
+        let curr_frame = msg_send!(this, c"frame"; -> NSRect);
+
+        let is_at_visible = (curr_frame.x - visible_frame.x).abs() < 5.0
+            && (curr_frame.y - visible_frame.y).abs() < 5.0
+            && (curr_frame.w - visible_frame.w).abs() < 5.0
+            && (curr_frame.h - visible_frame.h).abs() < 5.0;
+        let is_appkit_zoomed = msg_send!(this, c"isZoomed"; -> bool);
+        let is_zoomed = is_at_visible || is_appkit_zoomed;
+
+        let mut lock = SAVED_FRAMES.lock();
+        let map = lock.get_or_insert_with(std::collections::HashMap::new);
+        let key = this as usize;
+
+        if is_zoomed {
+            let target = if let Some(saved) = map.remove(&key) {
+                let is_saved_zoomed =
+                    (saved.w - visible_frame.w).abs() < 5.0 && (saved.h - visible_frame.h).abs() < 5.0;
+                if saved.w > 100.0 && saved.h > 100.0 && !is_saved_zoomed {
+                    saved
+                } else {
+                    default_unzoomed_frame(visible_frame)
+                }
+            } else {
+                default_unzoomed_frame(visible_frame)
+            };
+            msg_send!(this, c"setFrame:display:animate:", target => NSRect, true => bool, true => bool);
+        } else {
+            map.insert(key, curr_frame);
+            msg_send!(this, c"setFrame:display:animate:", visible_frame => NSRect, true => bool, true => bool);
+        }
+    }
+
+    unsafe fn is_in_window_header(this: Id, event: Id) -> bool {
+        let loc = msg_send!(event, c"locationInWindow"; -> NSPoint);
+        let frame = msg_send!(this, c"frame"; -> NSRect);
+
+        // Don't intercept when in native full screen mode (NSWindowStyleMaskFullScreen = 1 << 14)
+        let style_mask = msg_send!(this, c"styleMask"; -> u64);
+        if (style_mask & (1 << 14)) != 0 {
+            return false;
+        }
+
+        // Left traffic-light buttons (close, minimize, zoom) are within x < 75.0
+        if loc.x < 75.0 || loc.x > frame.w {
+            return false;
+        }
+
+        let content_rect = msg_send!(this, c"contentRectForFrameRect:", frame => NSRect; -> NSRect);
+        let header_bottom = if frame.h > content_rect.h {
+            content_rect.h - 2.0
+        } else {
+            frame.h - 38.0
+        };
+
+        loc.y >= header_bottom && loc.y <= frame.h + 10.0
+    }
+
+    extern "C" fn custom_zoom(this: Id, _cmd: Id, _sender: Id) {
+        unsafe {
+            toggle_window_zoom(this);
+        }
+    }
+
+    extern "C" fn custom_send_event(this: Id, cmd: Id, event: Id) {
+        if !event.is_null() {
+            let is_header_double_click = unsafe {
+                // NSEventTypeLeftMouseDown = 1
+                let ev_type = msg_send!(event, c"type"; -> usize);
+                if ev_type == 1 {
+                    let click_count = msg_send!(event, c"clickCount"; -> isize);
+                    if click_count == 2 {
+                        let modifiers = msg_send!(event, c"modifierFlags"; -> usize);
+                        // Ignore if Command (1 << 20) or Control (1 << 18) is held
+                        if (modifiers & ((1 << 20) | (1 << 18))) == 0 {
+                            is_in_window_header(this, event)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if is_header_double_click {
+                unsafe {
+                    toggle_window_zoom(this);
+                }
+                return;
+            }
+        }
+
+        let orig = ORIGINAL_SEND_EVENT.load(Ordering::Relaxed);
+        if !orig.is_null() {
+            let f: extern "C" fn(Id, Id, Id) = unsafe { std::mem::transmute(orig) };
+            f(this, cmd, event);
+        }
+    }
+
+    unsafe fn install_header_double_click_hook(ns_window: Id) {
+        if HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let Some(window_cls) = send_id(ns_window, c"class") else { return };
+
+        // Swizzle sendEvent:
+        let send_event_sel = sel(c"sendEvent:");
+        let send_event_m = class_getInstanceMethod(window_cls, send_event_sel);
+        if !send_event_m.is_null() {
+            let orig_imp = method_getImplementation(send_event_m);
+            let added = class_addMethod(
+                window_cls,
+                send_event_sel,
+                custom_send_event as *const (),
+                c"v@:@".as_ptr(),
+            );
+            let prev = if added {
+                orig_imp
+            } else {
+                method_setImplementation(send_event_m, custom_send_event as *const ())
+            };
+            ORIGINAL_SEND_EVENT.store(prev as *mut c_void, Ordering::SeqCst);
+        }
+
+        // Swizzle zoom:
+        let zoom_sel = sel(c"zoom:");
+        let zoom_m = class_getInstanceMethod(window_cls, zoom_sel);
+        if !zoom_m.is_null() {
+            let orig_imp = method_getImplementation(zoom_m);
+            let added = class_addMethod(
+                window_cls,
+                zoom_sel,
+                custom_zoom as *const (),
+                c"v@:@".as_ptr(),
+            );
+            let prev = if added {
+                orig_imp
+            } else {
+                method_setImplementation(zoom_m, custom_zoom as *const ())
+            };
+            ORIGINAL_ZOOM.store(prev as *mut c_void, Ordering::SeqCst);
         }
     }
 
@@ -949,6 +1128,41 @@ mod imp {
             if let Some(path) = ns_string(path) {
                 msg_send!(ns_window, c"setRepresentedFilename:", path => Id);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_default_unzoomed_frame() {
+            let vis = NSRect { x: 0.0, y: 25.0, w: 1512.0, h: 957.0 };
+            let unzoomed = default_unzoomed_frame(vis);
+            assert!(unzoomed.w >= 600.0 && unzoomed.w <= vis.w);
+            assert!(unzoomed.h >= 400.0 && unzoomed.h <= vis.h);
+            assert!(unzoomed.x >= vis.x);
+            assert!(unzoomed.y >= vis.y);
+        }
+
+        #[test]
+        fn test_saved_frames_cycle() {
+            let mut lock = SAVED_FRAMES.lock();
+            let map = lock.get_or_insert_with(std::collections::HashMap::new);
+            let test_id = 0x12345usize;
+            let original_frame = NSRect { x: 100.0, y: 100.0, w: 900.0, h: 600.0 };
+            
+            // Save frame on zoom
+            map.insert(test_id, original_frame);
+            assert_eq!(map.len(), 1);
+
+            // Pop frame on unzoom
+            let restored = map.remove(&test_id).unwrap();
+            assert_eq!(restored.x, 100.0);
+            assert_eq!(restored.y, 100.0);
+            assert_eq!(restored.w, 900.0);
+            assert_eq!(restored.h, 600.0);
+            assert!(map.get(&test_id).is_none());
         }
     }
 }

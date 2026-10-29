@@ -591,6 +591,7 @@ impl Renderer {
         let _ = self.device.poll(wgpu::Maintain::Wait);
     }
 
+    #[allow(dead_code)]
     pub fn pad(&self) -> (u32, u32) {
         self.pad
     }

@@ -437,10 +437,27 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
     grid::set_scrollback_limit(cfg.scrollback_limit);
     grid::set_grapheme_default(cfg.grapheme_unicode);
 
+    atlas::set_font_tweaks(cfg.adjust_cell_width, cfg.adjust_cell_height, cfg.font_thicken);
+    atlas::set_font_features(&font_features(&cfg));
+    let font = atlas::load_font(&cfg.font_family);
+    let font_pt = cfg.font_size.clamp(6.0, 72.0);
+
+    let initial_inner_size = if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
+        let (cw_pt, ch_pt) = atlas::Atlas::cell_size_pt(&font, font_pt);
+        let pad_x = cfg.window_padding_x as f64;
+        let pad_y = cfg.window_padding_y as f64;
+        LogicalSize::new(
+            w_cols as f64 * cw_pt + 2.0 * pad_x,
+            w_rows as f64 * ch_pt + 2.0 * pad_y,
+        )
+    } else {
+        LogicalSize::new(960.0, 600.0)
+    };
+
     let attrs = Window::default_attributes()
         .with_title("Litty")
         .with_transparent(cfg.background_opacity < 1.0)
-        .with_inner_size(LogicalSize::new(960.0, 600.0));
+        .with_inner_size(initial_inner_size);
     // Native tabs (`macos-native-tabs`) group under one identifier. Created
     // hidden so AppKit cannot merge a New Window into a tab of the focused one
     // before tabbing is turned off for it; native tabs re-enable it.
@@ -472,10 +489,6 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         macos::set_dock_icon();
     }
 
-    atlas::set_font_tweaks(cfg.adjust_cell_width, cfg.adjust_cell_height, cfg.font_thicken);
-    atlas::set_font_features(&font_features(&cfg));
-    let font = atlas::load_font(&cfg.font_family);
-    let font_pt = cfg.font_size.clamp(6.0, 72.0);
     let font_px = (font_pt * window.scale_factor() as f32).round();
 
     let mut renderer = Renderer::new(
@@ -492,16 +505,8 @@ fn create_window(event_loop: &ActiveEventLoop, waker: &Waker, cwd: Option<&str>)
         renderer.set_custom_shaders(&cfg.custom_shaders, cfg.custom_shader_animation);
     }
 
-    if let (Some(w_cols), Some(w_rows)) = (cfg.window_width, cfg.window_height) {
-        let (cw, ch) = renderer.cell_size();
-        let (pad_x, pad_y) = renderer.pad();
-        let sf = window.scale_factor();
-        let inner_w = (w_cols * cw + 2 * pad_x) as f64 / sf;
-        let inner_h = (w_rows * ch + 2 * pad_y) as f64 / sf;
-        let _ = window.request_inner_size(LogicalSize::new(inner_w, inner_h));
-        let sz = window.inner_size();
-        renderer.resize(sz.width, sz.height);
-    }
+    let sz = window.inner_size();
+    renderer.resize(sz.width, sz.height);
 
     let (cols, rows) = renderer.grid_size_for_tabs(false);
     let (cw, ch) = renderer.cell_size();

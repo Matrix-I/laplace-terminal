@@ -426,3 +426,48 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Jump to previous / next prompt using OSC 133 marks
 - [x] Select or copy the output of the last command using OSC 133 marks
 - [x] Keep prompt marks across a resize (remapped through the reflow)
+
+## Code Health & Hardening (Audit Backlog)
+
+### Security Fixes
+- [ ] Fix token leak in process table: pass GitHub API token via header file/stdin instead of command line flags in `curl` (`src/update.rs`)
+- [ ] Restrict Kitty graphics file protocol (`medium=f`) to user-configured safe directories instead of loose blacklist (`src/graphics.rs`)
+- [ ] Restrict / validate POSIX shared memory unlinking (`shm_unlink`) to Laplace-owned prefixes (`src/graphics.rs`)
+- [ ] Gate OSC 52 clipboard write behind user confirmation or configuration flag (`src/grid.rs`, `src/main.rs`)
+- [ ] Add cryptographic signature verification (Minisign / GPG) for auto-updates (`src/update.rs`)
+- [ ] Fix Unix domain socket creation permission race window (`src/hotkey.rs`)
+- [ ] Use absolute paths for system utility executions (`curl`, `codesign`, `touch`, `open`, `pbcopy`/`pbpaste`, `xclip`) instead of bare `$PATH` lookups
+
+### Crash & Panic Fixes
+- [ ] Fix `f32::clamp(min, max)` panic (`assertion failed: min <= max`) when split pane rects shrink to <= 1 cell (`src/split.rs`)
+- [ ] Fix out-of-bounds panic on `self.instances` during IME preedit rendering (`src/renderer.rs`)
+- [ ] Fix integer underflow panic when `total_rows == 0` on tiny/zero-sized grid (`src/renderer.rs`)
+- [ ] Fix integer underflow and invalid scissor rect panic in flipped target rendering (`src/image_layer.rs`)
+- [ ] Fix index out-of-bounds panic when searching on an empty grid (`src/search.rs`)
+- [ ] Prevent WGSL shader division by zero when `u.cols == 0` (`src/shader.wgsl`)
+- [ ] Guard against panicking on empty `panes` in `Tab::active_pane` (`src/main.rs`)
+
+### Performance & Concurrency Fixes
+- [ ] Fix quadratic $O(H^2 \cdot W)$ reallocation and memory copy loop in Sixel image decoder (`src/graphics.rs`)
+- [ ] Replace $O(N)$ linear slot scan on atlas cache miss with constant/logarithmic LRU tracking (`src/atlas.rs`)
+- [ ] Make clipboard copy and paste asynchronous to prevent UI thread freezing on blocking pipe/xclip (`src/main.rs`)
+- [ ] Cache font directory scan results to eliminate massive synchronous disk I/O on startup and config reload (`src/fontdb.rs`)
+- [ ] Add timeout (`set_read_timeout`) to hotkey Unix control socket listener to prevent permanent thread hang (`src/hotkey.rs`)
+- [ ] Reduce `grid.lock()` hold duration in PTY reader thread by buffering or chunking feed operations (`src/pty.rs`)
+
+### Memory Leaks & Resource Management
+- [ ] Bounded channel and backpressure for PTY writer thread to prevent unbounded memory growth from terminal queries (`src/pty.rs`)
+- [ ] Cap maximum buffered bytes and add timeouts for unclosed DCS / APC image streams (`src/grid.rs`)
+- [ ] Stream hashing in `sha256_digest` without duplicating entire multi-megabyte download buffer (`src/update.rs`)
+- [ ] Clean up `ACTIVE_PROGRESS_WINDOW` reference if progress dialog is closed by user (`src/macos.rs`)
+- [ ] Close file descriptors > 4096 on macOS after `fork()` to prevent descriptor leaks into child shells (`src/pty.rs`)
+- [ ] Ensure NUL termination in `proc_vnodepathinfo` path buffer before `CStr::from_ptr` (`src/pty.rs`)
+
+### Code Quality & Logic Integrity
+- [ ] Fix history deletion wiping all historical occurrences of a command string instead of the single selected entry (`src/history.rs`)
+- [ ] Use unique temporary filenames in `remove_command_from_file` to prevent collisions between concurrent windows (`src/history.rs`)
+- [ ] Scope history file modifications to the current active shell rather than mutating other shells' history files (`src/history.rs`)
+- [ ] Replace unsound static lifetime cast on `Arc<Mmap>` font buffers in shaper face (`src/atlas.rs`)
+- [ ] Check and report errors from `codesign` and `touch` in macOS app bundle updater (`src/update.rs`)
+- [ ] Avoid duplicate KVO observer registrations on macOS effective appearance changes (`src/macos.rs`)
+
