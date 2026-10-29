@@ -144,6 +144,12 @@ impl ImageLayer {
         }
     }
 
+    /// Discard all cached GPU textures and batches (e.g. when shrinking drawables or idle in Dock).
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.batch.clear();
+    }
+
     /// Upload new images and this frame's quads. `screen` is the target size.
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, placed: &[Placed], screen: (u32, u32), flip: bool) {
         self.frame += 1;

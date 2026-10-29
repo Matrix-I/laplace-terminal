@@ -558,6 +558,12 @@ impl Renderer {
     /// last drawables of a layer alive (about 30 MB for a Retina window),
     /// so leave it holding tiny ones instead.
     pub fn shrink_drawables(&mut self) {
+        self.images.clear();
+        self.placed.clear();
+        self.image_draws.clear();
+        if let Some(fx) = &mut self.postfx {
+            fx.shrink();
+        }
         self.config.width = 1;
         self.config.height = 1;
         self.surface.configure(&self.device, &self.config);

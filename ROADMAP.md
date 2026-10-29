@@ -273,6 +273,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Critical: Reap child process on PTY writer/reader setup failure (`src/pty.rs`)**
   - Vulnerability / Zombie leak: In `Pty::spawn_in`, if `dup_cloexec(master)` or `thread::Builder::spawn` failed, or in `spawn_reader` if `dup_cloexec` or `spawn` failed, the function returned early without calling `reap_child(pid)`. The child shell process was left running or became an un-reaped zombie process.
   - Fix: Catch errors and guarantee `reap_child(pid)` is called on all error paths before returning `Err(e)`.
+- [x] **Medium: Release GPU image textures and postfx render targets on window shrink / tab close (`src/image_layer.rs`, `src/postfx.rs`, `src/renderer.rs`)**
+  - Vulnerability / VRAM leak: `Renderer::shrink_drawables()` shrinks swapchain textures to 1x1 when running tabless in Dock, but `ImageLayer::textures` (cached Kitty/Sixel GPU textures) and `PostFx::targets` (offscreen ping-pong textures) remained allocated in GPU VRAM indefinitely.
+  - Fix: Add `ImageLayer::clear()` and `PostFx::shrink()`, and invoke them inside `shrink_drawables()` to reclaim all GPU VRAM textures immediately.
 
 
 ## Terminal protocols

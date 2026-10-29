@@ -253,6 +253,12 @@ impl PostFx {
         })
     }
 
+    /// Discard offscreen ping-pong render targets to release VRAM when window shrinks.
+    pub fn shrink(&mut self) {
+        self.targets.clear();
+        self.size = (0, 0);
+    }
+
     /// The texture the cell pass draws into, (re)created at the window size.
     pub fn cell_target(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &wgpu::TextureView {
         // The last pass draws to the window, so N passes need N targets at most 2.
