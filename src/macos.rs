@@ -145,9 +145,15 @@ mod imp {
         fn CGEventSourceFlagsState(state_id: i32) -> u64;
     }
 
+    static SECURE_INPUT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     /// Secure Keyboard Entry: other processes cannot observe keystrokes. Calls
     /// are reference-counted by macOS, so every enable needs one disable.
     pub fn set_secure_input(on: bool) {
+        use std::sync::atomic::Ordering;
+        if SECURE_INPUT_ACTIVE.swap(on, Ordering::SeqCst) == on {
+            return;
+        }
         // SAFETY: plain Carbon calls without arguments.
         unsafe {
             if on {
