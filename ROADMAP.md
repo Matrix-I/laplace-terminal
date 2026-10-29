@@ -348,6 +348,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Low: Inverted nested split ratio adjustment in multi-pane layouts (`src/split.rs`)**
   - Bug / Usability: In `SplitNode::adjust_ratio()`, `first.contains(target_id)` evaluates to `true` at the root split node if `target_id` is located anywhere inside the first subtree. As a result, the outermost root split ratio is adjusted rather than recursing down to the innermost split containing the active pane.
   - Fix: Recurse into child subtrees first (`first.adjust_ratio(...) || second.adjust_ratio(...)`), and only adjust the local ratio if the target is an immediate direct leaf of the node.
+- [x] **Low: Eliminate per-line `Vec` heap allocations during window resize reflow (`src/grid.rs`)**
+  - Optimization / Heap churn: During terminal resize, reflowing scrollback unwrapped each line into a separate heap-allocated `Vec<Cell>`, triggering thousands of small heap allocations when resizing windows with deep scrollback history.
+  - Fix: Flatten intermediate logical line extraction into a single contiguous `logical_cells` buffer with `line_spans: Vec<Range<usize>>`, eliminating per-line heap allocations.
 
 
 

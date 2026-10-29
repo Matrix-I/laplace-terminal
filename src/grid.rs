@@ -2299,40 +2299,46 @@ impl Grid {
         let main_cur = if self.alt_active { self.saved_main } else { self.cur };
         let total = self.history + self.rows;
         let cursor_row = self.history + main_cur.row.min(self.rows - 1);
-        let mut lines: Vec<Vec<Cell>> = Vec::new();
-        let mut current: Vec<Cell> = Vec::new();
-        let mut cursor = (0, 0);
-        // Logical line and offset into it of every old row, to move prompt marks.
         let remap = !self.prompts.is_empty() || self.graphics.placements.iter().any(|p| !p.alt);
         let mut row_pos: Vec<(usize, usize)> = Vec::with_capacity(if remap { total } else { 0 });
+
+        let mut logical_cells: Vec<Cell> = Vec::with_capacity(total * self.cols);
+        let mut line_spans: Vec<std::ops::Range<usize>> = Vec::with_capacity(total);
+        let mut current_start = 0;
+        let mut cursor = (0, 0);
         for i in 0..total {
             let p = (self.top + self.cap - self.history + i) % self.cap;
+            let current_len = logical_cells.len() - current_start;
             if i == cursor_row {
-                cursor = (lines.len(), current.len() + main_cur.col);
+                cursor = (line_spans.len(), current_len + main_cur.col);
             }
             if remap {
-                row_pos.push((lines.len(), current.len()));
+                row_pos.push((line_spans.len(), current_len));
             }
-            current.extend_from_slice(&self.cells[p * self.cols..(p + 1) * self.cols]);
+            logical_cells.extend_from_slice(&self.cells[p * self.cols..(p + 1) * self.cols]);
             if self.wrapped[p] && i + 1 < total {
                 continue;
             }
-            let keep = if lines.len() == cursor.0 && i >= cursor_row { cursor.1 } else { 0 };
-            let content = current.iter().rposition(|c| c.codepoint != 0 || c.bg & BG_SET != 0).map_or(0, |i| i + 1);
-            current.truncate(content.max(keep).min(current.len()));
-            lines.push(std::mem::take(&mut current));
+            let keep = if line_spans.len() == cursor.0 && i >= cursor_row { cursor.1 } else { 0 };
+            let current = &logical_cells[current_start..];
+            let content = current.iter().rposition(|c| c.codepoint != 0 || c.bg & BG_SET != 0).map_or(0, |idx| idx + 1);
+            let target_len = content.max(keep).min(current.len());
+            logical_cells.truncate(current_start + target_len);
+            line_spans.push(current_start..logical_cells.len());
+            current_start = logical_cells.len();
         }
         // Blank lines below the cursor are not content worth keeping.
-        while lines.len() > cursor.0 + 1 && lines.last().is_some_and(|l| l.is_empty()) {
-            lines.pop();
+        while line_spans.len() > cursor.0 + 1 && line_spans.last().is_some_and(|r| r.is_empty()) {
+            line_spans.pop();
         }
 
         // 2. Re-wrap every logical line to the new width.
-        let mut out: Vec<Cell> = Vec::new();
-        let mut out_wrapped: Vec<bool> = Vec::new();
+        let mut out: Vec<Cell> = Vec::with_capacity(total * cols);
+        let mut out_wrapped: Vec<bool> = Vec::with_capacity(total);
         let mut new_cursor = (0, 0);
-        let mut line_rows: Vec<usize> = Vec::with_capacity(if remap { lines.len() + 1 } else { 0 });
-        for (li, line) in lines.iter().enumerate() {
+        let mut line_rows: Vec<usize> = Vec::with_capacity(if remap { line_spans.len() + 1 } else { 0 });
+        for (li, span) in line_spans.iter().enumerate() {
+            let line = &logical_cells[span.clone()];
             let first_row = out_wrapped.len();
             if remap {
                 line_rows.push(first_row);
@@ -2367,6 +2373,10 @@ impl Grid {
                 new_cursor = (row, (col + extra).min(cols - 1));
             }
         }
+
+        // Drop intermediate logical line storage before allocating new grid cells to reduce peak memory.
+        drop(logical_cells);
+        drop(line_spans);
 
         // 3. Keep the cursor on screen; everything above it becomes scrollback.
         let total_rows = out_wrapped.len().max(new_cursor.0 + 1);
