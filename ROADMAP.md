@@ -315,6 +315,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **High: Prevent child process zombies on early Pty drop or reader thread panic (`src/pty.rs`)**
   - Vulnerability / Zombie leak: If a `Pty` was instantiated via `Pty::spawn_in` and dropped before `spawn_reader` ran (or if pane creation failed), `Pty` lacked a `Drop` implementation and never called `reap_child(pid)`. Furthermore, if the reader thread panicked during byte feed/parsing, the thread unwound without reaping the child. The child shell process was left permanently as an un-reaped zombie in the OS process table.
   - Fix: Add `reader_spawned: AtomicBool` to `Pty` with `Drop for Pty` calling `reap_child(self.pid)` when the reader thread was not spawned. In `spawn_reader`, introduce an RAII `ChildReaper` drop guard to guarantee `reap_child(pid)` runs even if the reader thread panics.
+- [x] **Medium: Invalidate pane state on tab close and single-pane child exit (`src/main.rs`)**
+  - Vulnerability / State leak: Closing a tab via `close_active_tab()` (`Cmd+W`) or child process exit in a single-pane tab removed the tab but did not invoke `State::invalidate_pane_state()`, leaving dead pane IDs in `search.pane_id`, `hovered_link`, `scrollbar_drag`, `active_click_pane_id`, and `last_mouse_report`.
+  - Fix: Invalidate pane state for all panes in the removed tab in `close_active_tab()` and in `AppEvent::ChildExit`.
 
 
 

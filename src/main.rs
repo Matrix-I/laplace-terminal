@@ -668,6 +668,7 @@ impl ApplicationHandler<AppEvent> for App {
                         return;
                     }
 
+                    s.invalidate_pane_state(exited_id);
                     s.tabs.remove(tab_pos);
                     if s.tabs.is_empty() {
                         s.close_requested = true;
@@ -2200,7 +2201,10 @@ fn close_active_tab(s: &mut State) {
         close_last_window(s);
         return;
     }
-    s.tabs.remove(s.active);
+    let removed = s.tabs.remove(s.active);
+    for p in &removed.panes {
+        s.invalidate_pane_state(p.id);
+    }
     if s.tabs.is_empty() {
         close_last_window(s);
         return;
