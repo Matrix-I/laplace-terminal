@@ -279,6 +279,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Clean up unused `CellExtra` / hyperlink slots on screen & history clear (`src/grid.rs`)**
   - Vulnerability / Leak: `Grid::clear_screen_and_history()` resets rows and history, but left up to 256 `CellExtra` (holding heap-allocated `OscLink` URI and ID strings) in `self.extras` until the table overflowed.
   - Fix: Add `trim_extras()` and invoke it on `clear_screen_and_history()` and `full_reset()` to drop dead hyperlink strings and truncate empty slots back to `[None]` immediately.
+- [x] **Low: Fix Objective-C `NSVisualEffectView` retain count leak (`src/macos.rs`)**
+  - Vulnerability / Leak: In `setup_background_blur()`, `NSVisualEffectView` was allocated with `alloc` + `initWithFrame:` (+1 retain count) and added via `addSubview:positioned:relativeTo:` (incrementing retain count to 2). Missing `release` left it permanently retained.
+  - Fix: Send `msg_send!(effect_view, c"release")` immediately after `addSubview:positioned:relativeTo:`.
 
 
 ## Terminal protocols

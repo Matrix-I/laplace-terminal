@@ -341,6 +341,7 @@ mod imp {
             content_view, c"addSubview:positioned:relativeTo:",
             effect_view => Id, -1 => i64, std::ptr::null_mut() => Id
         );
+        msg_send!(effect_view, c"release");
     }
 
     static REOPEN_PROXY: parking_lot::Mutex<Option<winit::event_loop::EventLoopProxy<crate::AppEvent>>> =
