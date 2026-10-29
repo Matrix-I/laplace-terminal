@@ -2269,7 +2269,10 @@ fn split_active_pane(
             s.renderer.invalidate();
             s.window.request_redraw();
         }
-        Err(e) => eprintln!("laplace: failed to spawn split pane: {e}"),
+        Err(e) => {
+            tab.layout.remove_pane(new_id);
+            eprintln!("laplace: failed to spawn split pane: {e}");
+        }
     }
 }
 

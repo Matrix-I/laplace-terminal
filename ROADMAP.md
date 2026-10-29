@@ -318,6 +318,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Invalidate pane state on tab close and single-pane child exit (`src/main.rs`)**
   - Vulnerability / State leak: Closing a tab via `close_active_tab()` (`Cmd+W`) or child process exit in a single-pane tab removed the tab but did not invoke `State::invalidate_pane_state()`, leaving dead pane IDs in `search.pane_id`, `hovered_link`, `scrollbar_drag`, `active_click_pane_id`, and `last_mouse_report`.
   - Fix: Invalidate pane state for all panes in the removed tab in `close_active_tab()` and in `AppEvent::ChildExit`.
+- [x] **Medium: Roll back split tree layout on `spawn_pane` failure (`src/main.rs`)**
+  - Vulnerability / State leak: In `split_active_pane()`, `tab.layout.split_pane(target_id, new_id, direction)` inserted `new_id` into the tree before `spawn_pane()`. If PTY or process spawning failed, `new_id` was never pushed into `tab.panes`, permanently leaving a ghost split leaf with no backing pane and corrupting layout navigation.
+  - Fix: Call `tab.layout.remove_pane(new_id)` on `spawn_pane` error to restore the split tree.
 
 
 
