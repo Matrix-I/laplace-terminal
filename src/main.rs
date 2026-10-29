@@ -3104,6 +3104,12 @@ fn clipboard_command(bin: &str) -> std::process::Command {
 }
 
 fn copy_to_clipboard(text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        if macos::clipboard_write_string(text) {
+            return;
+        }
+    }
     let text = text.to_string();
     let _ = std::thread::Builder::new()
         .name("litty-clipboard-copy".into())
@@ -3170,6 +3176,13 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 fn paste_from_clipboard() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(text) = macos::clipboard_string() {
+            return Some(text);
+        }
+    }
+
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = std::thread::Builder::new()
         .name("litty-clipboard-paste".into())
@@ -3204,7 +3217,7 @@ fn paste_from_clipboard() -> Option<String> {
             let _ = tx.send(None);
         });
 
-    rx.recv_timeout(std::time::Duration::from_millis(750)).ok().flatten()
+    rx.recv_timeout(std::time::Duration::from_millis(100)).ok().flatten()
 }
 
 fn main() {
@@ -3318,6 +3331,14 @@ mod paste_tests {
     #[test]
     fn paste_strips_escape_and_c1_csi_but_keeps_unicode() {
         assert_eq!(paste_payload("Việt\x1b[31m\u{9b}2Jnam", false), "Việt[31m2Jnam".as_bytes());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn direct_macos_clipboard_read_write() {
+        let msg = "litty_test_clipboard_12345";
+        assert!(crate::macos::clipboard_write_string(msg));
+        assert_eq!(crate::macos::clipboard_string().as_deref(), Some(msg));
     }
 }
 

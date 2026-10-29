@@ -212,6 +212,45 @@ mod imp {
         (!obj.is_null()).then_some(obj)
     }
 
+    unsafe fn ns_string_to_string(ns_str: Id) -> Option<String> {
+        let utf8_ptr = msg_send!(ns_str, c"UTF8String"; -> *const std::ffi::c_char);
+        if utf8_ptr.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(utf8_ptr).to_str().ok().map(|s| s.to_string())
+    }
+
+    /// Read plain text directly from NSPasteboard without thread spawning or pbpaste subprocess.
+    pub fn clipboard_string() -> Option<String> {
+        unsafe {
+            let pb_cls = class(c"NSPasteboard")?;
+            let pb = send_id(pb_cls, c"generalPasteboard")?;
+            let str_type = ns_string("public.utf8-plain-text")?;
+            let s = msg_send!(pb, c"stringForType:", str_type => Id; -> Id);
+            if !s.is_null() {
+                return ns_string_to_string(s);
+            }
+            let legacy_type = ns_string("NSStringPboardType")?;
+            let s2 = msg_send!(pb, c"stringForType:", legacy_type => Id; -> Id);
+            if !s2.is_null() {
+                return ns_string_to_string(s2);
+            }
+            None
+        }
+    }
+
+    /// Write plain text directly to NSPasteboard without thread spawning or pbcopy subprocess.
+    pub fn clipboard_write_string(s: &str) -> bool {
+        unsafe {
+            let Some(pb_cls) = class(c"NSPasteboard") else { return false };
+            let Some(pb) = send_id(pb_cls, c"generalPasteboard") else { return false };
+            let _ = msg_send!(pb, c"clearContents"; -> isize);
+            let Some(str_val) = ns_string(s) else { return false };
+            let Some(str_type) = ns_string("public.utf8-plain-text") else { return false };
+            msg_send!(pb, c"setString:forType:", str_val => Id, str_type => Id; -> bool)
+        }
+    }
+
     unsafe fn shared_application() -> Option<Id> {
         send_id(class(c"NSApplication")?, c"sharedApplication")
     }
@@ -1271,5 +1310,11 @@ mod stub {
         let _ = std::process::Command::new(zenity_bin)
             .args(["--info", "--title", title, "--text", text])
             .status();
+    }
+    pub fn clipboard_string() -> Option<String> {
+        None
+    }
+    pub fn clipboard_write_string(_s: &str) -> bool {
+        false
     }
 }
