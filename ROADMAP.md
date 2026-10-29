@@ -490,7 +490,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 ### Performance & Concurrency Fixes
 - [ ] Reduce `grid.lock()` mutex hold duration in `renderer.rs` across rasterization and GPU texture uploads (`src/renderer.rs`)
 - [x] Consolidate multiple `grid.lock()` acquisitions into a single guard per keystroke in `handle_key` (`src/main.rs`)
-- [ ] Throttle and rate-limit thread/process spawning in `copy_to_clipboard` and `spawn_detached` (`src/main.rs`)
+- [x] Throttle and rate-limit thread/process spawning in `copy_to_clipboard` and `spawn_detached` (`src/main.rs`)
 - [x] Eliminate synchronous main-thread 750ms blocking on clipboard paste (`src/main.rs`)
 - [ ] Memoize parsed font metadata in `fontdb.rs` to eliminate massive synchronous disk I/O on font cache miss (`src/fontdb.rs`)
 - [ ] Increase default glyph atlas dimensions and prevent invisible `BLANK_SLOT` drops under high Unicode/CJK glyph diversity (`src/atlas.rs`, `src/renderer.rs`)

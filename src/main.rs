@@ -1664,18 +1664,33 @@ fn render_active(s: &mut State) {
     }
 }
 
+static IN_FLIGHT_DETACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CONCURRENT_DETACHED: usize = 16;
+
 /// Spawn a helper process (`open`, `xdg-open`) and reap it on a background thread
-/// so it never lingers as a zombie.
+/// so it never lingers as a zombie, with bounded concurrency to prevent fork bombs.
 pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
-    let mut child = cmd.spawn()?;
+    if IN_FLIGHT_DETACHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONCURRENT_DETACHED {
+        IN_FLIGHT_DETACHED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "too many concurrent detached processes"));
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            IN_FLIGHT_DETACHED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(e);
+        }
+    };
     let pid = child.id();
     if let Err(e) = std::thread::Builder::new()
         .name("reap-helper".into())
         .stack_size(32 * 1024)
         .spawn(move || {
             let _ = child.wait();
+            IN_FLIGHT_DETACHED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         })
     {
+        IN_FLIGHT_DETACHED.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
@@ -3106,6 +3121,9 @@ fn clipboard_command(bin: &str) -> std::process::Command {
     cmd
 }
 
+static IN_FLIGHT_COPIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CONCURRENT_COPIES: usize = 2;
+
 fn copy_to_clipboard(text: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -3113,11 +3131,22 @@ fn copy_to_clipboard(text: &str) {
             return;
         }
     }
+    if IN_FLIGHT_COPIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONCURRENT_COPIES {
+        IN_FLIGHT_COPIES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
     let text = text.to_string();
-    let _ = std::thread::Builder::new()
+    if let Err(_) = std::thread::Builder::new()
         .name("litty-clipboard-copy".into())
         .stack_size(128 * 1024)
         .spawn(move || {
+            struct Guard;
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    IN_FLIGHT_COPIES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = Guard;
             use std::io::Write;
             use std::process::Stdio;
 
@@ -3145,7 +3174,10 @@ fn copy_to_clipboard(text: &str) {
                     return;
                 }
             }
-        });
+        })
+    {
+        IN_FLIGHT_COPIES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Build the bytes sent to the PTY for a clipboard paste.
@@ -3342,6 +3374,20 @@ mod paste_tests {
         let msg = "litty_test_clipboard_12345";
         assert!(crate::macos::clipboard_write_string(msg));
         assert_eq!(crate::macos::clipboard_string().as_deref(), Some(msg));
+    }
+
+    #[test]
+    fn spawn_detached_rate_limit() {
+        use super::{spawn_detached, IN_FLIGHT_DETACHED, MAX_CONCURRENT_DETACHED};
+        use std::sync::atomic::Ordering;
+
+        IN_FLIGHT_DETACHED.store(MAX_CONCURRENT_DETACHED, Ordering::SeqCst);
+        let mut cmd = std::process::Command::new("/bin/echo");
+        let res = spawn_detached(&mut cmd);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+
+        IN_FLIGHT_DETACHED.store(0, Ordering::SeqCst);
     }
 }
 
