@@ -448,12 +448,12 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Guard against panicking on empty `panes` in `Tab::active_pane` (`src/main.rs`)
 
 ### Performance & Concurrency Fixes
-- [ ] Fix quadratic $O(H^2 \cdot W)$ reallocation and memory copy loop in Sixel image decoder (`src/graphics.rs`)
-- [ ] Replace $O(N)$ linear slot scan on atlas cache miss with constant/logarithmic LRU tracking (`src/atlas.rs`)
-- [ ] Make clipboard copy and paste asynchronous to prevent UI thread freezing on blocking pipe/xclip (`src/main.rs`)
-- [ ] Cache font directory scan results to eliminate massive synchronous disk I/O on startup and config reload (`src/fontdb.rs`)
-- [ ] Add timeout (`set_read_timeout`) to hotkey Unix control socket listener to prevent permanent thread hang (`src/hotkey.rs`)
-- [ ] Reduce `grid.lock()` hold duration in PTY reader thread by buffering or chunking feed operations (`src/pty.rs`)
+- [x] Fix quadratic $O(H^2 \cdot W)$ reallocation and memory copy loop in Sixel image decoder (`src/graphics.rs`)
+- [x] Replace $O(N)$ linear slot scan on atlas cache miss with constant/logarithmic LRU tracking (`src/atlas.rs`)
+- [x] Make clipboard copy and paste asynchronous to prevent UI thread freezing on blocking pipe/xclip (`src/main.rs`)
+- [x] Cache font directory scan results to eliminate massive synchronous disk I/O on startup and config reload (`src/fontdb.rs`)
+- [x] Add timeout (`set_read_timeout`) to hotkey Unix control socket listener to prevent permanent thread hang (`src/hotkey.rs`)
+- [x] Reduce `grid.lock()` hold duration in PTY reader thread by buffering or chunking feed operations (`src/pty.rs`)
 
 ### Memory Leaks & Resource Management
 - [ ] Bounded channel and backpressure for PTY writer thread to prevent unbounded memory growth from terminal queries (`src/pty.rs`)

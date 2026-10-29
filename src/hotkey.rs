@@ -106,6 +106,7 @@ pub fn listen(proxy: EventLoopProxy<AppEvent>) {
         for stream in listener.incoming().flatten() {
             let mut buf = [0u8; 64];
             let mut stream = stream;
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
             let n = stream.read(&mut buf).unwrap_or(0);
             if &buf[..n] == TOGGLE {
                 toggle();

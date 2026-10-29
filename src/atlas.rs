@@ -245,6 +245,10 @@ pub struct Atlas {
     map: HashMap<u32, u16>,
     slot_cp: Vec<u32>,
     slot_used: Vec<u64>,
+    lru_head: u16,
+    lru_tail: u16,
+    lru_prev: Vec<u16>,
+    lru_next: Vec<u16>,
     frame: u64,
     evicted: bool,
     scratch: Vec<u8>,
@@ -322,6 +326,10 @@ impl Atlas {
             map: HashMap::with_capacity(n_slots as usize),
             slot_cp: vec![0; n_slots as usize],
             slot_used: vec![0; n_slots as usize],
+            lru_head: 0,
+            lru_tail: 0,
+            lru_prev: vec![0; n_slots as usize],
+            lru_next: vec![0; n_slots as usize],
             frame: 1,
             evicted: false,
             scratch: vec![0; (cell_w * cell_h) as usize],
@@ -339,6 +347,63 @@ impl Atlas {
         atlas
     }
 
+    fn lru_push_tail(&mut self, s: u16) {
+        if self.lru_head == 0 {
+            self.lru_head = s;
+            self.lru_tail = s;
+            self.lru_prev[s as usize] = 0;
+            self.lru_next[s as usize] = 0;
+        } else {
+            self.lru_prev[s as usize] = self.lru_tail;
+            self.lru_next[s as usize] = 0;
+            self.lru_next[self.lru_tail as usize] = s;
+            self.lru_tail = s;
+        }
+    }
+
+    fn lru_remove(&mut self, s: u16) {
+        let p = self.lru_prev[s as usize];
+        let n = self.lru_next[s as usize];
+        if p != 0 {
+            self.lru_next[p as usize] = n;
+        } else if self.lru_head == s {
+            self.lru_head = n;
+        }
+        if n != 0 {
+            self.lru_prev[n as usize] = p;
+        } else if self.lru_tail == s {
+            self.lru_tail = p;
+        }
+        self.lru_prev[s as usize] = 0;
+        self.lru_next[s as usize] = 0;
+    }
+
+    fn lru_touch(&mut self, s: u16) {
+        if self.lru_tail == s {
+            return;
+        }
+        self.lru_remove(s);
+        self.lru_push_tail(s);
+    }
+
+    fn lru_touch_head(&mut self, s: u16) {
+        if self.lru_head == s {
+            return;
+        }
+        self.lru_remove(s);
+        if self.lru_head == 0 {
+            self.lru_head = s;
+            self.lru_tail = s;
+            self.lru_prev[s as usize] = 0;
+            self.lru_next[s as usize] = 0;
+        } else {
+            self.lru_next[s as usize] = self.lru_head;
+            self.lru_prev[s as usize] = 0;
+            self.lru_prev[self.lru_head as usize] = s;
+            self.lru_head = s;
+        }
+    }
+
     fn preload_ascii(&mut self, queue: &wgpu::Queue) {
         let total_slots = 95u32.min(self.n_slots);
         let rows_needed = total_slots.div_ceil(self.slots_per_row);
@@ -352,6 +417,7 @@ impl Atlas {
             }
             let s = self.next_free as u16;
             self.next_free += 1;
+            self.lru_push_tail(s);
 
             self.rasterize(c);
             let slot = s as u32;
@@ -455,28 +521,32 @@ impl Atlas {
         if cp < 128 {
             let s = self.ascii[cp as usize];
             if s != BLANK_SLOT {
-                self.slot_used[s as usize] = self.frame;
+                if self.slot_used[s as usize] != self.frame {
+                    self.slot_used[s as usize] = self.frame;
+                    self.lru_touch(s);
+                }
                 return s;
             }
         } else if let Some(&s) = self.map.get(&cp) {
-            self.slot_used[s as usize] = self.frame;
+            if self.slot_used[s as usize] != self.frame {
+                self.slot_used[s as usize] = self.frame;
+                self.lru_touch(s);
+            }
             return s;
         }
         let s = if self.next_free < self.n_slots {
+            let s = self.next_free as u16;
             self.next_free += 1;
-            (self.next_free - 1) as u16
+            self.lru_push_tail(s);
+            s
         } else {
-            // LRU among slots not already used for this frame.
-            let mut best = None;
-            let mut best_used = u64::MAX;
-            for i in 1..self.n_slots as usize {
-                let u = self.slot_used[i];
-                if u < best_used && u != self.frame {
-                    best_used = u;
-                    best = Some(i);
-                }
+            // Constant-time O(1) LRU eviction among slots not already used for this frame.
+            let candidate = self.lru_head;
+            if candidate == 0 || self.slot_used[candidate as usize] == self.frame {
+                return BLANK_SLOT;
             }
-            let Some(i) = best else { return BLANK_SLOT };
+            let i = candidate as usize;
+            self.lru_touch(candidate);
             let old_cp = self.slot_cp[i];
             if old_cp < 128 {
                 self.ascii[old_cp as usize] = BLANK_SLOT;
@@ -484,7 +554,7 @@ impl Atlas {
                 self.map.remove(&old_cp);
             }
             self.evicted = true;
-            i as u16
+            candidate
         };
         let color = self.rasterize(cp);
         self.upload(queue, s);
@@ -512,6 +582,7 @@ impl Atlas {
                 if self.slot_cp[i] & CLUSTER_KEY != 0 {
                     self.slot_cp[i] = 0;
                     self.slot_used[i] = 0;
+                    self.lru_touch_head(i as u16);
                 }
             }
             self.evicted = true;

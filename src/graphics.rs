@@ -902,6 +902,7 @@ pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>
     palette[..16].copy_from_slice(&SIXEL_PALETTE);
     // Pixels as palette color + 1 (0 = never drawn), grown as needed.
     let (mut w, mut h) = (0usize, 0usize);
+    let (mut max_w, mut max_h) = (0usize, 0usize);
     let mut px: Vec<u32> = Vec::new();
     let (mut x, mut band) = (0usize, 0usize);
     let mut color = 0usize;
@@ -926,6 +927,13 @@ pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>
         }
         p
     };
+    let mut canvas = SixelCanvas {
+        px: &mut px,
+        w: &mut w,
+        h: &mut h,
+        max_w: &mut max_w,
+        max_h: &mut max_h,
+    };
     while i < data.len() {
         let b = data[i];
         match b {
@@ -934,10 +942,12 @@ pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>
                 let p = params(&mut i);
                 // Raster attributes: aspect, then the size hint Ph x Pv.
                 let (pw, ph) = (p[2] as usize, p[3] as usize);
-                if pw > 0 && ph > 0 && pw <= MAX_SIDE as usize && ph <= MAX_SIDE as usize && px.is_empty() {
-                    w = pw;
-                    h = ph;
-                    px = vec![0; w * h];
+                if pw > 0 && ph > 0 && pw <= MAX_SIDE as usize && ph <= MAX_SIDE as usize && canvas.px.is_empty() {
+                    *canvas.w = pw;
+                    *canvas.h = ph;
+                    *canvas.max_w = pw;
+                    *canvas.max_h = ph;
+                    *canvas.px = vec![0; pw * ph];
                 }
             }
             b'#' => {
@@ -958,7 +968,7 @@ pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>
                     let bits = data[i] - 0x3F;
                     i += 1;
                     for _ in 0..n.min(MAX_SIDE as usize) {
-                        put_sixel(&mut px, &mut w, &mut h, x, band, bits, color)?;
+                        canvas.put(x, band, bits, color)?;
                         x += 1;
                     }
                 }
@@ -973,54 +983,69 @@ pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>
                 i += 1;
             }
             0x3F..=0x7E => {
-                put_sixel(&mut px, &mut w, &mut h, x, band, b - 0x3F, color)?;
+                canvas.put(x, band, b - 0x3F, color)?;
                 x += 1;
                 i += 1;
             }
             _ => i += 1,
         }
     }
-    if w == 0 || h == 0 {
+    if max_w == 0 || max_h == 0 {
         return None;
     }
-    let mut rgba = Vec::with_capacity(w * h * 4);
-    for &p in &px {
-        match p {
-            0 if transparent => rgba.extend_from_slice(&[0, 0, 0, 0]),
-            0 => rgba.extend_from_slice(&rgb_bytes(palette[0])),
-            c => rgba.extend_from_slice(&rgb_bytes(palette[(c - 1) as usize])),
+    let mut rgba = Vec::with_capacity(max_w * max_h * 4);
+    for y in 0..max_h {
+        for x in 0..max_w {
+            match px[y * w + x] {
+                0 if transparent => rgba.extend_from_slice(&[0, 0, 0, 0]),
+                0 => rgba.extend_from_slice(&rgb_bytes(palette[0])),
+                c => rgba.extend_from_slice(&rgb_bytes(palette[(c - 1) as usize])),
+            }
         }
     }
-    Some((w as u32, h as u32, rgba))
+    Some((max_w as u32, max_h as u32, rgba))
 }
 
 fn rgb_bytes(c: u32) -> [u8; 4] {
     [(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]
 }
 
-/// Set the six pixels of one sixel, growing the canvas when needed.
-fn put_sixel(px: &mut Vec<u32>, w: &mut usize, h: &mut usize, x: usize, band: usize, bits: u8, color: usize) -> Option<()> {
-    let need_w = x + 1;
-    let need_h = band * 6 + 6;
-    if need_w > MAX_SIDE as usize || need_h > MAX_SIDE as usize {
-        return None;
-    }
-    if need_w > *w || need_h > *h {
-        let (nw, nh) = (need_w.max(*w).next_power_of_two().min(MAX_SIDE as usize).max(need_w), need_h.max(*h));
-        let mut grown = vec![0u32; nw * nh];
-        for y in 0..*h {
-            grown[y * nw..y * nw + *w].copy_from_slice(&px[y * *w..(y + 1) * *w]);
+struct SixelCanvas<'a> {
+    px: &'a mut Vec<u32>,
+    w: &'a mut usize,
+    h: &'a mut usize,
+    max_w: &'a mut usize,
+    max_h: &'a mut usize,
+}
+
+impl SixelCanvas<'_> {
+    /// Set the six pixels of one sixel, growing the canvas geometrically when needed.
+    fn put(&mut self, x: usize, band: usize, bits: u8, color: usize) -> Option<()> {
+        let need_w = x + 1;
+        let need_h = band * 6 + 6;
+        if need_w > MAX_SIDE as usize || need_h > MAX_SIDE as usize {
+            return None;
         }
-        *px = grown;
-        *w = nw;
-        *h = nh;
-    }
-    for k in 0..6 {
-        if bits & (1 << k) != 0 {
-            px[(band * 6 + k) * *w + x] = color as u32 + 1;
+        if need_w > *self.w || need_h > *self.h {
+            let nw = need_w.max(*self.w).max(64).next_power_of_two().min(MAX_SIDE as usize).max(need_w);
+            let nh = need_h.max(*self.h).max(64).next_power_of_two().min(MAX_SIDE as usize).max(need_h);
+            let mut grown = vec![0u32; nw * nh];
+            for y in 0..*self.max_h {
+                grown[y * nw..y * nw + *self.max_w].copy_from_slice(&self.px[y * *self.w..y * *self.w + *self.max_w]);
+            }
+            *self.px = grown;
+            *self.w = nw;
+            *self.h = nh;
         }
+        *self.max_w = (*self.max_w).max(need_w);
+        *self.max_h = (*self.max_h).max(need_h);
+        for k in 0..6 {
+            if bits & (1 << k) != 0 {
+                self.px[(band * 6 + k) * *self.w + x] = color as u32 + 1;
+            }
+        }
+        Some(())
     }
-    Some(())
 }
 
 /// Sixel HLS (hue 0..360 with blue at 0, lightness and saturation 0..100).

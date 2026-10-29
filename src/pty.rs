@@ -365,17 +365,19 @@ impl Pty {
 
                     let mut chunk_len = n as usize;
                     let batch_start = std::time::Instant::now();
+                    const FEED_CHUNK_SIZE: usize = 8192;
                     loop {
-                        let sync_active = {
+                        let mut sync_active = false;
+                        for chunk in buf[..chunk_len].chunks(FEED_CHUNK_SIZE) {
                             let mut g = grid.lock();
-                            for &b in &buf[..chunk_len] {
+                            for &b in chunk {
                                 g.feed_byte(&mut parser, b);
                             }
                             if !g.response.is_empty() {
-                                std::mem::swap(&mut g.response, &mut reply);
+                                reply.append(&mut g.response);
                             }
-                            g.sync_output
-                        };
+                            sync_active = g.sync_output;
+                        }
                         if !reply.is_empty() {
                             // Same queue as keyboard input, so replies never interleave with a paste.
                             let _ = tx.send(WritePayload::Heap(std::mem::take(&mut reply)));

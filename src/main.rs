@@ -3011,33 +3011,39 @@ fn clipboard_command(bin: &str) -> std::process::Command {
 }
 
 fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::Stdio;
+    let text = text.to_string();
+    let _ = std::thread::Builder::new()
+        .name("litty-clipboard-copy".into())
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            use std::io::Write;
+            use std::process::Stdio;
 
-    #[cfg(target_os = "macos")]
-    let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbcopy", &[])];
-    #[cfg(not(target_os = "macos"))]
-    let cmds: &[(&str, &[&str])] = &[
-        ("wl-copy", &[]),
-        ("xclip", &["-selection", "clipboard"]),
-        ("xsel", &["-ib"]),
-    ];
+            #[cfg(target_os = "macos")]
+            let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbcopy", &[])];
+            #[cfg(not(target_os = "macos"))]
+            let cmds: &[(&str, &[&str])] = &[
+                ("wl-copy", &[]),
+                ("xclip", &["-selection", "clipboard"]),
+                ("xsel", &["-ib"]),
+            ];
 
-    for (bin, args) in cmds {
-        if let Ok(mut child) = clipboard_command(bin)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
+            for (bin, args) in cmds {
+                if let Ok(mut child) = clipboard_command(bin)
+                    .args(*args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    let _ = child.wait();
+                    return;
+                }
             }
-            let _ = child.wait();
-            return;
-        }
-    }
+        });
 }
 
 /// Build the bytes sent to the PTY for a clipboard paste.
@@ -3071,32 +3077,41 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 }
 
 fn paste_from_clipboard() -> Option<String> {
-    use std::process::Stdio;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("litty-clipboard-paste".into())
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            use std::process::Stdio;
 
-    #[cfg(target_os = "macos")]
-    let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbpaste", &[])];
-    #[cfg(not(target_os = "macos"))]
-    let cmds: &[(&str, &[&str])] = &[
-        ("wl-paste", &["-n"]),
-        ("xclip", &["-selection", "clipboard", "-o"]),
-        ("xsel", &["-ob"]),
-    ];
+            #[cfg(target_os = "macos")]
+            let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbpaste", &[])];
+            #[cfg(not(target_os = "macos"))]
+            let cmds: &[(&str, &[&str])] = &[
+                ("wl-paste", &["-n"]),
+                ("xclip", &["-selection", "clipboard", "-o"]),
+                ("xsel", &["-ob"]),
+            ];
 
-    for (bin, args) in cmds {
-        if let Ok(out) = clipboard_command(bin)
-            .args(*args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        {
-            if out.status.success() {
-                if let Ok(s) = String::from_utf8(out.stdout) {
-                    return Some(s);
+            for (bin, args) in cmds {
+                if let Ok(out) = clipboard_command(bin)
+                    .args(*args)
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                {
+                    if out.status.success() {
+                        if let Ok(s) = String::from_utf8(out.stdout) {
+                            let _ = tx.send(Some(s));
+                            return;
+                        }
+                    }
                 }
             }
-        }
-    }
-    None
+            let _ = tx.send(None);
+        });
+
+    rx.recv_timeout(std::time::Duration::from_millis(750)).ok().flatten()
 }
 
 fn main() {

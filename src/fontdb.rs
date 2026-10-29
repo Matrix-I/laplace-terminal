@@ -5,6 +5,34 @@
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+static FONT_FILES_CACHE: RwLock<Option<Arc<[PathBuf]>>> = RwLock::new(None);
+
+/// Clear the cached font directory scan, forcing the next lookup to re-scan.
+#[allow(dead_code)]
+pub fn invalidate_font_cache() {
+    if let Ok(mut lock) = FONT_FILES_CACHE.write() {
+        *lock = None;
+    }
+}
+
+fn get_font_files() -> Arc<[PathBuf]> {
+    if let Ok(lock) = FONT_FILES_CACHE.read() {
+        if let Some(files) = lock.as_ref() {
+            return Arc::clone(files);
+        }
+    }
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_font_files(&dir, 0, &mut files);
+    }
+    let arc: Arc<[PathBuf]> = files.into();
+    if let Ok(mut lock) = FONT_FILES_CACHE.write() {
+        *lock = Some(Arc::clone(&arc));
+    }
+    arc
+}
 
 /// A resolved font face: file path and index inside a `.ttc` collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,10 +51,7 @@ pub fn find_family(family: &str) -> Option<FaceRef> {
     if want.is_empty() {
         return None;
     }
-    let mut files = Vec::new();
-    for dir in font_dirs() {
-        collect_font_files(&dir, 0, &mut files);
-    }
+    let files = get_font_files();
 
     // 1. Exact match attempt with full name
     if let Some(face) = search_files(&files, &want) {
