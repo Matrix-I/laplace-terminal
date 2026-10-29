@@ -157,8 +157,9 @@ fn vs_main(
     @location(2) bg: u32,
 ) -> VsOut {
     let corner = vec2<f32>(f32(vi & 1u), f32(vi >> 1u));
-    let col = ii % u.cols;
-    let row = ii / u.cols;
+    let cols = max(u.cols, 1u);
+    let col = ii % cols;
+    let row = ii / cols;
     let tab_count = u.tab_info & 0xFFFFu;
     let is_tab_row = tab_count > 0u && row == 0u;
     let is_preview = (bg & 16u) != 0u;
@@ -168,7 +169,7 @@ fn vs_main(
         var x = (f32(col) + corner.x) * u.cell.x + u.offset.x;
         if (col == 0u && corner.x == 0.0) {
             x = 0.0;
-        } else if (col == u.cols - 1u && corner.x == 1.0) {
+        } else if (u.cols > 0u && col == u.cols - 1u && corner.x == 1.0) {
             x = u.screen.x;
         }
         let total_top = u.cell.y * 2.0 + u.offset.y;
@@ -269,7 +270,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
         let cy = bar_h * 0.5;
         let half_h = floor(u.cell.y * 0.58);
-        let tab_cols_total = max(u.cols - 2u, 1u);
+        var tab_cols_total = 1u;
+        if (u.cols > 2u) {
+            tab_cols_total = u.cols - 2u;
+        }
         let plus_cx = u.offset.x + (f32(tab_cols_total) + 1.0) * u.cell.x;
 
         // Right-side circular (+) button.
@@ -464,9 +468,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     // OSC 9;4 progress: a thin bar along the top of the active pane.
     let p_state = u.progress >> 8u;
     if (p_state != 0u && (v.flags & 128u) == 0u && v.row == u.progress_row
+        && u.progress_cols > 0u
         && v.col >= u.progress_col && v.col < u.progress_col + u.progress_cols
         && local.y * u.cell.y < max(2.0, floor(u.cell.y / 8.0))) {
-        let x = (f32(v.col - u.progress_col) + local.x) / f32(u.progress_cols);
+        let x = (f32(v.col - u.progress_col) + local.x) / f32(max(u.progress_cols, 1u));
         // Indeterminate (3) has no percentage: a full, dimmer bar (no animation, 0% idle CPU).
         let filled = p_state == 3u || x * 100.0 < f32(u.progress & 255u);
         var bar = vec3<f32>(0.36, 0.56, 0.98);

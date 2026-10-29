@@ -884,72 +884,83 @@ impl Renderer {
                 }
             }
             self.atlas.take_evicted();
-            lo = 0;
-            hi = total_rows - 1;
+            if total_rows > 0 {
+                lo = 0;
+                hi = total_rows - 1;
+            }
         }
 
         self.force_full = false;
         self.last_cursor = active_cur;
 
         if let Some((_, link)) = hovered_link {
-            let max_chars = cols.saturating_sub(2).min(120);
-            let display_url = if link.url.chars().count() > max_chars {
-                format!("{}...", link.url.chars().take(max_chars.saturating_sub(3)).collect::<String>())
-            } else {
-                link.url.clone()
-            };
-            let preview_row = total_rows - 1;
-            let row_start = preview_row * cols;
-            // Naturally blend with terminal background without any background box or borders:
-            // bit 4 is set so is_preview=true (suppresses cursor), while bit 7 is 0 so background matches default_bg.
-            const PREVIEW_BG: u32 = 16;
-            const PREVIEW_FG: u32 = 0xF2F2_F780;
-            for (col, ch) in display_url.chars().enumerate() {
-                if col < cols {
-                    let slot = self.atlas.slot(&self.queue, ch as u32);
-                    self.instances[row_start + col] = Instance {
-                        glyph: slot as u32,
-                        fg: PREVIEW_FG,
-                        bg: PREVIEW_BG,
-                    };
-                }
-            }
-            let end_col = display_url.chars().count();
-            for col in end_col..cols {
-                self.instances[row_start + col] = Instance {
-                    glyph: 0,
-                    fg: PREVIEW_FG,
-                    bg: PREVIEW_BG,
+            if total_rows > 0 && cols > 0 {
+                let max_chars = cols.saturating_sub(2).min(120);
+                let display_url = if link.url.chars().count() > max_chars {
+                    format!("{}...", link.url.chars().take(max_chars.saturating_sub(3)).collect::<String>())
+                } else {
+                    link.url.clone()
                 };
+                let preview_row = total_rows - 1;
+                let row_start = preview_row * cols;
+                // Naturally blend with terminal background without any background box or borders:
+                // bit 4 is set so is_preview=true (suppresses cursor), while bit 7 is 0 so background matches default_bg.
+                const PREVIEW_BG: u32 = 16;
+                const PREVIEW_FG: u32 = 0xF2F2_F780;
+                for (col, ch) in display_url.chars().enumerate() {
+                    if col < cols && row_start + col < self.instances.len() {
+                        let slot = self.atlas.slot(&self.queue, ch as u32);
+                        self.instances[row_start + col] = Instance {
+                            glyph: slot as u32,
+                            fg: PREVIEW_FG,
+                            bg: PREVIEW_BG,
+                        };
+                    }
+                }
+                let end_col = display_url.chars().count();
+                for col in end_col..cols {
+                    if row_start + col < self.instances.len() {
+                        self.instances[row_start + col] = Instance {
+                            glyph: 0,
+                            fg: PREVIEW_FG,
+                            bg: PREVIEW_BG,
+                        };
+                    }
+                }
+                lo = lo.min(preview_row);
+                hi = hi.max(preview_row);
             }
-            lo = lo.min(preview_row);
-            hi = hi.max(preview_row);
         }
 
         // IME composition (e.g. Telex / Pinyin preedit): underlined text at the cursor,
         // with the cursor moved to the end of the composition.
         let mut cursor = active_cur;
         if let (false, Some((cx, cy))) = (preedit.is_empty(), active_cur) {
-            let row_start = cy * cols;
-            let mut col = cx;
-            for ch in preedit.chars() {
-                let w = char_width(ch);
-                if w == 0 {
-                    continue;
+            if cols > 0 && cy < total_rows && cx < cols {
+                let row_start = cy * cols;
+                let mut col = cx;
+                for ch in preedit.chars() {
+                    let w = char_width(ch);
+                    if w == 0 {
+                        continue;
+                    }
+                    if col + w > cols {
+                        break;
+                    }
+                    let (left, right) = self.atlas.glyph_slots(&self.queue, ch as u32, w, GlyphStyle::default());
+                    let idx = row_start + col;
+                    if idx < self.instances.len() {
+                        self.instances[idx] = Instance { glyph: left as u32, fg: 0, bg: BG_UNDERLINE };
+                    }
+                    if w == 2 && idx + 1 < self.instances.len() {
+                        self.instances[idx + 1] = Instance { glyph: right as u32, fg: 0, bg: BG_UNDERLINE };
+                    }
+                    col += w;
                 }
-                if col + w > cols {
-                    break;
-                }
-                let (left, right) = self.atlas.glyph_slots(&self.queue, ch as u32, w, GlyphStyle::default());
-                self.instances[row_start + col] = Instance { glyph: left as u32, fg: 0, bg: BG_UNDERLINE };
-                if w == 2 {
-                    self.instances[row_start + col + 1] = Instance { glyph: right as u32, fg: 0, bg: BG_UNDERLINE };
-                }
-                col += w;
+                cursor = Some((col.min(cols.saturating_sub(1)), cy));
+                lo = lo.min(cy);
+                hi = hi.max(cy);
             }
-            cursor = Some((col.min(cols - 1), cy));
-            lo = lo.min(cy);
-            hi = hi.max(cy);
         }
 
         if search.is_open {
@@ -966,14 +977,16 @@ impl Renderer {
             self.build_inspector(cols, top_rows, total_rows, lines, &mut lo, &mut hi);
         }
 
-        if lo <= hi {
+        if total_rows > 0 && cols > 0 && lo <= hi {
             let a = lo * cols;
-            let b = (hi + 1) * cols;
-            self.queue.write_buffer(
-                &self.instance_buf,
-                (a * std::mem::size_of::<Instance>()) as u64,
-                bytemuck::cast_slice(&self.instances[a..b]),
-            );
+            let b = ((hi + 1) * cols).min(self.instances.len());
+            if a < b {
+                self.queue.write_buffer(
+                    &self.instance_buf,
+                    (a * std::mem::size_of::<Instance>()) as u64,
+                    bytemuck::cast_slice(&self.instances[a..b]),
+                );
+            }
         }
         let (cx, cy) = cursor.unwrap_or((0, 0));
         let tab_info = match tab_bar {

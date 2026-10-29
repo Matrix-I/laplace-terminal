@@ -229,18 +229,38 @@ impl ImageLayer {
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.quads.slice(..));
-        for (i, (key, [x, y, w, h], zi)) in self.batch.iter().enumerate() {
+        for (i, (key, clip, zi)) in self.batch.iter().enumerate() {
             let Some((bind_group, _)) = self.textures.get(key) else { continue };
-            if !z.contains(zi) || *w == 0 || *h == 0 {
+            if !z.contains(zi) {
                 continue;
             }
-            // Flipped targets store the bottom row first.
-            let y = if flip { height - y - h } else { *y };
-            pass.set_scissor_rect(*x, y, *w, *h);
+            let Some([sx, sy, sw, sh]) = compute_scissor_rect(*clip, flip, height) else {
+                continue;
+            };
+            pass.set_scissor_rect(sx, sy, sw, sh);
             pass.set_bind_group(0, bind_group, &[]);
             pass.draw(0..4, i as u32..i as u32 + 1);
         }
     }
+}
+
+pub(crate) fn compute_scissor_rect([x, y, w, h]: [u32; 4], flip: bool, height: u32) -> Option<[u32; 4]> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let clamped_h = h.min(height.saturating_sub(y));
+    if clamped_h == 0 {
+        return None;
+    }
+    let scissor_y = if flip {
+        height.checked_sub(y + clamped_h)?
+    } else {
+        y
+    };
+    if scissor_y.saturating_add(clamped_h) > height {
+        return None;
+    }
+    Some([x, scissor_y, w, clamped_h])
 }
 
 fn make_quads(device: &wgpu::Device, n: usize) -> wgpu::Buffer {
@@ -250,4 +270,29 @@ fn make_quads(device: &wgpu::Device, n: usize) -> wgpu::Buffer {
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_scissor_rect_flipped_underflow_prevention() {
+        // Normal in-bounds
+        assert_eq!(compute_scissor_rect([10, 20, 30, 40], true, 100), Some([10, 40, 30, 40]));
+        assert_eq!(compute_scissor_rect([10, 20, 30, 40], false, 100), Some([10, 20, 30, 40]));
+
+        // Rect partially exceeds target height (would underflow in naive height - y - h)
+        assert_eq!(compute_scissor_rect([10, 80, 30, 50], true, 100), Some([10, 0, 30, 20]));
+        assert_eq!(compute_scissor_rect([10, 80, 30, 50], false, 100), Some([10, 80, 30, 20]));
+
+        // Completely outside target
+        assert_eq!(compute_scissor_rect([10, 100, 30, 50], true, 100), None);
+        assert_eq!(compute_scissor_rect([10, 150, 30, 50], true, 100), None);
+
+        // Zero target height or zero rect dimensions
+        assert_eq!(compute_scissor_rect([10, 0, 30, 50], true, 0), None);
+        assert_eq!(compute_scissor_rect([10, 20, 0, 40], true, 100), None);
+        assert_eq!(compute_scissor_rect([10, 20, 30, 0], true, 100), None);
+    }
 }

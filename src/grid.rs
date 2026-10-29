@@ -1381,7 +1381,7 @@ impl Grid {
     /// Replace the search matches and focus the one closest to the bottom of the
     /// viewport (searching upwards from what the user is looking at).
     pub fn set_search_matches(&mut self, matches: Vec<Selection>) {
-        let bottom = self.abs_line(self.rows - 1);
+        let bottom = if self.rows > 0 { self.abs_line(self.rows - 1) } else { 0 };
         self.search_current = match matches.partition_point(|m| m.start.0 <= bottom) {
             0 if matches.is_empty() => None,
             0 => Some(0),

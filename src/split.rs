@@ -74,9 +74,10 @@ impl SplitNode {
                 second,
             } => match direction {
                 SplitDirection::Vertical => {
+                    let max_cols = (area.cols.saturating_sub(1) as f32).max(1.0);
                     let first_cols = ((area.cols as f32) * ratio)
                         .round()
-                        .clamp(1.0, area.cols.saturating_sub(1) as f32)
+                        .clamp(1.0, max_cols)
                         as usize;
                     let second_cols = area.cols.saturating_sub(first_cols).max(1);
 
@@ -106,9 +107,10 @@ impl SplitNode {
                     second.compute_rects(second_area, out);
                 }
                 SplitDirection::Horizontal => {
+                    let max_rows = (area.rows.saturating_sub(1) as f32).max(1.0);
                     let first_rows = ((area.rows as f32) * ratio)
                         .round()
-                        .clamp(1.0, area.rows.saturating_sub(1) as f32)
+                        .clamp(1.0, max_rows)
                         as usize;
                     let second_rows = area.rows.saturating_sub(first_rows).max(1);
 
@@ -466,6 +468,21 @@ mod tests {
         assert!(node.adjust_ratio(1, 0.1));
         if let SplitNode::Split { ratio: root_ratio, .. } = &node {
             assert!((*root_ratio - 0.6).abs() < 1e-4, "root ratio adjusted to 0.6");
+        }
+    }
+
+    #[test]
+    fn test_tiny_dimensions_clamp_no_panic() {
+        let mut node = SplitNode::new_leaf(1);
+        node.split_pane(1, 2, SplitDirection::Vertical);
+        node.split_pane(2, 3, SplitDirection::Horizontal);
+
+        for cols in [0, 1, 2] {
+            for rows in [0, 1, 2] {
+                let mut rects = Vec::new();
+                node.compute_rects(Rect { col: 0, row: 0, cols, rows }, &mut rects);
+                assert_eq!(rects.len(), 3);
+            }
         }
     }
 }

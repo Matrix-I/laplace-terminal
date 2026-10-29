@@ -97,6 +97,9 @@ impl SearchText {
     /// All non-empty matches of `re`, as inclusive `(line, col)` ranges in
     /// top-to-bottom order.
     pub fn find(&self, re: &Regex) -> Vec<Selection> {
+        if self.rows.is_empty() || self.text.is_empty() {
+            return Vec::new();
+        }
         re.find_iter(&self.text)
             .filter(|m| !m.is_empty())
             .take(MAX_MATCHES)
@@ -112,9 +115,17 @@ impl SearchText {
 
     /// Cell `(line, col)` of the char starting at byte `offset`.
     fn cell_at(&self, offset: usize) -> (usize, usize) {
+        if self.rows.is_empty() {
+            return (0, 0);
+        }
         let i = self.rows.partition_point(|&(start, _)| start <= offset).saturating_sub(1);
         let (start, line) = self.rows[i];
-        let col = self.text[start..offset].chars().map(|c| char_width(c).max(1)).sum();
+        let offset = offset.min(self.text.len());
+        let col = if start <= offset {
+            self.text[start..offset].chars().map(|c| char_width(c).max(1)).sum()
+        } else {
+            0
+        };
         (line, col)
     }
 }
@@ -186,5 +197,21 @@ mod tests {
         let mut bar = SearchBar::new();
         bar.append_str("ab\x1bc\nnext");
         assert_eq!(bar.query, "abc");
+    }
+
+    #[test]
+    fn search_on_empty_grid_does_not_panic() {
+        let empty_search_text = SearchText {
+            text: String::new(),
+            rows: Vec::new(),
+        };
+        let re = Regex::new("foo").unwrap();
+        let matches = empty_search_text.find(&re);
+        assert!(matches.is_empty());
+
+        let mut g = Grid::new(0, 0);
+        let m = search(&g, "test", true);
+        assert!(m.is_empty());
+        g.set_search_matches(m);
     }
 }

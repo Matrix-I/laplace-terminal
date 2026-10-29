@@ -103,20 +103,20 @@ impl Tab {
         }
     }
 
-    fn active_pane(&self) -> &Pane {
+    fn active_pane(&self) -> Option<&Pane> {
         self.panes
             .iter()
             .find(|p| p.id == self.active_pane_id)
-            .unwrap_or(&self.panes[0])
+            .or_else(|| self.panes.first())
     }
 
     #[allow(dead_code)]
-    fn active_pane_mut(&mut self) -> &mut Pane {
+    fn active_pane_mut(&mut self) -> Option<&mut Pane> {
         let id = self.active_pane_id;
         if let Some(pos) = self.panes.iter().position(|p| p.id == id) {
-            &mut self.panes[pos]
+            self.panes.get_mut(pos)
         } else {
-            &mut self.panes[0]
+            self.panes.first_mut()
         }
     }
 
@@ -368,7 +368,7 @@ impl App {
             let new_window = std::mem::take(&mut s.new_window_requested);
             let native_tab = std::mem::take(&mut s.native_tab_requested);
             if new_window || native_tab {
-                let cwd = s.tabs.get_mut(s.active).and_then(|t| t.active_pane_mut().cwd());
+                let cwd = s.tabs.get_mut(s.active).and_then(|t| t.active_pane_mut()?.cwd());
                 let from = (!native_tab && s.window.is_visible() != Some(false))
                     .then(|| s.window.outer_position().ok().map(|p| (p, s.window.scale_factor())))
                     .flatten();
@@ -982,7 +982,9 @@ impl App {
                                                 payload.extend_from_slice(b"\x05\x15");
                                                 payload.extend_from_slice(cmd.as_bytes());
                                                 payload.push(b'\r');
-                                                s.tabs[s.active].active_pane().pty.write(&payload);
+                                                if let Some(pane) = s.tabs[s.active].active_pane() {
+                                                    pane.pty.write(&payload);
+                                                }
                                             }
                                             s.window.request_redraw();
                                             return;
@@ -1237,10 +1239,11 @@ impl App {
             // Dropped files paste their shell-quoted paths, separated by spaces.
             WindowEvent::DroppedFile(path) => {
                 if let Some(tab) = s.tabs.get(s.active) {
-                    let pane = tab.active_pane();
-                    let bracketed = pane.grid.lock().bracketed_paste;
-                    let text = format!("{} ", shell_quote(&path.to_string_lossy()));
-                    pane.pty.write(&paste_payload(&text, bracketed));
+                    if let Some(pane) = tab.active_pane() {
+                        let bracketed = pane.grid.lock().bracketed_paste;
+                        let text = format!("{} ", shell_quote(&path.to_string_lossy()));
+                        pane.pty.write(&paste_payload(&text, bracketed));
+                    }
                 }
             }
 
@@ -1295,9 +1298,10 @@ impl App {
                     refresh_tab_titles(s);
                 }
                 if let Some(tab) = s.tabs.get(s.active) {
-                    let pane = tab.active_pane();
-                    if pane.grid.lock().focus_events {
-                        pane.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                    if let Some(pane) = tab.active_pane() {
+                        if pane.grid.lock().focus_events {
+                            pane.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                        }
                     }
                 }
                 if focused {
@@ -1352,8 +1356,7 @@ fn spawn_pane(
 }
 
 fn tab_title(tab: &mut Tab) -> String {
-    let active = tab.active_pane_mut();
-    let mut title = {
+    let mut title = if let Some(active) = tab.active_pane_mut() {
         let grid_title = {
             let g = active.grid.lock();
             if !g.title.is_empty() {
@@ -1390,13 +1393,15 @@ fn tab_title(tab: &mut Tab) -> String {
         } else {
             "shell".into()
         }
+    } else {
+        "shell".into()
     };
 
     if tab.zoomed_pane_id.is_some() {
         title.push_str(" [Z]");
     }
     // OSC 9;4 progress and an unseen bell show in front of the title.
-    let progress = tab.active_pane().grid.lock().progress;
+    let progress = tab.active_pane().and_then(|p| p.grid.lock().progress);
     let prefix = match progress {
         Some((2, pct)) => format!("✖ {pct}% "),
         Some((3, _)) => "⋯ ".to_string(),
@@ -1462,7 +1467,7 @@ fn handle_terminal_requests(s: &mut State) {
         refresh_tab_titles(s);
     }
 
-    let shape = s.tabs.get(s.active).map(|t| pointer_icon(&t.active_pane().grid.lock().pointer_shape));
+    let shape = s.tabs.get(s.active).and_then(|t| t.active_pane().map(|p| pointer_icon(&p.grid.lock().pointer_shape)));
     if let Some(icon) = shape.filter(|&icon| icon != s.pointer_icon) {
         s.pointer_icon = icon;
         if s.hovered_link.is_none() {
@@ -1553,7 +1558,7 @@ fn refresh_tab_titles(s: &mut State) {
             s.window.set_title(&format!("{lock}{title}"));
             #[cfg(target_os = "macos")]
             if let Some(tab) = s.tabs.get_mut(s.active) {
-                if let Some(cwd) = tab.active_pane_mut().cwd() {
+                if let Some(cwd) = tab.active_pane_mut().and_then(|p| p.cwd()) {
                     macos::set_window_represented_filename(&s.window, &cwd);
                 }
             }
@@ -1566,9 +1571,13 @@ fn cursor_blinks(s: &State) -> bool {
         Some(b) => b,
         None => {
             if let Some(tab) = s.tabs.get(s.active) {
-                let g = tab.active_pane().grid.lock();
-                // DECSCUSR odd values (and 0 = default) are the blinking styles.
-                matches!(g.cursor_shape, 0 | 1 | 3 | 5)
+                if let Some(pane) = tab.active_pane() {
+                    let g = pane.grid.lock();
+                    // DECSCUSR odd values (and 0 = default) are the blinking styles.
+                    matches!(g.cursor_shape, 0 | 1 | 3 | 5)
+                } else {
+                    true
+                }
             } else {
                 true
             }
@@ -1656,7 +1665,9 @@ fn render_active(s: &mut State) {
         if s.search.pane_id != Some(s.tabs[s.active].active_pane_id) {
             refresh_search(s);
         }
-        (s.search.current, s.search.total) = s.tabs[s.active].active_pane().grid.lock().search_status();
+        if let Some(pane) = s.tabs[s.active].active_pane() {
+            (s.search.current, s.search.total) = pane.grid.lock().search_status();
+        }
     }
     // Synchronized output (DECSET 2026): wait for the application to finish its
     // frame, but never longer than 150ms.
@@ -1932,7 +1943,7 @@ fn report_mouse(s: &mut State, button: mouse::Button, action: mouse::Action) -> 
 /// the wheel sends arrow keys so `less`, `man` and editors scroll naturally.
 fn alt_screen_scroll(s: &mut State, lines: isize) -> bool {
     let Some(tab) = s.tabs.get(s.active) else { return false };
-    let pane = tab.active_pane();
+    let Some(pane) = tab.active_pane() else { return false };
     let (alt, enabled, app_cursor) = {
         let g = pane.grid.lock();
         (g.alt_active, g.alt_scroll, g.app_cursor)
@@ -1972,8 +1983,7 @@ fn handle_ime(s: &mut State, ime: Ime) {
             } else if s.search.is_open {
                 text.chars().for_each(|c| s.search.append_char(c));
                 refresh_search(s);
-            } else {
-                let pane = s.tabs[s.active].active_pane();
+            } else if let Some(pane) = s.tabs[s.active].active_pane() {
                 pane.grid.lock().reset_display();
                 pane.pty.write(text.as_bytes());
             }
@@ -2108,7 +2118,7 @@ fn duplicate_active_tab(
         open_fresh_tab(s, waker);
         return;
     }
-    let cwd = s.tabs.get_mut(s.active).and_then(|t| t.active_pane_mut().cwd());
+    let cwd = s.tabs.get_mut(s.active).and_then(|t| t.active_pane_mut()?.cwd());
     let (cols, rows) = s.renderer.grid_size_for_tabs(true);
     let (cw, ch) = s.renderer.cell_size();
     let id = next_id();
@@ -2286,7 +2296,15 @@ fn close_active_pane_or_tab(s: &mut State) {
         close_last_window(s);
         return;
     }
-    let pane = s.tabs[s.active].active_pane();
+    let Some(pane) = s.tabs[s.active].active_pane() else {
+        s.tabs.remove(s.active);
+        if s.tabs.is_empty() {
+            close_last_window(s);
+        } else if s.active >= s.tabs.len() {
+            s.active = s.tabs.len() - 1;
+        }
+        return;
+    };
     if !confirm_close(&s.config, std::iter::once(pane), "this terminal") {
         return;
     }
@@ -2508,7 +2526,7 @@ fn handle_key(
         return;
     }
 
-    let alt_screen = s.tabs.get(s.active).is_some_and(|t| t.active_pane().grid.lock().alt_active);
+    let alt_screen = s.tabs.get(s.active).and_then(|t| t.active_pane()).map_or(false, |p| p.grid.lock().alt_active);
     if s.search.is_open {
         // Keys belong to the search box; shortcuts it does not consume still work,
         // but nothing reaches the shell.
@@ -2537,7 +2555,9 @@ fn handle_key(
         }
         Some(keymap::Binding::Text(bytes)) => {
             if let Some(tab) = s.tabs.get(s.active) {
-                tab.active_pane().pty.write(&bytes);
+                if let Some(pane) = tab.active_pane() {
+                    pane.pty.write(&bytes);
+                }
             }
             consume_key(s, ev);
             return;
@@ -2560,7 +2580,10 @@ fn handle_key(
         return;
     }
 
-    let pane = s.tabs[s.active].active_pane();
+    let Some(pane) = s.tabs[s.active].active_pane() else {
+        consume_key(s, ev);
+        return;
+    };
     let (app_cursor, kitty_flags, modify_other_keys) = {
         let g = pane.grid.lock();
         (g.app_cursor, g.kitty_keyboard_flags(), g.modify_other_keys)
@@ -2662,7 +2685,7 @@ fn describe_key(key: &Key, m: keymap::Mods, bytes: Option<&[u8]>) -> String {
 /// What the terminal inspector shows about the active pane.
 fn inspector_lines(s: &State) -> Vec<String> {
     let Some(tab) = s.tabs.get(s.active) else { return Vec::new() };
-    let pane = tab.active_pane();
+    let Some(pane) = tab.active_pane() else { return Vec::new() };
     let mouse_cell = pane_cell_at_mouse(s).filter(|&(id, _, _)| id == pane.id);
     let running = pane.pty.has_running_process();
     let cwd = pane.pty.cwd().unwrap_or_default();
@@ -2728,7 +2751,7 @@ fn handle_key_release(s: &mut State, ev: &KeyEvent, m: keymap::Mods) {
     if s.tabs.is_empty() || s.search.is_open || s.history_search.is_open {
         return;
     }
-    let pane = s.tabs[s.active].active_pane();
+    let Some(pane) = s.tabs[s.active].active_pane() else { return; };
     let (app_cursor, kitty_flags) = {
         let g = pane.grid.lock();
         (g.app_cursor, g.kitty_keyboard_flags())
@@ -2783,7 +2806,9 @@ fn handle_history_search_key(s: &mut State, key: &Key, m: keymap::Mods) -> bool 
                 if *k == NamedKey::Enter {
                     payload.push(b'\r');
                 }
-                tab.active_pane().pty.write(&payload);
+                if let Some(pane) = tab.active_pane() {
+                    pane.pty.write(&payload);
+                }
             }
         }
         Key::Named(NamedKey::Delete) => {
@@ -2872,7 +2897,7 @@ fn handle_search_key(s: &mut State, key: &Key, m: keymap::Mods) -> bool {
 /// lost focus.
 fn refresh_search(s: &mut State) {
     let Some(tab) = s.tabs.get(s.active) else { return };
-    let pane = tab.active_pane();
+    let Some(pane) = tab.active_pane() else { return };
     if let Some(old) = s.search.pane_id.filter(|&id| id != pane.id) {
         if let Some(p) = s.tabs.iter().flat_map(|t| &t.panes).find(|p| p.id == old) {
             p.grid.lock().clear_search();
@@ -2902,8 +2927,10 @@ fn refresh_search(s: &mut State) {
 
 fn search_step(s: &mut State, up: bool) {
     if let Some(tab) = s.tabs.get(s.active) {
-        tab.active_pane().grid.lock().search_step(up);
-        s.window.request_redraw();
+        if let Some(pane) = tab.active_pane() {
+            pane.grid.lock().search_step(up);
+            s.window.request_redraw();
+        }
     }
 }
 
@@ -2958,10 +2985,11 @@ fn run_tab_action(
     let panes = s.tabs[s.active].panes.len();
     match action {
         A::ClearScreen => {
-            let pane = s.tabs[s.active].active_pane();
-            pane.grid.lock().clear_screen_and_history();
-            pane.pty.write(b"\x0c");
-            s.window.request_redraw();
+            if let Some(pane) = s.tabs[s.active].active_pane() {
+                pane.grid.lock().clear_screen_and_history();
+                pane.pty.write(b"\x0c");
+                s.window.request_redraw();
+            }
         }
         A::Find => {
             s.history_search.close();
@@ -2972,8 +3000,9 @@ fn run_tab_action(
             if s.search.is_open {
                 close_search(s);
             }
-            let initial = s.tabs[s.active].active_pane().grid.lock().current_prompt_input();
-            s.history_search.open((!initial.is_empty()).then_some(initial.as_str()));
+            let initial = s.tabs[s.active].active_pane().map(|p| p.grid.lock().current_prompt_input());
+            let initial_str = initial.as_deref().unwrap_or("");
+            s.history_search.open((!initial_str.is_empty()).then_some(initial_str));
             s.renderer.invalidate();
             s.window.request_redraw();
         }
@@ -2983,15 +3012,18 @@ fn run_tab_action(
         A::EqualizeSplits => equalize_splits(s),
         A::ToggleSplitZoom => toggle_split_zoom(s),
         A::JumpToPrompt(delta) => {
-            if !s.tabs[s.active].active_pane().grid.lock().jump_to_prompt(delta) {
+            let Some(pane) = s.tabs[s.active].active_pane() else {
+                return false;
+            };
+            if !pane.grid.lock().jump_to_prompt(delta) {
                 return false;
             }
             s.window.request_redraw();
         }
         A::SelectLastOutput => {
-            let text = s.tabs[s.active].active_pane().grid.lock().select_last_output();
+            let text = s.tabs[s.active].active_pane().and_then(|p| p.grid.lock().select_last_output());
             match text {
-                Some(t) => copy_to_clipboard(&t),
+                Some(ref t) => copy_to_clipboard(t),
                 None => return false,
             }
             s.window.request_redraw();
@@ -3012,11 +3044,13 @@ fn run_tab_action(
             refresh_tab_titles(s);
         }
         A::SelectAll => {
-            s.tabs[s.active].active_pane().grid.lock().select_all();
-            s.window.request_redraw();
+            if let Some(pane) = s.tabs[s.active].active_pane() {
+                pane.grid.lock().select_all();
+                s.window.request_redraw();
+            }
         }
         A::Copy => {
-            if let Some(text) = s.tabs[s.active].active_pane().grid.lock().selected_text() {
+            if let Some(text) = s.tabs[s.active].active_pane().and_then(|p| p.grid.lock().selected_text()) {
                 copy_to_clipboard(&text);
             }
         }
@@ -3028,30 +3062,31 @@ fn run_tab_action(
         }
         A::Paste => {
             if let Some(text) = paste_from_clipboard().filter(|t| !t.is_empty()) {
-                let pane = s.tabs[s.active].active_pane();
-                let bracketed = {
-                    let mut g = pane.grid.lock();
-                    g.reset_display();
-                    g.bracketed_paste
-                };
-                let has_newlines = text.contains('\n') || text.contains('\r');
-                if !bracketed && has_newlines {
-                    let line_count = text.lines().count().max(2);
-                    let preview = text
-                        .lines()
-                        .take(3)
-                        .map(|l| if l.len() > 60 { format!("{}…", &l[..60]) } else { l.to_string() })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let msg = format!(
-                        "Pasting {line_count} lines into a shell without bracketed paste may execute commands immediately.\n\nPreview:\n{preview}\n\nDo you want to paste anyway?"
-                    );
-                    if !macos::confirm("Confirm Multi-Line Paste", &msg, "Paste") {
-                        return true;
+                if let Some(pane) = s.tabs[s.active].active_pane() {
+                    let bracketed = {
+                        let mut g = pane.grid.lock();
+                        g.reset_display();
+                        g.bracketed_paste
+                    };
+                    let has_newlines = text.contains('\n') || text.contains('\r');
+                    if !bracketed && has_newlines {
+                        let line_count = text.lines().count().max(2);
+                        let preview = text
+                            .lines()
+                            .take(3)
+                            .map(|l| if l.len() > 60 { format!("{}…", &l[..60]) } else { l.to_string() })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let msg = format!(
+                            "Pasting {line_count} lines into a shell without bracketed paste may execute commands immediately.\n\nPreview:\n{preview}\n\nDo you want to paste anyway?"
+                        );
+                        if !macos::confirm("Confirm Multi-Line Paste", &msg, "Paste") {
+                            return true;
+                        }
                     }
+                    pane.pty.write(&paste_payload(&text, bracketed));
+                    s.window.request_redraw();
                 }
-                pane.pty.write(&paste_payload(&text, bracketed));
-                s.window.request_redraw();
             }
         }
         // A single in-window tab: move between native macOS tabs, if any.
@@ -3079,11 +3114,13 @@ fn run_tab_action(
         A::ZoomOut => zoom(s, -1.0),
         A::ZoomReset => zoom(s, 0.0),
         A::ScrollPageUp | A::ScrollPageDown => {
-            let mut g = s.tabs[s.active].active_pane().grid.lock();
-            let page = g.rows.saturating_sub(1).max(1) as isize;
-            g.scroll_display(if action == A::ScrollPageUp { page } else { -page });
-            drop(g);
-            s.window.request_redraw();
+            if let Some(pane) = s.tabs[s.active].active_pane() {
+                let mut g = pane.grid.lock();
+                let page = g.rows.saturating_sub(1).max(1) as isize;
+                g.scroll_display(if action == A::ScrollPageUp { page } else { -page });
+                drop(g);
+                s.window.request_redraw();
+            }
         }
         A::Quit | A::Minimize | A::OpenConfig | A::ReloadConfig | A::NewTab | A::NewWindow | A::CheckUpdate | A::ToggleQuickTerminal => {}
     }
@@ -3481,5 +3518,19 @@ mod latency_benchmarks {
         println!("    - Sau   (render_active duy nhất):         1 pass / WakeUp");
         println!("    --> Giảm 50% số lần dispatch và acquire swapchain drawable thừa");
         println!("==================================================================\n");
+    }
+
+    #[test]
+    fn test_tab_active_pane_empty_panes_does_not_panic() {
+        let mut tab = Tab {
+            id: 1,
+            panes: Vec::new(),
+            layout: SplitNode::new_leaf(1),
+            active_pane_id: 1,
+            zoomed_pane_id: None,
+            bell: false,
+        };
+        assert!(tab.active_pane().is_none());
+        assert!(tab.active_pane_mut().is_none());
     }
 }
