@@ -122,7 +122,7 @@ impl SearchText {
         let (start, line) = self.rows[i];
         let offset = offset.min(self.text.len());
         let col = if start <= offset {
-            self.text[start..offset].chars().map(|c| char_width(c).max(1)).sum()
+            self.text[start..offset].chars().map(char_width).sum()
         } else {
             0
         };
@@ -213,5 +213,16 @@ mod tests {
         let m = search(&g, "test", true);
         assert!(m.is_empty());
         g.set_search_matches(m);
+    }
+
+    #[test]
+    fn zero_width_chars_map_to_correct_columns() {
+        let mut g = Grid::new(10, 2);
+        // 'e' + combining acute accent U+0301 + "target"
+        // 'e' is at col 0, accent is zero-width, 't' of "target" starts at col 1
+        feed(&mut g, "e\u{0301}target\r\n");
+        let m = search(&g, "target", true);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].start, m[0].end), ((0, 1), (0, 6)));
     }
 }
