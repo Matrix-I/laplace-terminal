@@ -928,6 +928,7 @@ impl App {
                         if let Some(action) = s.renderer.hit_test_tab_bar(s.mouse_pos.0, s.mouse_pos.1, &s.tab_titles) {
                             match action {
                                 TabBarAction::Select(idx) => select_tab(s, idx),
+                                TabBarAction::CloseTab(idx) => close_tab_at(s, idx),
                                 TabBarAction::NewTab => duplicate_active_tab(s, &waker),
                             }
                             return;
@@ -2145,6 +2146,35 @@ fn close_active_tab(s: &mut State) {
     }
     if s.active >= s.tabs.len() {
         s.active = s.tabs.len() - 1;
+    }
+    sync_size(s);
+    refresh_tab_titles(s);
+    s.renderer.invalidate();
+    s.window.request_redraw();
+    #[cfg(target_os = "macos")]
+    macos::release_free_memory();
+}
+
+fn close_tab_at(s: &mut State, idx: usize) {
+    if idx >= s.tabs.len() {
+        return;
+    }
+    let tab = &s.tabs[idx];
+    if !confirm_close(&s.config, tab.panes.iter(), "this tab") {
+        return;
+    }
+    let removed = s.tabs.remove(idx);
+    for p in &removed.panes {
+        s.invalidate_pane_state(p.id);
+    }
+    if s.tabs.is_empty() {
+        close_last_window(s);
+        return;
+    }
+    if s.active >= s.tabs.len() {
+        s.active = s.tabs.len() - 1;
+    } else if idx < s.active {
+        s.active -= 1;
     }
     sync_size(s);
     refresh_tab_titles(s);

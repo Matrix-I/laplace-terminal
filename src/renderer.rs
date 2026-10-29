@@ -436,6 +436,7 @@ impl Renderer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarAction {
     Select(usize),
+    CloseTab(usize),
     NewTab,
 }
 
@@ -661,7 +662,17 @@ impl Renderer {
         if col >= next_start && tab_i + 1 < n {
             tab_i += 1;
         }
-        Some(TabBarAction::Select(tab_i.min(n - 1)))
+        let tab_i = tab_i.min(n - 1);
+        let c0 = (tab_i * tab_cols_total) / n;
+        let c1 = ((tab_i + 1) * tab_cols_total) / n;
+        let span = c1.saturating_sub(c0);
+
+        // Click close button ('✕') at left corner of tab (c0..=c0+2)
+        if span >= 6 && col <= c0 + 2 {
+            return Some(TabBarAction::CloseTab(tab_i));
+        }
+
+        Some(TabBarAction::Select(tab_i))
     }
 
     /// Physical pixel position of the top-left corner of terminal cell `(row, col)`
@@ -1330,6 +1341,15 @@ impl Renderer {
                 (INACTIVE_FG, INACTIVE_BADGE_FG)
             };
 
+            // Left-aligned close button ('✕' at c0 + 1)
+            let left_reserve = if span >= 6 {
+                let close_slot = self.atlas.slot(&self.queue, '✕' as u32);
+                self.instances[c0 + 1] = Instance { glyph: close_slot as u32, fg: badge_fg, bg: BAR_BG };
+                3
+            } else {
+                1
+            };
+
             // Right-aligned shortcut badge (`⌘1`..`⌘9` on macOS, `^1`..`^9` on Linux).
             let badge_reserve = if i < 9 && span >= 10 {
                 #[cfg(target_os = "macos")]
@@ -1347,7 +1367,7 @@ impl Renderer {
                 1
             };
 
-            let avail = span.saturating_sub(2 + badge_reserve);
+            let avail = span.saturating_sub(left_reserve + badge_reserve);
             if avail == 0 {
                 continue;
             }
@@ -1362,7 +1382,7 @@ impl Renderer {
                 vec!['…']
             };
 
-            let start_col = c0 + 1 + (avail.saturating_sub(display.len())) / 2;
+            let start_col = c0 + left_reserve + (avail.saturating_sub(display.len())) / 2;
             for (k, ch) in display.into_iter().enumerate() {
                 let x = start_col + k;
                 if x < c1.saturating_sub(badge_reserve) && x < cols {
@@ -1977,5 +1997,14 @@ mod tests {
         );
         let info = validator.validate(&module);
         assert!(info.is_ok(), "Failed to validate WGSL module: {:?}", info.err());
+    }
+
+    #[test]
+    fn test_tab_bar_action_variants() {
+        use super::TabBarAction;
+        assert_eq!(TabBarAction::Select(0), TabBarAction::Select(0));
+        assert_eq!(TabBarAction::CloseTab(1), TabBarAction::CloseTab(1));
+        assert_ne!(TabBarAction::Select(0), TabBarAction::CloseTab(0));
+        assert_eq!(TabBarAction::NewTab, TabBarAction::NewTab);
     }
 }
