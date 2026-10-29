@@ -226,8 +226,8 @@ pub struct Store {
     bytes: usize,
     /// Ids handed out for images transmitted without one (sixel, kitty `I=`).
     next_auto_id: u32,
-    /// A chunked Kitty transmission in progress (`m=1`).
-    pending: Option<(KittyCommand, Vec<u8>)>,
+    /// A chunked Kitty transmission in progress (`m=1`), with last activity timestamp.
+    pending: Option<(KittyCommand, Vec<u8>, Instant)>,
 }
 
 impl Store {
@@ -602,15 +602,24 @@ impl Store {
             }
             Some(format!("{r};{msg}"))
         };
+        // Abandoned chunked transmission timeout: free buffers if sender stalled > 5s.
+        const CHUNKED_TIMEOUT: Duration = Duration::from_secs(5);
+        let now = Instant::now();
+        if let Some((_, _, last_active)) = self.pending {
+            if now.duration_since(last_active) > CHUNKED_TIMEOUT {
+                self.pending = None;
+            }
+        }
+
         // Chunked transmissions: collect until `m=0`; only the first chunk has the keys.
         let (cmd, data) = match self.pending.take() {
-            Some((first, mut data)) if matches!(first.action, b't' | b'T' | b'q' | b'f') => {
+            Some((first, mut data, _)) if matches!(first.action, b't' | b'T' | b'q' | b'f') => {
                 data.extend_from_slice(payload);
                 if data.len() > STORE_LIMIT {
                     return (KittyOutcome::None, reply(&first, "EBIG:chunked transmission exceeds size limit"));
                 }
                 if cmd.more {
-                    self.pending = Some((first, data));
+                    self.pending = Some((first, data, now));
                     return (KittyOutcome::None, None);
                 }
                 (first, data)
@@ -619,7 +628,7 @@ impl Store {
                 if payload.len() > STORE_LIMIT {
                     return (KittyOutcome::None, reply(&cmd, "EBIG:chunked transmission exceeds size limit"));
                 }
-                self.pending = Some((cmd, payload.to_vec()));
+                self.pending = Some((cmd, payload.to_vec(), now));
                 return (KittyOutcome::None, None);
             }
             _ => (cmd, payload.to_vec()),
@@ -1302,6 +1311,23 @@ mod tests {
         assert!(matches!(outcome, KittyOutcome::None));
         assert_eq!(reply.as_deref(), Some("i=99;EBIG:chunked transmission exceeds size limit"));
         assert!(store.pending.is_none(), "pending must be cleared on overflow");
+    }
+
+    #[test]
+    fn kitty_chunked_transmission_abandoned_timeout() {
+        let mut store = Store::default();
+        let payload = vec![b'A'; 100];
+        let _ = store.kitty(KittyCommand { action: b't', more: true, id: 101, ..KittyCommand::default() }, &payload);
+        assert!(store.pending.is_some());
+
+        // Artificially age the pending buffer past CHUNKED_TIMEOUT (5 seconds)
+        if let Some((_, _, ref mut started)) = store.pending {
+            *started = Instant::now() - Duration::from_secs(6);
+        }
+
+        // Next kitty command cleans up abandoned pending buffer
+        let _ = store.kitty(KittyCommand { action: b'd', ..KittyCommand::default() }, &[]);
+        assert!(store.pending.is_none(), "stale pending buffer must be dropped");
     }
 
     #[test]

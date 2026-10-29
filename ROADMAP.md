@@ -480,7 +480,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [ ] Guard `open_target` on Linux against executing executable files or scripts via `xdg-open` (`src/main.rs`)
 
 ### Memory Leaks & Resource Management
-- [ ] Add timeout and cleanup for abandoned chunked Kitty transmission buffers in `Store.pending` (`src/graphics.rs`)
+- [x] Add timeout and cleanup for abandoned chunked Kitty transmission buffers in `Store.pending` (`src/graphics.rs`)
 - [ ] Enforce memory limit and frame count cap on single-image Kitty animation frames (`src/graphics.rs`)
 - [ ] Prune dead `VirtualPlacement` entries from `Store.virtuals` on scrollback eviction to free auto-id images (`src/graphics.rs`, `src/grid/mod.rs`)
 - [ ] Prune stale `Placement.alt` entries during linefeed scroll in alternate screen (`src/graphics.rs`, `src/grid/mod.rs`)
