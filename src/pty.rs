@@ -228,9 +228,16 @@ impl Pty {
             set_cloexec(shutdown_tx.as_raw_fd());
 
             let (tx, rx) = mpsc::channel::<WritePayload>();
-            let writer_fd = dup_cloexec(master.as_raw_fd())?;
+            let writer_fd = match dup_cloexec(master.as_raw_fd()) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    drop(master);
+                    reap_child(pid);
+                    return Err(e);
+                }
+            };
             let writer_shutdown = shutdown_rx.clone();
-            std::thread::Builder::new()
+            if let Err(e) = std::thread::Builder::new()
                 .name("pty-writer".into())
                 .stack_size(64 * 1024)
                 .spawn(move || {
@@ -239,7 +246,12 @@ impl Pty {
                             return;
                         }
                     }
-                })?;
+                })
+            {
+                drop(master);
+                reap_child(pid);
+                return Err(e);
+            }
 
             Ok(Pty {
                 master,
@@ -295,11 +307,17 @@ impl Pty {
         notify: impl Fn() + Send + 'static,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> io::Result<()> {
-        let fd = dup_cloexec(self.master.as_raw_fd())?;
+        let fd = match dup_cloexec(self.master.as_raw_fd()) {
+            Ok(fd) => fd,
+            Err(e) => {
+                reap_child(self.pid);
+                return Err(e);
+            }
+        };
         let shutdown = self.shutdown_rx.clone();
         let tx = self.tx.clone();
         let pid = self.pid;
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("pty-reader".into())
             .stack_size(256 * 1024)
             .spawn(move || {
@@ -370,7 +388,11 @@ impl Pty {
                 drop(fd);
                 reap_child(pid);
                 on_exit();
-            })?;
+            })
+        {
+            reap_child(self.pid);
+            return Err(e);
+        }
         Ok(())
     }
 }

@@ -268,6 +268,12 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
   - Vulnerability / Leak: `process_window_requests()` launched `open` (macOS) or `xdg-open` (Linux) via bare `.spawn()` without `wait()` or `spawn_detached()`, leaving a zombie process in the OS process table upon exit.
   - Fix: Replace bare `.spawn()` calls with `spawn_detached()`.
 
+### Phase 2: Deep Scan — Process Zombies, GPU VRAM & Table Bloat (Completed 2026-10-29)
+
+- [x] **Critical: Reap child process on PTY writer/reader setup failure (`src/pty.rs`)**
+  - Vulnerability / Zombie leak: In `Pty::spawn_in`, if `dup_cloexec(master)` or `thread::Builder::spawn` failed, or in `spawn_reader` if `dup_cloexec` or `spawn` failed, the function returned early without calling `reap_child(pid)`. The child shell process was left running or became an un-reaped zombie process.
+  - Fix: Catch errors and guarantee `reap_child(pid)` is called on all error paths before returning `Err(e)`.
+
 
 ## Terminal protocols
 
