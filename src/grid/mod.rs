@@ -698,6 +698,9 @@ impl Grid {
         self.selection = None;
         self.clear_search();
         self.trim_extras();
+        if !self.graphics.virtuals.is_empty() {
+            self.prune_dead_virtuals();
+        }
         self.all_dirty = true;
     }
 
@@ -1618,9 +1621,18 @@ impl Grid {
             return;
         }
         if to_history && !self.alt_active && t == 0 && b == self.rows - 1 {
+            let mut evicted_had_ph = false;
             for _ in 0..n {
                 if self.history + self.rows >= self.cap && self.cap < self.scrollback + self.rows {
                     self.grow_capacity();
+                }
+                if !self.graphics.virtuals.is_empty() && self.history == self.cap - self.rows {
+                    let evicted_row = (self.top + self.cap - self.history) % self.cap;
+                    let start = evicted_row * self.cols;
+                    let end = start + self.cols;
+                    if self.cells[start..end].iter().any(|c| c.codepoint & PH_FLAG != 0) {
+                        evicted_had_ph = true;
+                    }
                 }
                 self.top = (self.top + 1) % self.cap;
                 self.lines_pushed += 1;
@@ -1635,6 +1647,9 @@ impl Grid {
             }
             if !self.graphics.placements.is_empty() {
                 self.graphics.prune(self.lines_pushed - self.history);
+            }
+            if evicted_had_ph {
+                self.prune_dead_virtuals();
             }
             self.all_dirty = true;
         } else {
@@ -1816,6 +1831,42 @@ impl Grid {
             alt: self.alt_active,
         });
         self.all_dirty = true;
+    }
+
+    /// Prune any virtual placements whose placeholder cells have been evicted
+    /// from scrollback or overwritten, freeing any associated auto-id images.
+    pub fn prune_dead_virtuals(&mut self) {
+        if self.graphics.virtuals.is_empty() {
+            return;
+        }
+        let mut referenced = std::collections::HashSet::new();
+        // Check valid main screen and scrollback rows
+        for r in 0..(self.history + self.rows) {
+            let physical_row = (self.top + self.cap - self.history + r) % self.cap;
+            let start = physical_row * self.cols;
+            let end = start + self.cols;
+            for cell in &self.cells[start..end] {
+                if cell.codepoint & PH_FLAG != 0 {
+                    if let Some((id, pid)) = self.placeholder_ids(cell) {
+                        referenced.insert((id, pid));
+                    }
+                }
+            }
+        }
+        // Check alt screen if active
+        if self.alt_active {
+            for cell in &self.alt {
+                if cell.codepoint & PH_FLAG != 0 {
+                    if let Some((id, pid)) = self.placeholder_ids(cell) {
+                        referenced.insert((id, pid));
+                    }
+                }
+            }
+        }
+        self.graphics.virtuals.retain(|v| {
+            referenced.iter().any(|&(id, pid)| id == v.image_id && (pid == v.placement_id || pid == 0 || v.placement_id == 0))
+        });
+        self.graphics.prune_dead_auto_ids();
     }
 
     /// When an animated image on this terminal next changes frame.
@@ -2279,6 +2330,9 @@ impl Grid {
         self.prompt_input_mark = None;
         self.dirty = vec![true; rows];
         self.all_dirty = true;
+        if !self.graphics.virtuals.is_empty() {
+            self.prune_dead_virtuals();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -4336,5 +4390,60 @@ mod tests {
         assert!(g.dcs.is_none());
         assert!(g.dcs_buf.is_empty());
         assert!(g.dcs_start.is_none());
+    }
+
+    #[test]
+    fn scrollback_eviction_prunes_dead_virtual_placements() {
+        let mut g = Grid::new(20, 2);
+        g.scrollback = 2;
+        g.cap = 4;
+        g.cells.truncate(4 * 20);
+        // Insert auto-id image
+        let id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        assert!(id >= (1 << 24));
+        g.place_virtual(id, 2, 1, 0, 0);
+        let d = |i: usize| char::from_u32(crate::graphics::PLACEHOLDER_DIACRITICS[i]).unwrap();
+        let msb = (id >> 24) as usize;
+        let r = ((id >> 16) & 0xFF) as u8;
+        let g_col = ((id >> 8) & 0xFF) as u8;
+        let b = (id & 0xFF) as u8;
+        feed(&mut g, &format!("\x1b[38;2;{r};{g_col};{b}m\u{10EEEE}{}{}{}\x1b[0m", d(0), d(0), d(msb)));
+        assert_eq!(g.graphics.virtuals.len(), 1);
+        assert!(g.graphics.image(id).is_some());
+
+        // Scroll lines:
+        // row 0: placeholder
+        // \n: row 1
+        // \n: scroll 1 (history = 1)
+        // \n: scroll 2 (history = 2, scrollback is now full)
+        feed(&mut g, "\n\n\n");
+        assert_eq!(g.history, 2);
+        assert_eq!(g.graphics.virtuals.len(), 1);
+        assert!(g.graphics.image(id).is_some());
+
+        // Scroll 1 more line: scrollback limit is 2, so the oldest row (holding placeholder) is evicted!
+        feed(&mut g, "\n");
+        assert_eq!(g.graphics.virtuals.len(), 0, "dead virtual placement pruned after row evicted");
+        assert!(g.graphics.image(id).is_none(), "auto-id image freed when virtual placement dies");
+    }
+
+    #[test]
+    fn clear_history_prunes_scrollback_only_virtual_placements() {
+        let mut g = Grid::new(20, 2);
+        let id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        g.place_virtual(id, 2, 1, 0, 0);
+        let d = |i: usize| char::from_u32(crate::graphics::PLACEHOLDER_DIACRITICS[i]).unwrap();
+        let msb = (id >> 24) as usize;
+        let r = ((id >> 16) & 0xFF) as u8;
+        let g_col = ((id >> 8) & 0xFF) as u8;
+        let b = (id & 0xFF) as u8;
+        feed(&mut g, &format!("\x1b[38;2;{r};{g_col};{b}m\u{10EEEE}{}{}{}\x1b[0m\r\n\r\n\r\n", d(0), d(0), d(msb)));
+        assert!(g.history > 0);
+        assert_eq!(g.graphics.virtuals.len(), 1);
+        assert!(g.graphics.image(id).is_some());
+
+        g.clear_history();
+        assert_eq!(g.graphics.virtuals.len(), 0, "virtual placement pruned on clear_history");
+        assert!(g.graphics.image(id).is_none(), "auto-id image freed on clear_history");
     }
 }

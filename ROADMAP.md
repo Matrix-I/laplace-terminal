@@ -482,7 +482,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 ### Memory Leaks & Resource Management
 - [x] Add timeout and cleanup for abandoned chunked Kitty transmission buffers in `Store.pending` (`src/graphics.rs`)
 - [x] Enforce memory limit and frame count cap on single-image Kitty animation frames (`src/graphics.rs`)
-- [ ] Prune dead `VirtualPlacement` entries from `Store.virtuals` on scrollback eviction to free auto-id images (`src/graphics.rs`, `src/grid/mod.rs`)
+- [x] Prune dead `VirtualPlacement` entries from `Store.virtuals` on scrollback eviction to free auto-id images (`src/graphics.rs`, `src/grid/mod.rs`)
 - [ ] Prune stale `Placement.alt` entries during linefeed scroll in alternate screen (`src/graphics.rs`, `src/grid/mod.rs`)
 - [x] Prevent Carbon `EnableSecureEventInput` reference counter drift on duplicate focus events (`src/macos.rs`, `src/main.rs`)
 - [ ] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
