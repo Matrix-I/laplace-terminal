@@ -321,6 +321,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Roll back split tree layout on `spawn_pane` failure (`src/main.rs`)**
   - Vulnerability / State leak: In `split_active_pane()`, `tab.layout.split_pane(target_id, new_id, direction)` inserted `new_id` into the tree before `spawn_pane()`. If PTY or process spawning failed, `new_id` was never pushed into `tab.panes`, permanently leaving a ghost split leaf with no backing pane and corrupting layout navigation.
   - Fix: Call `tab.layout.remove_pane(new_id)` on `spawn_pane` error to restore the split tree.
+- [x] **Medium: Prune Kitty virtual placements and auto-id images on screen clear (`src/grid.rs`)**
+  - Vulnerability / VRAM leak: `clear_screen_and_history()` cleared all grid cells (destroying all U+10EEEE placeholder cells), but left `self.graphics.virtuals` intact. Because `prune_dead_auto_ids()` kept any auto-id image referenced by `self.graphics.virtuals`, the image data in RAM/VRAM was never freed and `virtuals` accumulated over time.
+  - Fix: Clear `self.graphics.virtuals` and invoke `self.graphics.prune_dead_auto_ids()` inside `clear_screen_and_history()`.
 
 
 

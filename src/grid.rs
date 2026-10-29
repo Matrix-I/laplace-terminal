@@ -932,6 +932,8 @@ impl Grid {
         let rows = self.rows;
         self.clear_rows(0, rows);
         self.graphics.delete_lines(self.lines_pushed..self.lines_pushed + rows, self.alt_active);
+        self.graphics.virtuals.clear();
+        self.graphics.prune_dead_auto_ids();
         self.cur.row = 0;
         self.cur.col = 0;
         self.wrap_pending = false;
@@ -4858,5 +4860,24 @@ mod tests {
         g.clear_screen_and_history();
         assert!(g.graphics.placements.is_empty(), "placements cleared");
         assert!(g.graphics.image(id).is_none(), "auto-assigned image freed");
+    }
+
+    #[test]
+    fn clear_screen_and_history_prunes_virtual_placements() {
+        let mut g = Grid::new(20, 5);
+        let id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        g.graphics.virtuals.push(crate::graphics::VirtualPlacement {
+            image_id: id,
+            placement_id: 1,
+            cols: 2,
+            rows: 2,
+            z: 0,
+        });
+        assert_eq!(g.graphics.virtuals.len(), 1);
+        assert!(g.graphics.image(id).is_some());
+
+        g.clear_screen_and_history();
+        assert!(g.graphics.virtuals.is_empty(), "virtuals cleared");
+        assert!(g.graphics.image(id).is_none(), "auto-assigned image freed after virtual cleared");
     }
 }
