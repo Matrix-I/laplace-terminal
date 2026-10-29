@@ -936,6 +936,7 @@ impl Grid {
         self.wrap_pending = false;
         self.clusters.clear();
         self.cluster_ids.clear();
+        self.trim_extras();
         self.all_dirty = true;
     }
 
@@ -2245,6 +2246,7 @@ impl Grid {
         self.clusters.clear();
         self.cluster_ids.clear();
         self.clear_rows(0, self.rows);
+        self.trim_extras();
         self.all_dirty = true;
     }
 
@@ -2806,6 +2808,14 @@ impl Grid {
             }
         }
         self.extras.iter().skip(1).position(Option::is_none).map(|i| i + 1)
+    }
+
+    /// Reclaim unused extra slots and shrink trailing empty entries.
+    fn trim_extras(&mut self) {
+        self.collect_extras();
+        while self.extras.len() > 1 && self.extras.last().is_some_and(Option::is_none) {
+            self.extras.pop();
+        }
     }
 
     /// Explicit underline color of a cell as `0xRRGGBB00`, if SGR 58 set one.
@@ -4806,5 +4816,21 @@ mod tests {
         g.full_reset();
         assert!(g.clusters.is_empty(), "clusters cleared on full_reset");
         assert!(g.cluster_ids.is_empty());
+    }
+
+    #[test]
+    fn clear_screen_and_history_trims_extras() {
+        let mut g = Grid::new(20, 5);
+        feed(&mut g, "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\r\n");
+        assert!(g.extras.len() > 1, "extra slot allocated for hyperlink");
+
+        g.clear_screen_and_history();
+        assert_eq!(g.extras.len(), 1, "extras trimmed to [None] on clear_screen_and_history");
+
+        feed(&mut g, "\x1b]8;;https://another.org\x1b\\link2\x1b]8;;\x1b\\\r\n");
+        assert!(g.extras.len() > 1);
+
+        g.full_reset();
+        assert_eq!(g.extras.len(), 1, "extras trimmed on full_reset");
     }
 }

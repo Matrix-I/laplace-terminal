@@ -276,6 +276,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Release GPU image textures and postfx render targets on window shrink / tab close (`src/image_layer.rs`, `src/postfx.rs`, `src/renderer.rs`)**
   - Vulnerability / VRAM leak: `Renderer::shrink_drawables()` shrinks swapchain textures to 1x1 when running tabless in Dock, but `ImageLayer::textures` (cached Kitty/Sixel GPU textures) and `PostFx::targets` (offscreen ping-pong textures) remained allocated in GPU VRAM indefinitely.
   - Fix: Add `ImageLayer::clear()` and `PostFx::shrink()`, and invoke them inside `shrink_drawables()` to reclaim all GPU VRAM textures immediately.
+- [x] **Medium: Clean up unused `CellExtra` / hyperlink slots on screen & history clear (`src/grid.rs`)**
+  - Vulnerability / Leak: `Grid::clear_screen_and_history()` resets rows and history, but left up to 256 `CellExtra` (holding heap-allocated `OscLink` URI and ID strings) in `self.extras` until the table overflowed.
+  - Fix: Add `trim_extras()` and invoke it on `clear_screen_and_history()` and `full_reset()` to drop dead hyperlink strings and truncate empty slots back to `[None]` immediately.
 
 
 ## Terminal protocols
