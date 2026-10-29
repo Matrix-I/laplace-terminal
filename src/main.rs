@@ -1714,6 +1714,7 @@ pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn safe_path_for_linux_open<'a>(path: &'a std::path::Path) -> &'a std::path::Path {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = path
