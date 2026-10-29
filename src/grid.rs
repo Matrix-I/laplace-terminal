@@ -931,6 +931,7 @@ impl Grid {
         self.clear_history();
         let rows = self.rows;
         self.clear_rows(0, rows);
+        self.graphics.delete_lines(self.lines_pushed..self.lines_pushed + rows, self.alt_active);
         self.cur.row = 0;
         self.cur.col = 0;
         self.wrap_pending = false;
@@ -2204,6 +2205,7 @@ impl Grid {
                 self.clamp_cursor();
             }
             self.graphics.placements.retain(|p| !p.alt);
+            self.graphics.prune_dead_auto_ids();
         }
         self.wrap_pending = false;
         self.selection = None;
@@ -4832,5 +4834,29 @@ mod tests {
 
         g.full_reset();
         assert_eq!(g.extras.len(), 1, "extras trimmed on full_reset");
+    }
+
+    #[test]
+    fn clear_screen_and_history_prunes_images() {
+        let mut g = Grid::new(20, 5);
+        let id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        g.graphics.place(crate::graphics::Placement {
+            image_id: id,
+            placement_id: 1,
+            line: 0,
+            col: 0,
+            cols: 2,
+            rows: 2,
+            src: [0, 0, 10, 10],
+            z: 0,
+            alt: false,
+            fit: false,
+        });
+        assert!(g.graphics.image(id).is_some());
+        assert_eq!(g.graphics.placements.len(), 1);
+
+        g.clear_screen_and_history();
+        assert!(g.graphics.placements.is_empty(), "placements cleared");
+        assert!(g.graphics.image(id).is_none(), "auto-assigned image freed");
     }
 }

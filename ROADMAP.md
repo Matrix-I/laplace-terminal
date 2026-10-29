@@ -294,6 +294,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Invalidate stale pane-scoped state on pane exit and tab close (`src/main.rs`)**
   - Vulnerability / State leak: When a split pane was closed or its child exited, the window `State` continued holding references to the dead pane ID in `search.pane_id`, `hovered_link`, `scrollbar_drag`, `active_click_pane_id`, and `last_mouse_report`.
   - Fix: Add `State::invalidate_pane_state(pane_id)` and invoke it whenever a pane exits or is closed, clearing search state, hovered hyperlinks, drag states, and mouse reporting coordinates.
+- [x] **Medium: Prune on-screen image placements and orphaned auto-id images on screen clear & alt-screen exit (`src/graphics.rs`, `src/grid.rs`)**
+  - Vulnerability / VRAM & RAM leak: On `Cmd+K` (`clear_screen_and_history`), placements on visible rows (`lines_pushed..lines_pushed + rows`) were never deleted, leaving phantom image placements and unreferenced image buffers in RAM. Furthermore, on exiting the alternate screen or clearing lines, auto-assigned images (`id >= (1 << 24)`) whose placements were deleted remained in `self.graphics.images` indefinitely until byte-budget eviction.
+  - Fix: Add `Store::prune_dead_auto_ids()` and invoke it in `delete_lines()`, `set_alt(false, ...)`, and `clear_screen_and_history()`.
 
 
 ## Terminal protocols

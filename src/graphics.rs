@@ -428,10 +428,9 @@ impl Store {
         of_image.clone().find(|v| v.placement_id == placement_id).or_else(|| of_image.next())
     }
 
-    /// Drop placements that scrolled out of the scrollback, and images no
-    /// placement shows that were only ever meant for display.
-    pub fn prune(&mut self, first_line: usize) {
-        self.placements.retain(|p| p.alt || p.line + p.rows > first_line);
+    /// Prune any auto-assigned images (`id >= 1 << 24`) that have no remaining
+    /// regular or virtual placements.
+    pub fn prune_dead_auto_ids(&mut self) {
         let dead: Vec<u32> = self
             .images
             .keys()
@@ -442,6 +441,13 @@ impl Store {
         for id in dead {
             self.remove_image(id, false);
         }
+    }
+
+    /// Drop placements that scrolled out of the scrollback, and images no
+    /// placement shows that were only ever meant for display.
+    pub fn prune(&mut self, first_line: usize) {
+        self.placements.retain(|p| p.alt || p.line + p.rows > first_line);
+        self.prune_dead_auto_ids();
     }
 
     /// Placements visible in `top..top + rows` on the current screen.
@@ -472,6 +478,7 @@ impl Store {
     /// Remove the placements covering any of `lines` (screen clears).
     pub fn delete_lines(&mut self, lines: std::ops::Range<usize>, alt: bool) {
         self.placements.retain(|p| p.alt != alt || p.line + p.rows <= lines.start || p.line >= lines.end);
+        self.prune_dead_auto_ids();
     }
 }
 
