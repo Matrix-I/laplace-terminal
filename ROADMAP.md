@@ -286,6 +286,12 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
   - Vulnerability / Zombie leak: If `thread::Builder::spawn` fails in `spawn_detached()`, the child process was dropped without `child.wait()`, leaving a zombie.
   - Fix: Record process PID and synchronously kill and wait on `child` via `libc::kill` and `libc::waitpid` before returning `Err(e)`.
 
+### Phase 3: Exhaustive Audit — Edge Cases, State Invalidation & OS Integration (Completed 2026-10-29)
+
+- [x] **Medium: Bound in-session command history to `MAX_HISTORY_ITEMS` (`src/history.rs`)**
+  - Vulnerability / Memory leak: In `HistorySearch::add_session_command()`, `self.session_commands` was capped to 500 entries, but `self.items.insert(0, trimmed.to_string())` did not check `MAX_HISTORY_ITEMS` (10,000). In long-running sessions, `self.items` grew unboundedly without trimming older items.
+  - Fix: Pop excess items from `self.items` whenever length exceeds `MAX_HISTORY_ITEMS`.
+
 
 ## Terminal protocols
 

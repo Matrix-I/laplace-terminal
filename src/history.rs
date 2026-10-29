@@ -155,6 +155,9 @@ impl HistorySearch {
             self.items.remove(pos);
         }
         self.items.insert(0, trimmed.to_string());
+        if self.items.len() > MAX_HISTORY_ITEMS {
+            self.items.pop();
+        }
     }
 
     /// Delete the currently selected command from memory and disk history.
@@ -1285,5 +1288,15 @@ mod tests {
         assert!(!search.file_mtimes.is_empty());
         // prompt command is still preserved at the top
         assert_eq!(search.items[0], "prompt_command_before_open");
+    }
+
+    #[test]
+    fn add_session_command_caps_items() {
+        let mut search = HistorySearch::new();
+        for i in 0..(MAX_HISTORY_ITEMS + 50) {
+            search.add_session_command(&format!("cmd_{i}"));
+        }
+        assert_eq!(search.items.len(), MAX_HISTORY_ITEMS);
+        assert_eq!(search.items[0], format!("cmd_{}", MAX_HISTORY_ITEMS + 49));
     }
 }
