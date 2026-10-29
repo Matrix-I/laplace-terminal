@@ -252,6 +252,15 @@ impl State {
     }
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        if self.secure_input && self.focused {
+            #[cfg(target_os = "macos")]
+            macos::set_secure_input(false);
+        }
+    }
+}
+
 /// Tab and pane ids are unique across windows, so `ChildExit` finds its pane.
 fn next_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -2151,12 +2160,19 @@ fn close_last_window(s: &mut State) {
 
 fn hide_or_exit_last_window(s: &mut State, event_loop: &ActiveEventLoop) {
     if cfg!(target_os = "macos") {
+        if s.secure_input && s.focused {
+            #[cfg(target_os = "macos")]
+            macos::set_secure_input(false);
+        }
+        s.history_search.close();
+        s.search.close();
         s.tab_titles.clear();
         s.hovered_link = None;
         s.selecting = false;
         s.active = 0;
         s.window.set_visible(false);
         s.renderer.shrink_drawables();
+        #[cfg(target_os = "macos")]
         macos::release_free_memory();
     } else {
         event_loop.exit();

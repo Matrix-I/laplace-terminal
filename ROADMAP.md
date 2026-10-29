@@ -297,6 +297,10 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Prune on-screen image placements and orphaned auto-id images on screen clear & alt-screen exit (`src/graphics.rs`, `src/grid.rs`)**
   - Vulnerability / VRAM & RAM leak: On `Cmd+K` (`clear_screen_and_history`), placements on visible rows (`lines_pushed..lines_pushed + rows`) were never deleted, leaving phantom image placements and unreferenced image buffers in RAM. Furthermore, on exiting the alternate screen or clearing lines, auto-assigned images (`id >= (1 << 24)`) whose placements were deleted remained in `self.graphics.images` indefinitely until byte-budget eviction.
   - Fix: Add `Store::prune_dead_auto_ids()` and invoke it in `delete_lines()`, `set_alt(false, ...)`, and `clear_screen_and_history()`.
+- [x] **Low: Release macOS secure keyboard input on window Drop (`src/main.rs`)**
+  - Vulnerability / OS state leak: If a window with secure keyboard input enabled was closed while focused, `macos::set_secure_input(false)` was not called, leaving secure input engaged across the entire operating system.
+  - Fix: Implement `Drop` for `State` to guarantee `macos::set_secure_input(false)` is invoked whenever a focused window with secure input is dropped.
+
 
 
 ## Terminal protocols
