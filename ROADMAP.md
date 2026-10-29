@@ -261,6 +261,9 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] **Medium: Cap pending buffer size in chunked Kitty transmissions against OOM (`src/graphics.rs`)**
   - Vulnerability / DoS: In `Store::kitty()`, multi-chunk transmissions (`m=1`) appended payload chunks into `self.pending` without an upper bound check, allowing rogue or runaway processes to consume arbitrary memory until OOM.
   - Fix: Impose a maximum buffer limit on `self.pending` (matching `STORE_LIMIT`), aborting the transmission and releasing the buffer if exceeded.
+- [x] **Low: Reset or bound grapheme cluster interning tables (`src/atlas.rs`, `src/grid.rs`)**
+  - Vulnerability / Bloat: `Atlas::clusters` and `Atlas::cluster_ids` appended up to 2 million strings without eviction even when Atlas texture slots were evicted. `Grid::clusters` was also never cleared on `clear_screen_and_history()` (`Cmd+K`) or `full_reset()` (`ESC c`).
+  - Fix: Reset or prune grapheme cluster caches on clear/reset, and bound the atlas cluster table to 4096 entries with an eviction/reset policy.
 
 
 ## Terminal protocols

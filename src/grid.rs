@@ -934,6 +934,8 @@ impl Grid {
         self.cur.row = 0;
         self.cur.col = 0;
         self.wrap_pending = false;
+        self.clusters.clear();
+        self.cluster_ids.clear();
         self.all_dirty = true;
     }
 
@@ -2240,6 +2242,8 @@ impl Grid {
         self.color_override = [0; 3];
         self.tab_stops = default_tab_stops(self.cols);
         self.selection = None;
+        self.clusters.clear();
+        self.cluster_ids.clear();
         self.clear_rows(0, self.rows);
         self.all_dirty = true;
     }
@@ -4783,5 +4787,24 @@ mod tests {
         g.alt_active = true;
         assert_eq!(g.calculate_delete_before_cursor(), Some(vec![0x15])); // Ctrl+U
         assert_eq!(g.calculate_delete_after_cursor(), Some(vec![0x0b]));  // Ctrl+K
+    }
+
+    #[test]
+    fn clear_screen_and_history_clears_clusters() {
+        let mut g = Grid::new(20, 5);
+        feed(&mut g, "❤️\r\n👨‍👩‍👧‍👦\r\n");
+        assert!(!g.clusters.is_empty(), "clusters recorded");
+        assert!(!g.cluster_ids.is_empty());
+
+        g.clear_screen_and_history();
+        assert!(g.clusters.is_empty(), "clusters cleared on clear_screen_and_history");
+        assert!(g.cluster_ids.is_empty());
+
+        feed(&mut g, "🏳️‍🌈\r\n");
+        assert!(!g.clusters.is_empty());
+
+        g.full_reset();
+        assert!(g.clusters.is_empty(), "clusters cleared on full_reset");
+        assert!(g.cluster_ids.is_empty());
     }
 }

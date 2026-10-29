@@ -492,6 +492,18 @@ impl Atlas {
 
     /// Atlas slots for a grapheme cluster (see [`Atlas::glyph_slots`]).
     pub fn cluster_slots(&mut self, queue: &wgpu::Queue, text: &str, width: usize, style: GlyphStyle) -> (u16, u16) {
+        if self.clusters.len() >= 4096 {
+            self.clusters.clear();
+            self.cluster_ids.clear();
+            self.map.retain(|&k, _| k & CLUSTER_KEY == 0);
+            for i in 1..self.n_slots as usize {
+                if self.slot_cp[i] & CLUSTER_KEY != 0 {
+                    self.slot_cp[i] = 0;
+                    self.slot_used[i] = 0;
+                }
+            }
+            self.evicted = true;
+        }
         let id = match self.cluster_ids.get(text) {
             Some(&id) => id,
             None if self.clusters.len() <= CODEPOINT_MASK as usize => {
