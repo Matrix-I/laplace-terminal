@@ -427,7 +427,7 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Select or copy the output of the last command using OSC 133 marks
 - [x] Keep prompt marks across a resize (remapped through the reflow)
 
-## Code Health & Hardening (Audit Backlog)
+## Code Health & Hardening (v0.5.0 Audit Backlog)
 
 ### Security Fixes
 - [x] Fix token leak in process table: pass GitHub API token via header file/stdin instead of command line flags in `curl` (`src/update.rs`)
