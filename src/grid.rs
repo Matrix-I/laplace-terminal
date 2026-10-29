@@ -927,6 +927,7 @@ impl Grid {
         self.display_offset = 0;
         self.selection = None;
         self.clear_search();
+        self.trim_extras();
         self.all_dirty = true;
     }
 
@@ -2827,8 +2828,20 @@ impl Grid {
     /// Free every extra slot no cell or saved pen refers to; returns the first free one.
     fn collect_extras(&mut self) -> Option<usize> {
         let mut used = [false; 256];
-        for c in self.cells.iter().chain(self.alt.iter()) {
-            used[c.extra() as usize] = true;
+        if self.cols > 0 && self.cap > 0 {
+            let c = self.cols;
+            let active_rows = (self.history + self.rows).min(self.cap);
+            for i in 0..active_rows {
+                let p = (self.top + self.cap - self.history + i) % self.cap;
+                if let Some(row) = self.cells.get(p * c..(p + 1) * c) {
+                    for cell in row {
+                        used[cell.extra() as usize] = true;
+                    }
+                }
+            }
+        }
+        for cell in &self.alt {
+            used[cell.extra() as usize] = true;
         }
         for c in [&self.cur, &self.saved, &self.saved_main] {
             used[c.pen.extra as usize] = true;
@@ -4936,5 +4949,19 @@ mod tests {
         assert_eq!(g.graphics.virtuals[0].image_id, main_id, "main virtual placement preserved");
         assert!(g.graphics.image(main_id).is_some(), "main image retained");
         assert!(g.graphics.image(alt_id).is_none(), "alt auto-id image freed");
+    }
+
+    #[test]
+    fn clear_history_trims_scrollback_extras_and_reclaims_slots() {
+        let mut g = Grid::new(20, 3);
+        feed(&mut g, "\x1b]8;;http://scrollback.test\x07link\x1b]8;;\x07\n\n\n\n");
+        assert!(g.history > 0);
+        assert!(g.extras.len() > 1);
+        assert!(g.extras[1].is_some());
+
+        // clear_history should discard the scrollback rows and free unreferenced extras
+        g.clear_history();
+        assert_eq!(g.history, 0);
+        assert_eq!(g.extras.len(), 1, "trailing unused extras trimmed on clear_history");
     }
 }
