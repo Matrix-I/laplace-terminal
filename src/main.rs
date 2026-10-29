@@ -2536,48 +2536,51 @@ fn handle_key(
         consume_key(s, ev);
         return;
     };
-    let (app_cursor, kitty_flags, modify_other_keys) = {
-        let g = pane.grid.lock();
-        (g.app_cursor, g.kitty_keyboard_flags(), g.modify_other_keys)
+    let (app_cursor, kitty_flags, modify_other_keys, ctrl_u_bytes) = {
+        let mut g = pane.grid.lock();
+        let app_cursor = g.app_cursor;
+        let kitty_flags = g.kitty_keyboard_flags();
+        let modify_other_keys = g.modify_other_keys;
+
+        // A lone modifier (Cmd before C, Shift before a click) keeps the selection
+        // and the scrollback position; only real keys snap back to the prompt.
+        if !is_modifier {
+            g.reset_display();
+        }
+
+        let ctrl_u_bytes = match &ev.logical_key {
+            // Ctrl+U at a prompt: delete back to the prompt only (vim keeps its half-page scroll).
+            Key::Character(ch) if m == (keymap::Mods { ctrl: true, ..Default::default() }) && ch.eq_ignore_ascii_case("u") => {
+                if !g.alt_active {
+                    g.calculate_delete_before_cursor()
+                } else {
+                    None
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                let cmd = if g.alt_active { String::new() } else { g.current_prompt_input() };
+                if !cmd.is_empty() {
+                    s.history_search.add_session_command(&cmd);
+                }
+                None
+            }
+            _ => None,
+        };
+
+        (app_cursor, kitty_flags, modify_other_keys, ctrl_u_bytes)
     };
+
     // Unbound Cmd/Super combinations only reach applications that speak the Kitty
     // protocol (which can encode Super); a shell would just see the bare key.
     if m.sup && !is_modifier && kitty_flags == 0 {
         consume_key(s, ev);
         return;
     }
-    // A lone modifier (Cmd before C, Shift before a click) keeps the selection
-    // and the scrollback position; only real keys snap back to the prompt.
-    if !is_modifier {
-        pane.grid.lock().reset_display();
-    }
 
-    match &ev.logical_key {
-        // Ctrl+U at a prompt: delete back to the prompt only (vim keeps its half-page scroll).
-        Key::Character(ch) if m == (keymap::Mods { ctrl: true, ..Default::default() }) && ch.eq_ignore_ascii_case("u") => {
-            let (alt_active, del_bytes) = {
-                let g = pane.grid.lock();
-                (g.alt_active, g.calculate_delete_before_cursor())
-            };
-            if !alt_active {
-                if let Some(bytes) = del_bytes {
-                    pane.pty.write(&bytes);
-                    s.window.request_redraw();
-                }
-                return;
-            }
-        }
-        Key::Named(NamedKey::Enter) => {
-            let cmd = {
-                let g = pane.grid.lock();
-                // Full-screen apps (vim, less, REPL UIs) are not shell commands.
-                if g.alt_active { String::new() } else { g.current_prompt_input() }
-            };
-            if !cmd.is_empty() {
-                s.history_search.add_session_command(&cmd);
-            }
-        }
-        _ => {}
+    if let Some(bytes) = ctrl_u_bytes {
+        pane.pty.write(&bytes);
+        s.window.request_redraw();
+        return;
     }
 
     let bytes = if kitty_flags != 0 {
