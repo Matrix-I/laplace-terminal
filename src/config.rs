@@ -877,17 +877,9 @@ fn parse_multiplier(v: &str) -> Result<f64, String> {
     Ok(n)
 }
 
-/// Parse `#rrggbb`, `rrggbb`, `#rgb` or a few named colors into `0xRRGGBB00`.
+/// Parse `#rrggbb`, `rrggbb`, `#rgb` or standard X11 color names into `0xRRGGBB00`.
 pub fn parse_color(v: &str) -> Result<u32, String> {
-    let named = match v.to_ascii_lowercase().as_str() {
-        "black" => Some(0x000000),
-        "white" => Some(0xFFFFFF),
-        "red" => Some(0xFF0000),
-        "green" => Some(0x00FF00),
-        "blue" => Some(0x0000FF),
-        _ => None,
-    };
-    if let Some(rgb) = named {
+    if let Some(rgb) = crate::x11colors::lookup(v) {
         return Ok(rgb << 8);
     }
     let hex = v.strip_prefix('#').unwrap_or(v);
@@ -1220,6 +1212,8 @@ shell-integration-features = no-cursor,sudo
         assert_eq!(c.background, Config::default().background);
         assert_eq!(c.window_width, None);
         assert_eq!(parse_color("#fff").unwrap(), 0xFFFF_FF00);
+        assert_eq!(parse_color("slate blue").unwrap(), 0x6A5A_CD00);
+        assert_eq!(parse_color("gray50").unwrap(), 0x8080_8000);
     }
 
     #[test]
