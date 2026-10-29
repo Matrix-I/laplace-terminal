@@ -1331,7 +1331,8 @@ fn handle_terminal_requests(s: &mut State) {
                 (g.notification.take(), std::mem::take(&mut g.bell), g.clipboard_request.take())
             };
             if let Some(text) = clip {
-                if s.config.clipboard_write {
+                let is_active_pane = in_front && pane.id == tab.active_pane_id;
+                if is_active_pane && s.config.clipboard_write {
                     copy_to_clipboard(&text);
                 }
             }
