@@ -339,6 +339,8 @@ impl Renderer {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
+        #[cfg(target_os = "macos")]
+        crate::macos::configure_layer_drawables(&window);
 
         let atlas = Atlas::new(&device, &queue, font, font_px);
 

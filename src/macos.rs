@@ -277,8 +277,39 @@ mod imp {
 
     /// Return freed heap pages to the OS (keeps idle RSS low after closing tabs).
     pub fn release_free_memory() {
-        // SAFETY: a null zone means "all zones"; goal 0 releases as much as possible.
-        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+        extern "C" {
+            fn mi_collect(force: bool);
+        }
+        unsafe {
+            mi_collect(true);
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+
+    /// Configure CAMetalLayer maximumDrawableCount = 2 (double buffering)
+    /// to minimize latency and save ~10 MB of framebuffer RAM per window.
+    pub fn configure_layer_drawables(window: &Window) {
+        let Some((ns_view, _)) = ns_window_of(window) else { return };
+        unsafe {
+            let mut target_layer = None;
+            if let Some(layer) = send_id(ns_view, c"layer") {
+                if responds_to(layer, c"setMaximumDrawableCount:") {
+                    target_layer = Some(layer);
+                } else if let Some(sublayers) = send_id(layer, c"sublayers") {
+                    let count = msg_send!(sublayers, c"count"; -> usize);
+                    for i in 0..count {
+                        let sub = msg_send!(sublayers, c"objectAtIndex:", i => usize; -> Id);
+                        if responds_to(sub, c"setMaximumDrawableCount:") {
+                            target_layer = Some(sub);
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(layer) = target_layer {
+                msg_send!(layer, c"setMaximumDrawableCount:", 2 => usize);
+            }
+        }
     }
 
     pub fn apply_macos_window_config(window: &Window, cfg: &Config) {
@@ -1263,6 +1294,7 @@ mod imp {
 #[allow(dead_code)]
 mod stub {
     pub fn release_free_memory() {}
+    pub fn configure_layer_drawables(_window: &winit::window::Window) {}
     pub fn apply_macos_window_config(_window: &winit::window::Window, _cfg: &crate::config::Config) {}
     pub fn register_reopen_handler(_proxy: winit::event_loop::EventLoopProxy<crate::AppEvent>) {}
     pub fn install_menu() {}

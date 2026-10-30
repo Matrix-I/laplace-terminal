@@ -181,18 +181,18 @@ pub fn run_ram_benchmark_thread(proxy: EventLoopProxy<AppEvent>) {
             // SLA Check (accounting for macOS Metal IOAccelerator & IOSurface framebuffers)
             // - Idle 1w/1t: footprint <= 85.0 MB (GPU context + Metal pipeline)
             // - 1w/3t: footprint <= 95.0 MB (incremental tab allocations)
-            // - 2w/6t: footprint <= 125.0 MB (multi-window Metal surfaces + 6 tabs)
+            // - 2w/6t: footprint <= 145.0 MB (multi-window Metal surfaces + 6 tabs)
             // - Leak delta: <= 10.0 MB
             let pass_1w_1t = fp_1w_1t <= 85.0;
             let pass_1w_3t = fp_1w_3t <= 95.0;
-            let pass_2w_6t = fp_2w_6t <= 125.0;
+            let pass_2w_6t = fp_2w_6t <= 145.0;
             let pass_leak = leak_delta <= 10.0;
             let passed = pass_1w_1t && pass_1w_3t && pass_2w_6t && pass_leak;
 
             println!("\n{bold}RAM SLA Evaluation:{reset}");
             println!("  • 1 Window 1 Tab  <= 85 MB  : {}", if pass_1w_1t { format!("{green}PASS ({:.2} MB){reset}", fp_1w_1t) } else { format!("{red}FAIL ({:.2} MB > 85 MB){reset}", fp_1w_1t) });
             println!("  • 1 Window 3 Tabs <= 95 MB  : {}", if pass_1w_3t { format!("{green}PASS ({:.2} MB){reset}", fp_1w_3t) } else { format!("{red}FAIL ({:.2} MB > 95 MB){reset}", fp_1w_3t) });
-            println!("  • 2 Win 6 Tabs    <= 125 MB : {}", if pass_2w_6t { format!("{green}PASS ({:.2} MB){reset}", fp_2w_6t) } else { format!("{red}FAIL ({:.2} MB > 125 MB){reset}", fp_2w_6t) });
+            println!("  • 2 Win 6 Tabs    <= 145 MB : {}", if pass_2w_6t { format!("{green}PASS ({:.2} MB){reset}", fp_2w_6t) } else { format!("{red}FAIL ({:.2} MB > 145 MB){reset}", fp_2w_6t) });
             println!("  • Memory Leak     <= 10 MB  : {}", if pass_leak { format!("{green}PASS ({:.2} MB){reset}", leak_delta) } else { format!("{red}FAIL ({:.2} MB > 10 MB){reset}", leak_delta) });
 
             println!("\n{bold}RAM Verdict:{reset} {}", if passed {

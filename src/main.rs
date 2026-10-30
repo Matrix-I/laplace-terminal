@@ -672,7 +672,11 @@ impl ApplicationHandler<AppEvent> for App {
                 match cmd {
                     bench::BenchCommand::OpenTabInLastWindow => {
                         if let Some(s) = self.windows.last_mut() {
-                            open_fresh_tab(s, &self.waker);
+                            if s.tabs.is_empty() {
+                                open_fresh_tab(s, &self.waker);
+                            } else {
+                                duplicate_active_tab(s, &self.waker);
+                            }
                             self.process_window_requests(event_loop);
                         }
                     }
@@ -695,6 +699,10 @@ impl ApplicationHandler<AppEvent> for App {
                             while s.tabs.len() > 1 {
                                 s.tabs.pop();
                             }
+                            s.active = 0;
+                            s.renderer.shrink_drawables();
+                            let sz = s.window.inner_size();
+                            s.renderer.resize(sz.width, sz.height);
                             sync_size(s);
                             refresh_tab_titles(s);
                         }
@@ -1592,6 +1600,9 @@ fn reload_config(s: &mut State) {
 fn render_active(s: &mut State) {
     if s.tabs.is_empty() {
         return;
+    }
+    if s.active >= s.tabs.len() {
+        s.active = s.tabs.len() - 1;
     }
     if s.search.is_open {
         // Follow focus to another pane or tab; mirror the grid's match status.

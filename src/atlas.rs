@@ -308,9 +308,9 @@ impl Atlas {
         // Extra (or missing) height is split above and below the text.
         let baseline = (lm.ascent + lm.line_gap / 2.0 + (cell_h as f32 - natural_h as f32) / 2.0).round() as i32;
 
-        // 2048×2048 default (only 4MB VRAM for R8); ensures thousands of CJK/Unicode glyphs fit without eviction.
-        let mut size = 2048u32;
-        while (size / cell_w) * (size / cell_h) < 1024 && size < 4096 {
+        // 512×512 default (256KB VRAM for R8, 1MB for RGBA8); grows dynamically for large fonts.
+        let mut size = 512u32;
+        while (size / cell_w) * (size / cell_h) < 256 && size < 4096 {
             size *= 2;
         }
         let slots_per_row = size / cell_w;
