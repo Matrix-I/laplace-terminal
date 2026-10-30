@@ -702,6 +702,9 @@ impl Grid {
         self.selection = None;
         self.clear_search();
         self.trim_extras();
+        if !self.clusters.is_empty() {
+            self.gc_clusters();
+        }
         if !self.graphics.virtuals.is_empty() {
             self.prune_dead_virtuals();
         }
@@ -808,13 +811,13 @@ impl Grid {
         ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '~' | '+' | '@' | '%' | '=')
     }
 
-    /// Detect a URL (http:// or https://) or a file/directory path containing `(row, col)`.
-    pub fn find_hyperlink_at(
+    /// Extract an explicit OSC 8 hyperlink, URL, or unresolved file path candidate
+    /// containing `(row, col)` without performing any blocking filesystem `stat()` calls.
+    pub fn find_hyperlink_candidate_at(
         &self,
         row: usize,
         col: usize,
-        cwd: Option<&std::path::Path>,
-    ) -> Option<Hyperlink> {
+    ) -> Option<HyperlinkCandidate> {
         if row >= self.rows || self.cols == 0 || col >= self.cols {
             return None;
         }
@@ -826,7 +829,13 @@ impl Grid {
             let start = r[..col].iter().rposition(|c| !same(c)).map_or(0, |i| i + 1);
             let end = r[col..].iter().position(|c| !same(c)).map_or(self.cols, |i| col + i);
             let (url, is_path) = osc8_target(&link.uri)?;
-            return Some(Hyperlink { row, start_col: start, end_col: end - 1, url, is_path });
+            return Some(HyperlinkCandidate::Resolved(Hyperlink {
+                row,
+                start_col: start,
+                end_col: end - 1,
+                url,
+                is_path,
+            }));
         }
 
         let chars: Vec<char> = r.iter().map(|c| self.cell_char(c)).collect();
@@ -854,13 +863,13 @@ impl Grid {
                 let end = trim_trailing_punctuation(&chars, start, end);
                 if col >= start && col < end && end > start + 7 {
                     let url_str: String = chars[start..end].iter().collect();
-                    return Some(Hyperlink {
+                    return Some(HyperlinkCandidate::Resolved(Hyperlink {
                         row,
                         start_col: start,
                         end_col: end - 1,
                         url: url_str,
                         is_path: false,
-                    });
+                    }));
                 }
                 idx = end.max(idx + 1);
             } else {
@@ -894,34 +903,22 @@ impl Grid {
             return None;
         }
 
-        // Validate that it looks like a path or exists
-        let is_valid_path = if token_str.starts_with("~/") || token_str == "~" {
-            if let Ok(home) = std::env::var("HOME") {
-                let rest = token_str.strip_prefix("~/").unwrap_or("");
-                let full = std::path::Path::new(&home).join(rest);
-                full.exists() || !rest.is_empty()
-            } else {
-                true
-            }
-        } else if token_str.starts_with('/') {
-            std::path::Path::new(&token_str).exists() || token_str.len() > 1
-        } else if let Some(base) = cwd {
-            base.join(&token_str).exists() || std::path::Path::new(&token_str).exists()
-        } else {
-            std::path::Path::new(&token_str).exists()
-        };
+        Some(HyperlinkCandidate::ImplicitPath {
+            row,
+            start_col: start,
+            end_col: end - 1,
+            token: token_str,
+        })
+    }
 
-        if is_valid_path {
-            Some(Hyperlink {
-                row,
-                start_col: start,
-                end_col: end - 1,
-                url: token_str,
-                is_path: true,
-            })
-        } else {
-            None
-        }
+    /// Detect a URL (http:// or https://) or a file/directory path containing `(row, col)`.
+    pub fn find_hyperlink_at(
+        &self,
+        row: usize,
+        col: usize,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<Hyperlink> {
+        self.find_hyperlink_candidate_at(row, col)?.resolve(cwd)
     }
 
     #[inline]
@@ -1337,6 +1334,151 @@ impl Grid {
         }
     }
 
+    /// Intern a grapheme cluster string and return its ID (`0..MAX_CLUSTERS`),
+    /// garbage-collecting unreferenced clusters if `MAX_CLUSTERS` is reached.
+    fn intern_cluster(&mut self, text: &str) -> Option<u32> {
+        if text.len() > MAX_CLUSTER_BYTES {
+            return None;
+        }
+        if let Some(&id) = self.cluster_ids.get(text) {
+            return Some(id);
+        }
+        if self.clusters.len() >= MAX_CLUSTERS {
+            self.gc_clusters();
+            if let Some(&id) = self.cluster_ids.get(text) {
+                return Some(id);
+            }
+            if self.clusters.len() >= MAX_CLUSTERS {
+                return None;
+            }
+        }
+        let id = self.clusters.len() as u32;
+        let boxed: Box<str> = text.into();
+        self.clusters.push(boxed.clone());
+        self.cluster_ids.insert(boxed, id);
+        Some(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cluster_count(&self) -> usize {
+        self.clusters.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_dead_clusters_for_bench(&mut self, count: usize) {
+        self.clusters.clear();
+        self.cluster_ids.clear();
+        self.clusters.reserve(count);
+        self.cluster_ids.reserve(count);
+        for i in 0..count {
+            let s: Box<str> = format!("dead_cluster_{i}").into_boxed_str();
+            self.clusters.push(s.clone());
+            self.cluster_ids.insert(s, i as u32);
+        }
+    }
+
+    /// Garbage-collect unreferenced grapheme clusters in `self.clusters` and
+    /// `self.cluster_ids`, compacting the table and remapping `CLUSTER_ID` on all
+    /// active cells (`0..history + rows` and `alt`).
+    pub(crate) fn gc_clusters(&mut self) {
+        let total = self.clusters.len();
+        if total == 0 {
+            return;
+        }
+        let mut used = vec![false; total];
+        let mut used_count = 0usize;
+
+        let mut mark_slice = |slice: &[Cell]| {
+            for cell in slice {
+                let cp = cell.codepoint;
+                if cp & (CLUSTER_FLAG | PH_FLAG) == CLUSTER_FLAG {
+                    let id = (cp & CLUSTER_ID) as usize;
+                    if let Some(u) = used.get_mut(id) {
+                        if !*u {
+                            *u = true;
+                            used_count += 1;
+                        }
+                    }
+                }
+            }
+        };
+
+        let c = self.cols;
+        if c > 0 && self.cap > 0 {
+            let active_rows = (self.history + self.rows).min(self.cap);
+            let start_row = (self.top + self.cap - self.history) % self.cap;
+            if active_rows == self.cap {
+                mark_slice(&self.cells);
+            } else if start_row + active_rows <= self.cap {
+                let s = start_row * c;
+                let e = (start_row + active_rows) * c;
+                mark_slice(&self.cells[s..e]);
+            } else {
+                let s1 = start_row * c;
+                let s2 = (start_row + active_rows - self.cap) * c;
+                mark_slice(&self.cells[s1..]);
+                mark_slice(&self.cells[..s2]);
+            }
+        }
+        if !self.alt.is_empty() {
+            mark_slice(&self.alt);
+        }
+
+        if used_count == 0 {
+            self.clusters.clear();
+            self.cluster_ids.clear();
+            return;
+        }
+        if used_count == total {
+            return;
+        }
+
+        let mut remap = vec![0u32; total];
+        let mut new_clusters = Vec::with_capacity(used_count);
+        self.cluster_ids.clear();
+        for (old_id, text) in self.clusters.drain(..).enumerate() {
+            if used[old_id] {
+                let new_id = new_clusters.len() as u32;
+                remap[old_id] = new_id;
+                self.cluster_ids.insert(text.clone(), new_id);
+                new_clusters.push(text);
+            }
+        }
+        self.clusters = new_clusters;
+
+        let remap_slice = |slice: &mut [Cell]| {
+            for cell in slice {
+                let cp = cell.codepoint;
+                if cp & (CLUSTER_FLAG | PH_FLAG) == CLUSTER_FLAG {
+                    let old_id = (cp & CLUSTER_ID) as usize;
+                    if let Some(&new_id) = remap.get(old_id) {
+                        cell.codepoint = (cp & !CLUSTER_ID) | new_id;
+                    }
+                }
+            }
+        };
+
+        if c > 0 && self.cap > 0 {
+            let active_rows = (self.history + self.rows).min(self.cap);
+            let start_row = (self.top + self.cap - self.history) % self.cap;
+            if active_rows == self.cap {
+                remap_slice(&mut self.cells);
+            } else if start_row + active_rows <= self.cap {
+                let s = start_row * c;
+                let e = (start_row + active_rows) * c;
+                remap_slice(&mut self.cells[s..e]);
+            } else {
+                let s1 = start_row * c;
+                let s2 = (start_row + active_rows - self.cap) * c;
+                remap_slice(&mut self.cells[s1..]);
+                remap_slice(&mut self.cells[..s2]);
+            }
+        }
+        if !self.alt.is_empty() {
+            remap_slice(&mut self.alt);
+        }
+    }
+
     /// Append `c` to the grapheme in cell `(row, col)`, turning it into a
     /// cluster. `widen` makes a narrow one double-width (emoji presentation)
     /// when the cell after it is where the cursor is. False if it could not.
@@ -1355,17 +1497,7 @@ impl Grid {
             },
         }
         text.push(c);
-        let id = match self.cluster_ids.get(text.as_str()) {
-            _ if text.len() > MAX_CLUSTER_BYTES => None,
-            Some(&id) => Some(id),
-            None if self.clusters.len() < MAX_CLUSTERS => {
-                let id = self.clusters.len() as u32;
-                self.clusters.push(text.as_str().into());
-                self.cluster_ids.insert(text.as_str().into(), id);
-                Some(id)
-            }
-            None => None,
-        };
+        let id = self.intern_cluster(text.as_str());
         self.cluster_buf = text;
         let Some(id) = id else { return false };
         let was_wide = is_wide_cp(cp);
@@ -1399,16 +1531,7 @@ impl Grid {
     fn wide_pictograph(&mut self, c: char) -> Option<u32> {
         let mut buf = [0u8; 4];
         let text: &str = c.encode_utf8(&mut buf);
-        let id = match self.cluster_ids.get(text) {
-            Some(&id) => id,
-            None if self.clusters.len() < MAX_CLUSTERS => {
-                let id = self.clusters.len() as u32;
-                self.clusters.push(text.into());
-                self.cluster_ids.insert(text.into(), id);
-                id
-            }
-            None => return None,
-        };
+        let id = self.intern_cluster(text)?;
         Some(CLUSTER_FLAG | CLUSTER_WIDE | id)
     }
 
@@ -1663,6 +1786,7 @@ impl Grid {
         }
         if to_history && !self.alt_active && t == 0 && b == self.rows - 1 {
             let mut evicted_had_ph = false;
+            let mut evicted_had_cluster = false;
             for _ in 0..n {
                 if self.history + self.rows >= self.cap && self.cap < self.scrollback + self.rows {
                     self.grow_capacity();
@@ -1673,6 +1797,9 @@ impl Grid {
                     let end = start + self.cols;
                     if !self.graphics.virtuals.is_empty() && self.cells[start..end].iter().any(|c| c.codepoint & PH_FLAG != 0) {
                         evicted_had_ph = true;
+                    }
+                    if self.clusters.len() >= 4096 && self.cells[start..end].iter().any(|c| c.codepoint & (CLUSTER_FLAG | PH_FLAG) == CLUSTER_FLAG) {
+                        evicted_had_cluster = true;
                     }
                     if self.cells[start..end].iter().any(|c| ((c.fg & FG_EXTRA) | (c.bg & BG_EXTRA)) != 0) {
                         self.extras_dirty = true;
@@ -1694,6 +1821,9 @@ impl Grid {
             }
             if evicted_had_ph {
                 self.prune_dead_virtuals();
+            }
+            if evicted_had_cluster {
+                self.gc_clusters();
             }
             self.all_dirty = true;
         } else {
@@ -2484,6 +2614,7 @@ impl Grid {
 
     /// OSC 4: `4 ; index ; spec ; index ; spec ...`, where `spec` may be `?`.
     fn osc4(&mut self, params: &[&[u8]], st: &str) {
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
         for pair in params[1..].chunks(2) {
             let Some(i) = std::str::from_utf8(pair[0]).ok().and_then(|s| s.parse::<u8>().ok()) else { continue };
             match pair.get(1) {
@@ -2493,34 +2624,114 @@ impl Grid {
                 }
                 Some(spec) => {
                     if let Some(c) = parse_x11_color(spec) {
-                        let old = palette_with(&self.palette_override, i);
+                        let old = palette_with(&self.palette_override, i) & !0xFF;
+                        let new = c & !0xFF;
                         if self.palette_override.is_empty() {
                             self.palette_override = vec![0; 256];
                         }
                         self.palette_override[i as usize] = c | 1;
-                        self.recolor(old, c);
+                        if old != new {
+                            if let Some(entry) = pairs.iter_mut().find(|(o, _)| *o == old) {
+                                entry.1 = new;
+                            } else {
+                                pairs.push((old, new));
+                            }
+                        }
                     }
                 }
                 None => {}
             }
         }
+        self.recolor_pairs(&pairs);
     }
 
-    /// Repaint text already drawn with palette color `old` in `new`. Cells keep
-    /// RGB, not palette indices (no spare bits in 12 bytes), so this matches by
-    /// color: a true-color cell of exactly `old` changes too.
-    fn recolor(&mut self, old: u32, new: u32) {
-        let (old, new) = (old & !0xFF, new & !0xFF);
-        if old == new {
+    /// OSC 104 [; index ...]: reset palette entries (all without indices) in a
+    /// single pass over active cells without sequential color aliasing.
+    fn osc104(&mut self, params: &[&[u8]]) {
+        let all = params.len() < 2 || params[1].is_empty();
+        if !self.palette_override.is_empty() {
+            let mut pairs: Vec<(u32, u32)> = Vec::new();
+            let mut collect_reset = |i: u8, overrides: &mut [u32]| {
+                let raw = overrides[i as usize];
+                if raw != 0 {
+                    overrides[i as usize] = 0;
+                    let old = raw & !0xFF;
+                    let new = palette(i) & !0xFF;
+                    if old != new && !pairs.iter().any(|&(o, _)| o == old) {
+                        pairs.push((old, new));
+                    }
+                }
+            };
+            if all {
+                for i in 0..=255u8 {
+                    collect_reset(i, &mut self.palette_override);
+                }
+            } else {
+                for i in params[1..].iter().filter_map(|p| std::str::from_utf8(p).ok()?.parse::<u8>().ok()) {
+                    collect_reset(i, &mut self.palette_override);
+                }
+            }
+            self.recolor_pairs(&pairs);
+        }
+        if all {
+            self.palette_override = Vec::new();
+        }
+    }
+
+    /// Repaint text already drawn with overridden palette colors in a single pass
+    /// over active cells (`0..history + rows` + `alt`), avoiding both $O(256 \times \text{cap} \times \text{cols})$
+    /// full-buffer scans and sequential swap aliasing.
+    fn recolor_pairs(&mut self, pairs: &[(u32, u32)]) {
+        if pairs.is_empty() {
             return;
         }
-        for cell in self.cells.iter_mut().chain(self.alt.iter_mut()) {
-            if cell.fg & FG_SET != 0 && cell.fg & !0xFF == old {
-                cell.fg = new | (cell.fg & 0xFF);
+        let apply_slice = |slice: &mut [Cell]| {
+            if let &[(old, new)] = pairs {
+                for cell in slice {
+                    if cell.fg & FG_SET != 0 && cell.fg & !0xFF == old {
+                        cell.fg = new | (cell.fg & 0xFF);
+                    }
+                    if cell.bg & BG_SET != 0 && cell.bg & !0xFF == old {
+                        cell.bg = new | (cell.bg & 0xFF);
+                    }
+                }
+            } else {
+                for cell in slice {
+                    if cell.fg & FG_SET != 0 {
+                        let fg_rgb = cell.fg & !0xFF;
+                        if let Some(&(_, new)) = pairs.iter().find(|&&(old, _)| old == fg_rgb) {
+                            cell.fg = new | (cell.fg & 0xFF);
+                        }
+                    }
+                    if cell.bg & BG_SET != 0 {
+                        let bg_rgb = cell.bg & !0xFF;
+                        if let Some(&(_, new)) = pairs.iter().find(|&&(old, _)| old == bg_rgb) {
+                            cell.bg = new | (cell.bg & 0xFF);
+                        }
+                    }
+                }
             }
-            if cell.bg & BG_SET != 0 && cell.bg & !0xFF == old {
-                cell.bg = new | (cell.bg & 0xFF);
+        };
+
+        let c = self.cols;
+        if c > 0 && self.cap > 0 {
+            let active_rows = (self.history + self.rows).min(self.cap);
+            let start_row = (self.top + self.cap - self.history) % self.cap;
+            if active_rows == self.cap {
+                apply_slice(&mut self.cells);
+            } else if start_row + active_rows <= self.cap {
+                let s = start_row * c;
+                let e = (start_row + active_rows) * c;
+                apply_slice(&mut self.cells[s..e]);
+            } else {
+                let s1 = start_row * c;
+                let s2 = (start_row + active_rows - self.cap) * c;
+                apply_slice(&mut self.cells[s1..]);
+                apply_slice(&mut self.cells[..s2]);
             }
+        }
+        if !self.alt.is_empty() {
+            apply_slice(&mut self.alt);
         }
         self.all_dirty = true;
     }
@@ -4719,6 +4930,108 @@ mod tests {
         // Test character deletion (DCH) and insertion (ICH)
         feed(&mut g, "\x1b[1;10H\x1b[1P"); // delete character with link
         assert!(g.extras_dirty, "extras_dirty must be set after DCH");
+    }
+
+    #[test]
+    fn test_osc104_color_swap_aliasing_and_batched_reset() {
+        let mut g = Grid::new(80, 24);
+        let p1 = palette(1) & !0xFF;
+        let p2 = palette(2) & !0xFF;
+
+        // Override palette index 1 with palette(2)'s RGB and index 2 with palette(1)'s RGB (color swap!)
+        feed(
+            &mut g,
+            &format!(
+                "\x1b]4;1;rgb:{:02x}/{:02x}/{:02x}\x1b\\\x1b]4;2;rgb:{:02x}/{:02x}/{:02x}\x1b\\",
+                (p2 >> 24) & 0xFF,
+                (p2 >> 16) & 0xFF,
+                (p2 >> 8) & 0xFF,
+                (p1 >> 24) & 0xFF,
+                (p1 >> 16) & 0xFF,
+                (p1 >> 8) & 0xFF
+            ),
+        );
+
+        // Write cell (0,0) with index 1 (currently p2) and cell (0,1) with index 2 (currently p1)
+        feed(&mut g, "\x1b[31mA\x1b[32mB\x1b[0m");
+        assert_eq!(g.display_row(0)[0].fg & !0xFF, p2);
+        assert_eq!(g.display_row(0)[1].fg & !0xFF, p1);
+
+        // Now send OSC 104 (full palette reset).
+        // Cell (0,0) must revert to p1 and cell (0,1) must revert to p2 without aliasing both to p2!
+        feed(&mut g, "\x1b]104\x1b\\");
+        assert_eq!(
+            g.display_row(0)[0].fg & !0xFF,
+            p1,
+            "cell(0,0) with swapped palette 1 must reset to p1, not alias to p2"
+        );
+        assert_eq!(
+            g.display_row(0)[1].fg & !0xFF,
+            p2,
+            "cell(0,1) with swapped palette 2 must reset to p2"
+        );
+    }
+
+    #[test]
+    fn test_grapheme_cluster_gc_on_clear_history_and_eviction() {
+        let mut g = Grid::new(40, 4);
+        // Feed multi-mark clusters into history rows (base + 2 combining marks won't NFC-precompose into 1 char)
+        for i in 0..20 {
+            let mark1 = char::from_u32(0x0300 + (i % 16)).unwrap();
+            let mark2 = char::from_u32(0x0310 + (i % 16)).unwrap();
+            feed(&mut g, &format!("a{mark1}{mark2}_{i}\r\n"));
+        }
+        assert!(g.clusters.len() >= 10, "clusters should be populated (got {})", g.clusters.len());
+
+        // Write a distinct active cluster on the current screen row
+        feed(&mut g, "z\u{0308}\u{0304}");
+        let active_row = g.cur.row;
+        let cp_before = g.display_row(active_row)[0].codepoint;
+        assert_ne!(cp_before & CLUSTER_FLAG, 0, "active cell must be a cluster");
+        assert_eq!(g.cluster(cp_before), Some("z\u{0308}\u{0304}"));
+
+        // Clear history -> triggers gc_clusters()
+        g.clear_history();
+        assert!(
+            g.clusters.len() <= 4,
+            "unreferenced history clusters must be garbage-collected (remaining: {})",
+            g.clusters.len()
+        );
+        let cp_after = g.display_row(active_row)[0].codepoint;
+        assert_ne!(cp_after & CLUSTER_FLAG, 0);
+        assert_eq!(
+            g.cluster(cp_after),
+            Some("z\u{0308}\u{0304}"),
+            "active cluster ID must be remapped and preserve its text after GC"
+        );
+
+        // Verify new clusters can still be interned and looked up accurately
+        feed(&mut g, "q\u{0301}\u{0327}");
+        let cp_new = g.display_row(active_row)[1].codepoint;
+        assert_eq!(g.cluster(cp_new), Some("q\u{0301}\u{0327}"));
+    }
+
+    #[test]
+    fn test_hyperlink_candidate_lock_free_resolution() {
+        let mut g = Grid::new(80, 24);
+        feed(&mut g, "Check ./Cargo.toml and https://example.com/docs here\r\n");
+
+        // Candidate for implicit path ("./Cargo.toml") extracted without filesystem I/O
+        let cand_path = g
+            .find_hyperlink_candidate_at(0, 8)
+            .expect("should extract implicit path candidate");
+        let resolved_path = cand_path
+            .resolve(Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))))
+            .expect("./Cargo.toml should resolve against CARGO_MANIFEST_DIR");
+        assert!(resolved_path.is_path);
+        assert_eq!(&*resolved_path.url, "./Cargo.toml");
+
+        // Candidate for explicit URL ("https://example.com/docs")
+        let cand_url = g
+            .find_hyperlink_candidate_at(0, 28)
+            .expect("should extract URL candidate");
+        let resolved_url = cand_url.resolve(None).expect("URL should resolve without CWD");
+        assert_eq!(&*resolved_url.url, "https://example.com/docs");
     }
 }
 

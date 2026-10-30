@@ -901,35 +901,42 @@ impl Renderer {
         }
 
         if self.atlas.take_evicted() {
-            if let Some((titles, active_idx)) = tab_bar {
-                self.build_tab_bar_row(cols, titles, active_idx);
-            }
-            for pane in panes {
-                let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
-                let g = pane.grid.lock();
-                let pane_defaults = Some((g.fg_color(), g.bg_color())).filter(|&d| d != defaults);
-                let p_cols = pane.rect.cols.min(g.cols);
-                let p_rows = pane.rect.rows.min(g.rows);
-                for r in 0..p_rows {
-                    let dst_row = top_rows + pane.rect.row + r;
-                    if dst_row < total_rows {
-                        self.build_pane_row(
-                            &g,
-                            r,
-                            dst_row,
-                            pane.rect.col,
-                            p_cols,
-                            cols,
-                            &pane.rect,
-                            pane.is_active,
-                            active_rect.as_ref(),
-                            pane_link,
-                            pane_defaults,
-                        );
+            for _ in 0..3 {
+                if self.atlas.grow_if_needed(&self.device, &self.queue) {
+                    self.rebind_atlas();
+                }
+                if let Some((titles, active_idx)) = tab_bar {
+                    self.build_tab_bar_row(cols, titles, active_idx);
+                }
+                for pane in panes {
+                    let pane_link = hovered_link.filter(|(id, _)| *id == pane.id).map(|(_, l)| l);
+                    let g = pane.grid.lock();
+                    let pane_defaults = Some((g.fg_color(), g.bg_color())).filter(|&d| d != defaults);
+                    let p_cols = pane.rect.cols.min(g.cols);
+                    let p_rows = pane.rect.rows.min(g.rows);
+                    for r in 0..p_rows {
+                        let dst_row = top_rows + pane.rect.row + r;
+                        if dst_row < total_rows {
+                            self.build_pane_row(
+                                &g,
+                                r,
+                                dst_row,
+                                pane.rect.col,
+                                p_cols,
+                                cols,
+                                &pane.rect,
+                                pane.is_active,
+                                active_rect.as_ref(),
+                                pane_link,
+                                pane_defaults,
+                            );
+                        }
                     }
                 }
+                if !self.atlas.take_evicted() {
+                    break;
+                }
             }
-            self.atlas.take_evicted();
             if total_rows > 0 {
                 lo = 0;
                 hi = total_rows - 1;

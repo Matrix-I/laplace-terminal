@@ -14,7 +14,7 @@
 //!
 //! Zero shell plugins required; works natively in any shell (zsh, bash, fish, sh).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -72,8 +72,8 @@ pub struct HistorySearch {
     pub selected: usize,
     pub scroll_offset: usize,
     pub sort_mode: SortMode,
-    pub items: Vec<String>,
-    pub session_commands: Vec<String>,
+    pub items: VecDeque<String>,
+    pub session_commands: VecDeque<String>,
     pub filtered: Vec<MatchResult>,
     file_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
 }
@@ -92,8 +92,8 @@ impl HistorySearch {
             selected: 0,
             scroll_offset: 0,
             sort_mode: SortMode::Relevance,
-            items: Vec::new(),
-            session_commands: Vec::new(),
+            items: VecDeque::new(),
+            session_commands: VecDeque::new(),
             filtered: Vec::new(),
             file_mtimes: Vec::new(),
         }
@@ -145,18 +145,23 @@ impl HistorySearch {
             return;
         }
         // Remove prior duplicate in session commands if present
-        self.session_commands.retain(|c| c != trimmed);
-        self.session_commands.insert(0, trimmed.to_string());
+        if let Some(pos) = self.session_commands.iter().position(|c| c == trimmed) {
+            self.session_commands.remove(pos);
+        }
+        self.session_commands.push_front(trimmed.to_string());
         if self.session_commands.len() > 500 {
-            self.session_commands.pop();
+            self.session_commands.pop_back();
         }
-        // Insert into items if not present or move to top
+        // Insert into items if not present or move to top in O(1) when new
         if let Some(pos) = self.items.iter().position(|c| c == trimmed) {
-            self.items.remove(pos);
-        }
-        self.items.insert(0, trimmed.to_string());
-        if self.items.len() > MAX_HISTORY_ITEMS {
-            self.items.pop();
+            if let Some(existing) = self.items.remove(pos) {
+                self.items.push_front(existing);
+            }
+        } else {
+            self.items.push_front(trimmed.to_string());
+            if self.items.len() > MAX_HISTORY_ITEMS {
+                self.items.pop_back();
+            }
         }
     }
 
@@ -164,13 +169,10 @@ impl HistorySearch {
     pub fn delete_selected(&mut self) -> Option<String> {
         let item = self.filtered.get(self.selected)?;
         let item_idx = item.item_index;
-        if item_idx >= self.items.len() {
-            return None;
-        }
-        let removed_cmd = self.items.remove(item_idx);
+        let removed_cmd = self.items.remove(item_idx)?;
         self.session_commands.retain(|c| c != &removed_cmd);
 
-        // Remove from primary disk history file
+        // Remove from primary disk history file off the main UI thread
         remove_from_disk_history(&removed_cmd);
 
         self.refilter();
@@ -302,35 +304,29 @@ impl HistorySearch {
     /// Force reload history from disk files.
     pub fn reload(&mut self) {
         let files = candidate_history_files();
-        let mut new_mtimes = Vec::new();
-        let mut raw_commands = Vec::new();
+        let mut new_mtimes = Vec::with_capacity(files.len());
+        let mut seen: HashSet<Box<str>> = HashSet::with_capacity(MAX_HISTORY_ITEMS);
+        let mut unique_items: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_ITEMS);
 
         // Include current in-session commands at the top
-        raw_commands.extend(self.session_commands.clone());
-
-        for file in &files {
-            let mtime = get_mtime(file);
-            new_mtimes.push((file.clone(), mtime));
-            if file.exists() {
-                parse_history_file(file, &mut raw_commands);
-            }
-        }
-
-        self.file_mtimes = new_mtimes;
-
-        // Deduplicate while preserving reverse-chronological order (newest first).
-        let mut seen = HashSet::with_capacity(raw_commands.len());
-        let mut unique_items = Vec::with_capacity(raw_commands.len().min(MAX_HISTORY_ITEMS));
-
-        for cmd in raw_commands {
-            if seen.insert(cmd.clone()) {
-                unique_items.push(cmd);
+        for cmd in &self.session_commands {
+            if seen.insert(cmd.as_str().into()) {
+                unique_items.push_back(cmd.clone());
                 if unique_items.len() >= MAX_HISTORY_ITEMS {
                     break;
                 }
             }
         }
 
+        for file in &files {
+            let mtime = get_mtime(file);
+            new_mtimes.push((file.clone(), mtime));
+            if unique_items.len() < MAX_HISTORY_ITEMS && file.exists() {
+                parse_history_file_dedup(file, &mut seen, &mut unique_items, MAX_HISTORY_ITEMS);
+            }
+        }
+
+        self.file_mtimes = new_mtimes;
         self.items = unique_items;
         self.refilter();
     }
@@ -553,7 +549,111 @@ fn split_history_entries(path: &Path, bytes: &[u8]) -> Vec<RawEntry> {
     }
 }
 
+fn decode_history_cow(bytes: &[u8], zsh: bool) -> std::borrow::Cow<'_, str> {
+    if zsh && bytes.contains(&0x83) {
+        if let Ok(s) = String::from_utf8(unmetafy(bytes)) {
+            return std::borrow::Cow::Owned(s);
+        }
+    }
+    String::from_utf8_lossy(bytes)
+}
+
+fn extract_line_command(text: &str) -> Option<&str> {
+    let line = text.trim();
+    if line.starts_with('#') && line.chars().skip(1).all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let cmd = match line.strip_prefix(": ").and_then(|_| line.find(';')) {
+        Some(pos) => line[pos + 1..].trim(),
+        None => line,
+    };
+    (!cmd.is_empty()).then_some(cmd)
+}
+
+/// Parse shell history file into `out`, deduplicating against `seen` *before* allocating
+/// owned `String`s for duplicate lines.
+fn parse_history_file_dedup(
+    path: &Path,
+    seen: &mut HashSet<Box<str>>,
+    out: &mut VecDeque<String>,
+    max_items: usize,
+) {
+    let Ok(bytes) = std::fs::read(path) else { return };
+    if is_fish_history(path) {
+        for entry in split_fish_entries(&bytes).into_iter().rev() {
+            if let Some(cmd) = entry.command {
+                if !seen.contains(cmd.as_str()) {
+                    seen.insert(cmd.as_str().into());
+                    out.push_back(cmd);
+                    if out.len() >= max_items {
+                        break;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let zsh = is_zsh_history(path);
+    // Collect logical line byte ranges (or joined multi-line ranges) in forward order,
+    // then iterate in reverse (newest first) and only allocate String when not in `seen`.
+    enum LineSlice<'a> {
+        Borrowed(&'a [u8]),
+        Joined(Vec<u8>),
+    }
+    impl<'a> LineSlice<'a> {
+        #[inline]
+        fn as_bytes(&self) -> &[u8] {
+            match self {
+                LineSlice::Borrowed(b) => b,
+                LineSlice::Joined(v) => v.as_slice(),
+            }
+        }
+    }
+
+    let mut raw_lines: Vec<LineSlice<'_>> = Vec::new();
+    let mut pos = 0;
+    let mut content: Vec<u8> = Vec::new();
+    while pos < bytes.len() {
+        let line_end = bytes[pos..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |i| pos + i);
+        let next = (line_end + 1).min(bytes.len());
+        let line = &bytes[pos..line_end];
+        if !content.is_empty() {
+            content.push(b'\n');
+        }
+        if let Some(stripped) = line.strip_suffix(b"\\") {
+            if next < bytes.len() {
+                content.extend_from_slice(stripped);
+                pos = next;
+                continue;
+            }
+        }
+        if content.is_empty() {
+            raw_lines.push(LineSlice::Borrowed(line));
+        } else {
+            content.extend_from_slice(line);
+            raw_lines.push(LineSlice::Joined(std::mem::take(&mut content)));
+        }
+        pos = next;
+    }
+
+    for raw in raw_lines.into_iter().rev() {
+        let decoded = decode_history_cow(raw.as_bytes(), zsh);
+        if let Some(cmd) = extract_line_command(&decoded) {
+            if !seen.contains(cmd) {
+                let s = cmd.to_string();
+                seen.insert(s.as_str().into());
+                out.push_back(s);
+                if out.len() >= max_items {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Parse shell history file into commands (appends in reverse-chronological order).
+#[cfg(test)]
 fn parse_history_file(path: &Path, out: &mut Vec<String>) {
     let Ok(bytes) = std::fs::read(path) else { return };
     // File bottom has the most recent commands.
@@ -678,15 +778,36 @@ fn active_shell_history_files() -> Vec<PathBuf> {
     files
 }
 
-/// Remove a deleted command from the active shell's history file.
+/// Remove a deleted command from the active shell's history file on a background thread
+/// so `sync_all()` (`fsync`) never stalls the main UI thread.
 fn remove_from_disk_history(cmd_to_remove: &str) {
-    for path in active_shell_history_files() {
-        if !path.exists() {
-            continue;
-        }
-        if let Err(e) = remove_command_from_file(&path, cmd_to_remove) {
-            eprintln!("litty: failed to update history file {path:?}: {e}");
-        }
+    let files = active_shell_history_files();
+    if files.is_empty() {
+        return;
+    }
+    let cmd = cmd_to_remove.to_string();
+    static IN_FLIGHT_HISTORY_DEL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if IN_FLIGHT_HISTORY_DEL.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 4 {
+        IN_FLIGHT_HISTORY_DEL.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+    if std::thread::Builder::new()
+        .name("history-del".into())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            for path in files {
+                if !path.exists() {
+                    continue;
+                }
+                if let Err(e) = remove_command_from_file(&path, &cmd) {
+                    eprintln!("litty: failed to update history file {path:?}: {e}");
+                }
+            }
+            IN_FLIGHT_HISTORY_DEL.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .is_err()
+    {
+        IN_FLIGHT_HISTORY_DEL.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1167,8 +1288,8 @@ mod tests {
             selected: 0,
             scroll_offset: 0,
             sort_mode: SortMode::Relevance,
-            items: vec!["older 1".into(), "older 2".into()],
-            session_commands: Vec::new(),
+            items: VecDeque::from(["older 1".into(), "older 2".into()]),
+            session_commands: VecDeque::new(),
             filtered: Vec::new(),
             file_mtimes: Vec::new(),
         };
@@ -1185,8 +1306,8 @@ mod tests {
             selected: 0,
             scroll_offset: 0,
             sort_mode: SortMode::Relevance,
-            items: vec!["secret_token".into(), "ls -la".into()],
-            session_commands: Vec::new(),
+            items: VecDeque::from(["secret_token".into(), "ls -la".into()]),
+            session_commands: VecDeque::new(),
             filtered: Vec::new(),
             file_mtimes: Vec::new(),
         };
@@ -1206,8 +1327,8 @@ mod tests {
             selected: 0,
             scroll_offset: 0,
             sort_mode: SortMode::Relevance,
-            items: vec!["cmd 1".into(), "cmd 2".into(), "cmd 3".into(), "cmd 4".into()],
-            session_commands: Vec::new(),
+            items: VecDeque::from(["cmd 1".into(), "cmd 2".into(), "cmd 3".into(), "cmd 4".into()]),
+            session_commands: VecDeque::new(),
             filtered: Vec::new(),
             file_mtimes: Vec::new(),
         };

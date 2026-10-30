@@ -493,8 +493,8 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Prune stale `Placement.alt` entries during linefeed scroll in alternate screen (`src/graphics.rs`, `src/grid/mod.rs`)
 - [x] Prevent Carbon `EnableSecureEventInput` reference counter drift on duplicate focus events (`src/macos.rs`, `src/main.rs`)
 - [x] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
-- [ ] Garbage-collect unreferenced grapheme clusters in `Grid::clusters` and `Grid::cluster_ids` on scrollback eviction / `clear_history` so multi-codepoint combining marks and ZWJ emoji do not permanently stop working after `MAX_CLUSTERS` (65,536) (`src/grid/mod.rs`)
-- [ ] Clean up stale `SAVED_FRAMES` entries on macOS window close, remove `NSVisualEffectView` when `background-blur = 0` or `background-opacity = 1.0` on config reload (`src/macos.rs`), and cap `Shaper::pieces` / `Shaper::piece_ids` at 4,096 entries (`src/atlas.rs`)
+- [x] Garbage-collect unreferenced grapheme clusters in `Grid::clusters` and `Grid::cluster_ids` on scrollback eviction / `clear_history` so multi-codepoint combining marks and ZWJ emoji do not permanently stop working after `MAX_CLUSTERS` (65,536) (`src/grid/mod.rs`)
+- [x] Clean up stale `SAVED_FRAMES` entries on macOS window close, remove `NSVisualEffectView` when `background-blur = 0` or `background-opacity = 1.0` on config reload (`src/macos.rs`), and cap `Shaper::pieces` / `Shaper::piece_ids` at 4,096 entries (`src/atlas.rs`)
 
 ### Performance & Concurrency Fixes
 - [x] Reduce `grid.lock()` mutex hold duration in `renderer.rs` across rasterization and GPU texture uploads (`src/renderer.rs`)
@@ -503,18 +503,18 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Eliminate synchronous main-thread 750ms blocking on clipboard paste (`src/main.rs`)
 - [x] Memoize parsed font metadata in `fontdb.rs` to eliminate massive synchronous disk I/O on font cache miss (`src/fontdb.rs`)
 - [x] Increase default glyph atlas dimensions and prevent invisible `BLANK_SLOT` drops under high Unicode/CJK glyph diversity (`src/atlas.rs`, `src/renderer.rs`)
-- [ ] Move blocking filesystem `Path::exists()` (`stat`) and `Path::canonicalize()` (`realpath`) calls in `resolve_implicit_link` out of `pane.grid.lock()`, and cache `pane.pty.cwd()` / `has_running_process()` on mouse movement in `update_hovered_link` and `inspector_lines` (`src/main.rs`, `src/grid/mod.rs`)
-- [ ] Batch `OSC 104` full palette reset into a single pass over active cells (`0..history + rows`) instead of scanning all `cap * cols` cells 256 times ($O(256 \times \text{cap} \times \text{cols})$) (`src/grid/perform.rs`, `src/grid/mod.rs`)
-- [ ] Dynamically grow the glyph atlas texture (`512 -> 1024 -> 2048 -> 4096`) when all slots are active in the same frame to avoid 512×512 slot thrashing and double full-grid rebuilds per frame on CJK/emoji screens (`src/atlas.rs`, `src/renderer.rs`)
-- [ ] Replace $O(N)$ `Vec::insert(0, ...)` shifts in `HistorySearch::add_session_command` with `VecDeque`, deduplicate history lines before heap-allocating `String`s, and offload `remove_from_disk_history` (`fsync`) from the main UI thread (`src/history.rs`)
-- [ ] Cache the base `CTFontRef` across CoreText fallback calls and upload both `WIDE_LEFT` and `WIDE_RIGHT` atlas slots from a single `2 * cell_w` rasterization pass on macOS (`src/atlas.rs`)
+- [x] Move blocking filesystem `Path::exists()` (`stat`) and `Path::canonicalize()` (`realpath`) calls in `resolve_implicit_link` out of `pane.grid.lock()`, and cache `pane.pty.cwd()` / `has_running_process()` on mouse movement in `update_hovered_link` and `inspector_lines` (`src/main.rs`, `src/grid/mod.rs`)
+- [x] Batch `OSC 104` full palette reset into a single pass over active cells (`0..history + rows`) instead of scanning all `cap * cols` cells 256 times ($O(256 \times \text{cap} \times \text{cols})$) (`src/grid/perform.rs`, `src/grid/mod.rs`)
+- [x] Dynamically grow the glyph atlas texture (`512 -> 1024 -> 2048 -> 4096`) when all slots are active in the same frame to avoid 512×512 slot thrashing and double full-grid rebuilds per frame on CJK/emoji screens (`src/atlas.rs`, `src/renderer.rs`)
+- [x] Replace $O(N)$ `Vec::insert(0, ...)` shifts in `HistorySearch::add_session_command` with `VecDeque`, deduplicate history lines before heap-allocating `String`s, and offload `remove_from_disk_history` (`fsync`) from the main UI thread (`src/history.rs`)
+- [x] Cache the base `CTFontRef` across CoreText fallback calls and upload both `WIDE_LEFT` and `WIDE_RIGHT` atlas slots from a single `2 * cell_w` rasterization pass on macOS (`src/atlas.rs`)
 
 ### Code Quality & Logic Integrity
 - [x] Fix zero-width character column calculation (`char_width(c).max(1)`) in search match selections (`src/search.rs`)
 - [x] Clamp wheel delta bursts in `alt_screen_scroll` to avoid flooding PTY with arrow keys (`src/main.rs`)
 - [x] Support standard X11 color names in config `parse_color` consistent with terminal OSC palette (`src/config.rs`)
 - [x] Propagate config reload renderer changes to all open windows in multi-window mode (`src/main.rs`)
-- [ ] Fix `OSC 104` color aliasing corruption when two overridden palette indices swap colors across sequential in-place `Grid::recolor` passes (`src/grid/perform.rs`, `src/grid/mod.rs`)
+- [x] Fix `OSC 104` color aliasing corruption when two overridden palette indices swap colors across sequential in-place `Grid::recolor` passes (`src/grid/perform.rs`, `src/grid/mod.rs`)
 
 ## Planned Features (v0.7.0 — Post v0.6.0 Release)
 

@@ -678,12 +678,12 @@ pub fn run_critical_features_benchmark() -> FeatureMetrics {
 
     // SLAs
     let pass_fzf = fzf_per_search_ms <= 2.5;
-    let pass_regex = regex_dur_ms <= 15.0;
+    let pass_regex = regex_dur_ms <= 1.0;
     let passed = pass_fzf && pass_regex && splits_ok && paste_secure;
 
     println!("\n{bold}Features SLA Evaluation:{reset}");
     println!("  • FZF 10k Search    <= 2.5 ms : {}", if pass_fzf { format!("{green}PASS ({:.3} ms){reset}", fzf_per_search_ms) } else { format!("{red}FAIL ({:.3} ms > 2.5 ms){reset}", fzf_per_search_ms) });
-    println!("  • Regex 5k Scan     <= 15 ms  : {}", if pass_regex { format!("{green}PASS ({:.3} ms){reset}", regex_dur_ms) } else { format!("{red}FAIL ({:.3} ms > 15 ms){reset}", regex_dur_ms) });
+    println!("  • Regex 5k Scan     <= 1 ms   : {}", if pass_regex { format!("{green}PASS ({:.3} ms){reset}", regex_dur_ms) } else { format!("{red}FAIL ({:.3} ms > 1 ms){reset}", regex_dur_ms) });
     println!("  • Split Panes Tree            : {}", if splits_ok { format!("{green}PASS{reset}") } else { format!("{red}FAIL{reset}") });
     println!("  • Bracketed Paste Sanitization: {}", if paste_secure { format!("{green}PASS{reset}") } else { format!("{red}FAIL{reset}") });
 

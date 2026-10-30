@@ -137,16 +137,22 @@ impl Shaper {
     /// style that contain punctuation (where coding-font ligatures live).
     /// `out[col]` becomes a slot key for a substituted glyph, `SHAPED_BLANK`
     /// for an empty spacer, or 0 for "draw the codepoint as usual". Returns
-    /// whether any cell changed. Allocation-free once the buffers are warm.
-    pub fn shape_row(&mut self, fonts: &FontSet, px: f32, cell_w: u32, row: &[crate::grid::Cell], out: &mut Vec<u32>) -> bool {
+    /// `(changed, reset_pieces)`. Allocation-free once the buffers are warm.
+    pub fn shape_row(&mut self, fonts: &FontSet, px: f32, cell_w: u32, row: &[crate::grid::Cell], out: &mut Vec<u32>) -> (bool, bool) {
+        let mut reset_pieces = false;
+        if self.pieces.len() >= 4096 {
+            self.pieces.clear();
+            self.piece_ids.clear();
+            reset_pieces = true;
+        }
         out.clear();
         out.resize(row.len(), 0);
-        let Some(face) = fonts.shaper() else { return false };
+        let Some(face) = fonts.shaper() else { return (false, reset_pieces) };
         if self.cell_units == 0 {
             self.cell_units = face.glyph_index('M').and_then(|g| face.glyph_hor_advance(g)).map_or(-1, i32::from);
         }
         if self.cell_units <= 0 {
-            return false;
+            return (false, reset_pieces);
         }
         let style_of = |c: &crate::grid::Cell| (c.fg & crate::grid::FG_BOLD != 0, c.fg & crate::grid::FG_ITALIC != 0);
         let shapeable = |c: &crate::grid::Cell| (0x21..0x7F).contains(&c.codepoint);
@@ -215,7 +221,7 @@ impl Shaper {
             }
             self.buf = Some(glyphs.clear());
         }
-        changed
+        (changed, reset_pieces)
     }
 
 }
@@ -258,6 +264,7 @@ pub struct Atlas {
     lru_next: Vec<u16>,
     frame: u64,
     evicted: bool,
+    grow_needed: bool,
     scratch: Vec<u8>,
     shaper: Shaper,
 
@@ -268,6 +275,8 @@ pub struct Atlas {
     pub color_view: wgpu::TextureView,
     slot_color: Vec<bool>,
     color_scratch: Vec<u8>,
+    wide_r8_scratch: Vec<u8>,
+    wide_rgba_scratch: Vec<u8>,
     /// Grapheme clusters drawn so far, interned for their slot keys.
     clusters: Vec<Box<str>>,
     cluster_ids: HashMap<Box<str>, u32>,
@@ -339,6 +348,7 @@ impl Atlas {
             lru_next: vec![0; n_slots as usize],
             frame: 1,
             evicted: false,
+            grow_needed: false,
             scratch: vec![0; (cell_w * cell_h) as usize],
             shaper: Shaper::new(FONT_FEATURES.lock().clone()),
             texture,
@@ -347,11 +357,58 @@ impl Atlas {
             color_view,
             slot_color: vec![false; n_slots as usize],
             color_scratch: vec![0; (cell_w * cell_h * 4) as usize],
+            wide_r8_scratch: vec![0; (2 * cell_w * cell_h) as usize],
+            wide_rgba_scratch: vec![0; (2 * cell_w * cell_h * 4) as usize],
             clusters: Vec::new(),
             cluster_ids: HashMap::new(),
         };
         atlas.preload_ascii(queue);
         atlas
+    }
+
+    /// Dynamically grow the glyph atlas texture (`512 -> 1024 -> 2048 -> 4096`) when
+    /// all slots were active in the same frame, avoiding 512×512 slot thrashing on
+    /// CJK/emoji screens. Returns `true` if the texture was recreated (bind groups
+    /// must be rebound).
+    pub fn grow_if_needed(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        if !std::mem::take(&mut self.grow_needed) || self.size >= 4096 {
+            return false;
+        }
+        let new_size = (self.size * 2).min(4096);
+        let slots_per_row = new_size / self.cell_w;
+        let n_slots = (slots_per_row * (new_size / self.cell_h)).min(u16::MAX as u32);
+        if n_slots <= self.n_slots {
+            return false;
+        }
+
+        let (texture, view) = Self::make_texture(device, new_size, wgpu::TextureFormat::R8Unorm);
+        let (color_texture, color_view) = Self::make_texture(device, new_size, wgpu::TextureFormat::Rgba8Unorm);
+
+        self.size = new_size;
+        self.slots_per_row = slots_per_row;
+        self.n_slots = n_slots;
+        self.next_free = 1;
+        self.ascii = [BLANK_SLOT; 128];
+        self.map.clear();
+        self.map.reserve(n_slots as usize);
+        self.slot_cp.clear();
+        self.slot_cp.resize(n_slots as usize, 0);
+        self.slot_used.clear();
+        self.slot_used.resize(n_slots as usize, 0);
+        self.lru_head = 0;
+        self.lru_tail = 0;
+        self.lru_prev.clear();
+        self.lru_prev.resize(n_slots as usize, 0);
+        self.lru_next.clear();
+        self.lru_next.resize(n_slots as usize, 0);
+        self.slot_color.clear();
+        self.slot_color.resize(n_slots as usize, false);
+        self.texture = texture;
+        self.view = view;
+        self.color_texture = color_texture;
+        self.color_view = color_view;
+        self.preload_ascii(queue);
+        true
     }
 
     fn lru_push_tail(&mut self, s: u16) {
@@ -499,8 +556,8 @@ impl Atlas {
     }
 
     /// Atlas slots for a glyph of display width `width`. Double-width glyphs are
-    /// rasterized across two cells and split into a left and a right slot; for
-    /// narrow glyphs the right slot is blank.
+    /// rasterized across two cells in a single pass and split into a left and a
+    /// right slot; for narrow glyphs the right slot is blank.
     pub fn glyph_slots(&mut self, queue: &wgpu::Queue, cp: u32, width: usize, style: GlyphStyle) -> (u16, u16) {
         let mut key = cp;
         // Cell-exact sprites (box drawing, Powerline...) must keep connecting seamlessly.
@@ -513,10 +570,137 @@ impl Atlas {
             }
         }
         if width == 2 {
-            (self.slot(queue, key | WIDE_LEFT), self.slot(queue, key | WIDE_RIGHT))
+            self.wide_slots(queue, key)
         } else {
             (self.slot(queue, key), BLANK_SLOT)
         }
+    }
+
+    fn alloc_slot(&mut self, cp: u32) -> u16 {
+        let s = if self.next_free < self.n_slots {
+            let s = self.next_free as u16;
+            self.next_free += 1;
+            self.lru_push_tail(s);
+            s
+        } else {
+            // Constant-time O(1) LRU eviction. If the oldest LRU slot was already used
+            // in the current frame, all slots are active simultaneously -> flag grow_needed.
+            let candidate = if self.lru_head != 0 {
+                self.lru_head
+            } else {
+                return BLANK_SLOT;
+            };
+            let i = candidate as usize;
+            if self.slot_used[i] == self.frame && self.size < 4096 {
+                self.grow_needed = true;
+            }
+            self.lru_touch(candidate);
+            let old_cp = self.slot_cp[i];
+            if old_cp < 128 {
+                self.ascii[old_cp as usize] = BLANK_SLOT;
+            } else {
+                self.map.remove(&old_cp);
+            }
+            self.evicted = true;
+            candidate
+        };
+        if cp < 128 {
+            self.ascii[cp as usize] = s;
+        } else {
+            self.map.insert(cp, s);
+        }
+        self.slot_cp[s as usize] = cp;
+        self.slot_used[s as usize] = self.frame;
+        s
+    }
+
+    /// Resolve both `WIDE_LEFT` and `WIDE_RIGHT` slots for a double-width key,
+    /// rasterizing `2 * cell_w` only once when either half misses in the cache.
+    fn wide_slots(&mut self, queue: &wgpu::Queue, base_key: u32) -> (u16, u16) {
+        let k_left = base_key | WIDE_LEFT;
+        let k_right = base_key | WIDE_RIGHT;
+        let cached_left = self.map.get(&k_left).copied();
+        let cached_right = self.map.get(&k_right).copied();
+        if let (Some(sl), Some(sr)) = (cached_left, cached_right) {
+            if self.slot_used[sl as usize] != self.frame {
+                self.slot_used[sl as usize] = self.frame;
+                self.lru_touch(sl);
+            }
+            if self.slot_used[sr as usize] != self.frame {
+                self.slot_used[sr as usize] = self.frame;
+                self.lru_touch(sr);
+            }
+            return (sl, sr);
+        }
+
+        let (cw, ch) = (self.cell_w as usize, self.cell_h as usize);
+        let mut wide_r8 = std::mem::take(&mut self.wide_r8_scratch);
+        let mut wide_rgba = std::mem::take(&mut self.wide_rgba_scratch);
+        wide_r8.fill(0);
+        wide_rgba.fill(0);
+        let color = self.rasterize_wide(base_key, &mut wide_r8, &mut wide_rgba);
+
+        let sl = match cached_left {
+            Some(s) => {
+                self.slot_used[s as usize] = self.frame;
+                self.lru_touch(s);
+                s
+            }
+            None => {
+                let s = self.alloc_slot(k_left);
+                if s != BLANK_SLOT {
+                    if color {
+                        for y in 0..ch {
+                            let row = &wide_rgba[y * 2 * cw * 4..][..cw * 4];
+                            self.color_scratch[y * cw * 4..(y + 1) * cw * 4].copy_from_slice(row);
+                        }
+                        self.scratch.fill(0);
+                        self.upload(queue, s);
+                        self.upload_color(queue, s);
+                    } else {
+                        for y in 0..ch {
+                            self.scratch[y * cw..(y + 1) * cw].copy_from_slice(&wide_r8[y * 2 * cw..y * 2 * cw + cw]);
+                        }
+                        self.upload(queue, s);
+                    }
+                    self.slot_color[s as usize] = color;
+                }
+                s
+            }
+        };
+
+        let sr = match self.map.get(&k_right).copied() {
+            Some(s) => {
+                self.slot_used[s as usize] = self.frame;
+                self.lru_touch(s);
+                s
+            }
+            None => {
+                let s = self.alloc_slot(k_right);
+                if s != BLANK_SLOT {
+                    if color {
+                        for y in 0..ch {
+                            let row = &wide_rgba[y * 2 * cw * 4 + cw * 4..][..cw * 4];
+                            self.color_scratch[y * cw * 4..(y + 1) * cw * 4].copy_from_slice(row);
+                        }
+                        self.scratch.fill(0);
+                        self.upload(queue, s);
+                        self.upload_color(queue, s);
+                    } else {
+                        for y in 0..ch {
+                            self.scratch[y * cw..(y + 1) * cw].copy_from_slice(&wide_r8[y * 2 * cw + cw..y * 2 * cw + 2 * cw]);
+                        }
+                        self.upload(queue, s);
+                    }
+                    self.slot_color[s as usize] = color;
+                }
+                s
+            }
+        };
+
+        self.wide_r8_scratch = wide_r8;
+        self.wide_rgba_scratch = wide_rgba;
+        (sl, sr)
     }
 
     /// Atlas slot for `cp` (optionally tagged with `WIDE_LEFT` / `WIDE_RIGHT`),
@@ -541,44 +725,16 @@ impl Atlas {
             }
             return s;
         }
-        let s = if self.next_free < self.n_slots {
-            let s = self.next_free as u16;
-            self.next_free += 1;
-            self.lru_push_tail(s);
-            s
-        } else {
-            // Constant-time O(1) LRU eviction. Prefer a slot not yet used in this frame,
-            // but if the atlas is saturated, evict the oldest LRU slot rather than dropping
-            // the glyph invisibly into BLANK_SLOT.
-            let candidate = if self.lru_head != 0 {
-                self.lru_head
-            } else {
-                return BLANK_SLOT;
-            };
-            let i = candidate as usize;
-            self.lru_touch(candidate);
-            let old_cp = self.slot_cp[i];
-            if old_cp < 128 {
-                self.ascii[old_cp as usize] = BLANK_SLOT;
-            } else {
-                self.map.remove(&old_cp);
-            }
-            self.evicted = true;
-            candidate
-        };
+        let s = self.alloc_slot(cp);
+        if s == BLANK_SLOT {
+            return BLANK_SLOT;
+        }
         let color = self.rasterize(cp);
         self.upload(queue, s);
         if color {
             self.upload_color(queue, s);
         }
         self.slot_color[s as usize] = color;
-        if cp < 128 {
-            self.ascii[cp as usize] = s;
-        } else {
-            self.map.insert(cp, s);
-        }
-        self.slot_cp[s as usize] = cp;
-        self.slot_used[s as usize] = self.frame;
         s
     }
 
@@ -615,7 +771,7 @@ impl Atlas {
             key |= STYLE_ITALIC;
         }
         if width == 2 {
-            (self.slot(queue, key | WIDE_LEFT), self.slot(queue, key | WIDE_RIGHT))
+            self.wide_slots(queue, key)
         } else {
             (self.slot(queue, key), BLANK_SLOT)
         }
@@ -628,7 +784,19 @@ impl Atlas {
 
     /// See [`Shaper::shape_row`].
     pub fn shape_row(&mut self, row: &[crate::grid::Cell], out: &mut Vec<u32>) -> bool {
-        self.shaper.shape_row(&self.fonts, self.px, self.cell_w, row, out)
+        let (changed, reset_pieces) = self.shaper.shape_row(&self.fonts, self.px, self.cell_w, row, out);
+        if reset_pieces {
+            self.map.retain(|&k, _| k & GLYPH_PIECE == 0);
+            for i in 1..self.n_slots as usize {
+                if self.slot_cp[i] & GLYPH_PIECE != 0 {
+                    self.slot_cp[i] = 0;
+                    self.slot_used[i] = 0;
+                    self.lru_touch_head(i as u16);
+                }
+            }
+            self.evicted = true;
+        }
+        changed
     }
 
     /// Rasterize a glyph piece (see [`GLYPH_PIECE`]) into `buf`.
@@ -660,6 +828,34 @@ impl Atlas {
         for y in 0..ch {
             buf[y * cw..(y + 1) * cw].copy_from_slice(&canvas[y * w + k * cw..y * w + (k + 1) * cw]);
         }
+    }
+
+    /// Rasterize a double-width (`2 * cell_w`) glyph or cluster once into either
+    /// `wide_rgba` (returning `true` for color emoji) or `wide_r8` (returning `false`).
+    fn rasterize_wide(&self, base_key: u32, wide_r8: &mut [u8], wide_rgba: &mut [u8]) -> bool {
+        let mut cp = base_key & CODEPOINT_MASK;
+        let cluster = if base_key & CLUSTER_KEY != 0 { self.clusters.get(cp as usize).cloned() } else { None };
+        if cluster.is_none() && (0x1F1E6..=0x1F1FF).contains(&cp) {
+            cp = 'A' as u32 + (cp - 0x1F1E6);
+        }
+        let emoji = cluster.as_deref().map_or(is_emoji(cp), is_emoji_text);
+        if emoji {
+            let mut units = [0u8; 4];
+            let text = match cluster.as_deref() {
+                Some(t) => t,
+                None => char::from_u32(cp).unwrap_or(' ').encode_utf8(&mut units),
+            };
+            if rasterize_color(wide_rgba, 2 * self.cell_w, self.cell_h, self.px, text) {
+                return true;
+            }
+        }
+        let style = GlyphStyle { bold: base_key & STYLE_BOLD != 0, italic: base_key & STYLE_ITALIC != 0 };
+        match cluster.as_deref() {
+            Some(text) => self.rasterize_cluster_into(wide_r8, 2 * self.cell_w, text),
+            None => self.rasterize_into(wide_r8, 2 * self.cell_w, cp),
+        }
+        self.apply_style(wide_r8, 2 * self.cell_w as usize, style);
+        false
     }
 
     /// Rasterize `key` into `scratch`, or into `color_scratch` (returning true)
@@ -1767,7 +1963,56 @@ fn macos_coretext_rasterize(_buf: &mut [u8], _cw: u32, _ch_px: u32, _baseline: i
 }
 
 #[cfg(target_os = "macos")]
-fn macos_coretext_rasterize(
+unsafe fn cached_ct_base_font(is_emoji: bool, size: f64) -> *const std::ffi::c_void {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCharacters(alloc: *const c_void, chars: *const u16, n: isize) -> *const c_void;
+        fn CFRetain(cf: *const c_void) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+    #[link(name = "CoreText", kind = "framework")]
+    extern "C" {
+        fn CTFontCreateWithName(name: *const c_void, size: f64, matrix: *const c_void) -> *const c_void;
+    }
+
+    static BASE_FONT_CACHE: Mutex<[Option<(u64, usize)>; 2]> = parking_lot::const_mutex([None, None]);
+    let slot_idx = usize::from(is_emoji);
+    let size_bits = size.to_bits();
+    {
+        let cache = BASE_FONT_CACHE.lock();
+        if let Some((cached_bits, ptr_val)) = cache[slot_idx] {
+            if cached_bits == size_bits && ptr_val != 0 {
+                return CFRetain(ptr_val as *const c_void);
+            }
+        }
+    }
+
+    let name_str = if is_emoji { "Apple Color Emoji" } else { "Menlo" };
+    let units: Vec<u16> = name_str.encode_utf16().collect();
+    let cf_name = CFStringCreateWithCharacters(ptr::null(), units.as_ptr(), units.len() as isize);
+    if cf_name.is_null() {
+        return ptr::null();
+    }
+    let font = CTFontCreateWithName(cf_name, size, ptr::null());
+    CFRelease(cf_name);
+    if font.is_null() {
+        return ptr::null();
+    }
+
+    let mut cache = BASE_FONT_CACHE.lock();
+    if let Some((_, old_ptr)) = cache[slot_idx].replace((size_bits, font as usize)) {
+        if old_ptr != 0 {
+            CFRelease(old_ptr as *const c_void);
+        }
+    }
+    CFRetain(font)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_coretext_rasterize(
     buf: &mut [u8],
     cw: u32,
     ch_px: u32,
@@ -1882,10 +2127,7 @@ fn macos_coretext_rasterize(
             return false;
         }
 
-        let menlo: [u16; 5] = [b'M' as u16, b'e' as u16, b'n' as u16, b'l' as u16, b'o' as u16];
-        let cf_menlo = CFStringCreateWithCharacters(ptr::null(), menlo.as_ptr(), menlo.len() as isize);
-        let base_font = CTFontCreateWithName(cf_menlo, px as f64, ptr::null());
-        CFRelease(cf_menlo);
+        let base_font = cached_ct_base_font(false, px as f64);
         if base_font.is_null() {
             CFRelease(cf_str);
             return false;
@@ -2095,7 +2337,6 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
     }
     #[link(name = "CoreText", kind = "framework")]
     extern "C" {
-        fn CTFontCreateWithName(name: *const c_void, size: f64, matrix: *const c_void) -> *const c_void;
         fn CTLineCreateWithAttributedString(s: *const c_void) -> *const c_void;
         fn CTLineGetBoundsWithOptions(line: *const c_void, options: usize) -> CGRect;
         fn CTLineDraw(line: *const c_void, ctx: *mut c_void);
@@ -2108,15 +2349,14 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
     const GLYPH_PATH_BOUNDS: usize = 1 << 3;
 
     let units: Vec<u16> = text.encode_utf16().collect();
-    let name: Vec<u16> = if baseline.is_some() { "Menlo" } else { "Apple Color Emoji" }.encode_utf16().collect();
+    let is_emoji_font = baseline.is_none();
     // SAFETY: every CoreFoundation object created here is released; the
     // context draws into `buf`, which outlives it and is `w * h * 4` bytes.
     unsafe {
         let cf_text = CFStringCreateWithCharacters(ptr::null(), units.as_ptr(), units.len() as isize);
-        let cf_name = CFStringCreateWithCharacters(ptr::null(), name.as_ptr(), name.len() as isize);
         // A whole sequence shaped as one line, so ZWJ / flag / skin tone ligatures apply.
         let line_at = |size: f64| -> *const c_void {
-            let font = CTFontCreateWithName(cf_name, size, ptr::null());
+            let font = cached_ct_base_font(is_emoji_font, size);
             if font.is_null() {
                 return ptr::null();
             }
@@ -2144,7 +2384,7 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
             CFRelease(attributed);
             line
         };
-        let mut line = if cf_text.is_null() || cf_name.is_null() { ptr::null() } else { line_at(px as f64) };
+        let mut line = if cf_text.is_null() { ptr::null() } else { line_at(px as f64) };
         if !line.is_null() {
             let b = CTLineGetBoundsWithOptions(line, GLYPH_PATH_BOUNDS);
             // Shrink to fit the cells (emoji are wider and taller than text at the same size).
@@ -2160,10 +2400,8 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
                 }
             }
         }
-        for cf in [cf_text, cf_name] {
-            if !cf.is_null() {
-                CFRelease(cf);
-            }
+        if !cf_text.is_null() {
+            CFRelease(cf_text);
         }
         if line.is_null() {
             return false;
@@ -2552,7 +2790,7 @@ mod tests {
             "ab -> cd != ef".chars().map(|c| crate::grid::Cell { codepoint: c as u32, ..Default::default() }).collect();
         let mut out = Vec::new();
         let mut on = Shaper::new(Vec::new());
-        assert!(on.shape_row(&fonts, 28.0, 17, &row, &mut out));
+        assert!(on.shape_row(&fonts, 28.0, 17, &row, &mut out).0);
         assert_eq!(&out[..2], [0, 0], "plain words are not shaped");
         assert!(out[3] != 0 && out[4] != 0, "`->` is substituted: {out:x?}");
         assert!(out[9] != 0 && out[10] != 0, "`!=` is substituted: {out:x?}");
@@ -2561,7 +2799,7 @@ mod tests {
         assert!(on.pieces.iter().all(|p| p.span == 2 && p.origin == 1), "{:?}", on.pieces);
 
         let off = ["-calt", "-liga"].map(|f| parse_font_feature(f).unwrap()).to_vec();
-        assert!(!Shaper::new(off).shape_row(&fonts, 28.0, 17, &row, &mut out), "font-feature = -calt disables them");
+        assert!(!Shaper::new(off).shape_row(&fonts, 28.0, 17, &row, &mut out).0, "font-feature = -calt disables them");
     }
 
     #[test]
@@ -2611,6 +2849,59 @@ mod tests {
     fn loads_sfmono_nerd_font_successfully() {
         let set = load_font(&["SFMono Nerd Font".to_string()]);
         assert!(set.primary.lookup_glyph_index('A') > 0);
+    }
+
+    #[test]
+    fn test_dynamic_atlas_growth_and_shaper_cap() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
+            return;
+        };
+        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)) else {
+            return;
+        };
+
+        let fonts = load_font(&[]);
+        let mut atlas = Atlas::new(&device, &queue, fonts, 28.0);
+        let initial_size = atlas.size;
+        let initial_slots = atlas.n_slots;
+        assert_eq!(initial_size, 512);
+
+        // Verify wide_slots allocates two distinct slots (left and right) in one pass
+        atlas.begin_frame();
+        let (sl, sr) = atlas.glyph_slots(&queue, '中' as u32, 2, GlyphStyle::default());
+        assert_ne!(sl, BLANK_SLOT);
+        assert_ne!(sr, BLANK_SLOT);
+        assert_ne!(sl, sr);
+        // Second lookup in same frame hits cache and returns identical slots
+        assert_eq!(atlas.glyph_slots(&queue, '中' as u32, 2, GlyphStyle::default()), (sl, sr));
+
+        // Exhaust all slots in the same frame so alloc_slot evicts an active slot and sets grow_needed
+        for i in 0..initial_slots + 16 {
+            let cp = 0x4E00 + i;
+            let _ = atlas.slot(&queue, cp);
+        }
+        assert!(atlas.take_evicted(), "same-frame overflow must mark atlas evicted");
+        assert!(atlas.grow_if_needed(&device, &queue), "atlas must grow from 512 to 1024");
+        assert_eq!(atlas.size, 1024);
+        assert!(atlas.n_slots > initial_slots);
+
+        // Verify Shaper pieces cap at 4096 triggers reset_pieces and evicts GLYPH_PIECE keys
+        for i in 0..4096u16 {
+            let piece = GlyphPiece { gid: i, span: 2, origin: 0, bold: false, italic: false };
+            atlas.shaper.piece_ids.insert(piece, i as u32);
+            atlas.shaper.pieces.push(piece);
+        }
+        let dummy_key = GLYPH_PIECE | (5 << 5) | 1;
+        let piece_slot = atlas.alloc_slot(dummy_key);
+        assert_eq!(atlas.map.get(&dummy_key).copied(), Some(piece_slot));
+
+        let mut out = Vec::new();
+        let row = vec![crate::grid::Cell { codepoint: b'a' as u32, ..Default::default() }];
+        atlas.shape_row(&row, &mut out);
+        assert!(atlas.shaper.pieces.is_empty(), "shaper pieces must reset at 4096 cap");
+        assert!(!atlas.map.contains_key(&dummy_key), "GLYPH_PIECE slot keys must be evicted on shaper reset");
+        assert!(atlas.take_evicted(), "shaper reset must flag atlas eviction");
     }
 }
 

@@ -20,21 +20,26 @@ pub struct Pane {
     pub pty: Pty,
     pub cached_cwd: Option<String>,
     pub last_cwd_check: std::time::Instant,
+    pub cached_running: bool,
+    pub last_running_check: std::time::Instant,
 }
 
 impl Pane {
     pub fn new(id: u64, grid: Arc<Mutex<Grid>>, pty: Pty) -> Self {
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(10);
         Pane {
             id,
             grid,
             pty,
             cached_cwd: None,
-            last_cwd_check: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            last_cwd_check: past,
+            cached_running: false,
+            last_running_check: past,
         }
     }
 
     pub fn cwd(&mut self) -> Option<String> {
-        if self.cached_cwd.is_some() && self.last_cwd_check.elapsed().as_millis() < 500 {
+        if self.last_cwd_check.elapsed().as_millis() < 500 {
             return self.cached_cwd.clone();
         }
         // Prefer the directory the shell reports via OSC 7; fall back to asking the OS.
@@ -42,6 +47,15 @@ impl Pane {
         self.cached_cwd = reported.filter(|d| std::path::Path::new(d).is_dir()).or_else(|| self.pty.cwd());
         self.last_cwd_check = std::time::Instant::now();
         self.cached_cwd.clone()
+    }
+
+    pub fn has_running_process(&mut self) -> bool {
+        if self.last_running_check.elapsed().as_millis() < 500 {
+            return self.cached_running;
+        }
+        self.cached_running = self.pty.has_running_process();
+        self.last_running_check = std::time::Instant::now();
+        self.cached_running
     }
 }
 
@@ -88,6 +102,10 @@ impl Tab {
 
     pub fn pane(&self, id: u64) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
+    }
+
+    pub fn pane_mut(&mut self, id: u64) -> Option<&mut Pane> {
+        self.panes.iter_mut().find(|p| p.id == id)
     }
 
     pub fn compute_pane_rects(&self, total_cols: usize, total_rows: usize) -> Vec<PaneRect> {

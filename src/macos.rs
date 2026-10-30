@@ -354,9 +354,19 @@ mod imp {
 
             if cfg.background_blur > 0 && cfg.background_opacity < 1.0 {
                 setup_visual_effect_view(ns_window);
+            } else {
+                remove_visual_effect_view(ns_window);
             }
 
             install_header_double_click_hook(ns_window);
+        }
+    }
+
+    /// Remove any saved zoom frame associated with `window` when the window closes.
+    pub fn cleanup_window(window: &Window) {
+        let Some((_, ns_window)) = ns_window_of(window) else { return };
+        if let Some(map) = SAVED_FRAMES.lock().as_mut() {
+            map.remove(&(ns_window as usize));
         }
     }
 
@@ -606,6 +616,23 @@ mod imp {
             effect_view => Id, -1 => i64, std::ptr::null_mut() => Id
         );
         msg_send!(effect_view, c"release");
+    }
+
+    /// Remove any attached NSVisualEffectView when blur is disabled or opacity is 1.0.
+    unsafe fn remove_visual_effect_view(ns_window: Id) {
+        let Some(content_view) = send_id(ns_window, c"contentView") else { return };
+        let Some(effect_cls) = class(c"NSVisualEffectView") else { return };
+        let mut to_remove: Vec<Id> = Vec::new();
+        if let Some(subviews) = send_id(content_view, c"subviews") {
+            for_each_in_array(subviews, |subview| {
+                if msg_send!(subview, c"isKindOfClass:", effect_cls => Id; -> bool) {
+                    to_remove.push(subview);
+                }
+            });
+        }
+        for view in to_remove {
+            msg_send!(view, c"removeFromSuperview");
+        }
     }
 
     static REOPEN_PROXY: parking_lot::Mutex<Option<winit::event_loop::EventLoopProxy<crate::AppEvent>>> =
@@ -1296,6 +1323,7 @@ mod stub {
     pub fn release_free_memory() {}
     pub fn configure_layer_drawables(_window: &winit::window::Window) {}
     pub fn apply_macos_window_config(_window: &winit::window::Window, _cfg: &crate::config::Config) {}
+    pub fn cleanup_window(_window: &winit::window::Window) {}
     pub fn register_reopen_handler(_proxy: winit::event_loop::EventLoopProxy<crate::AppEvent>) {}
     pub fn install_menu() {}
     pub fn set_global_hotkey(_trigger: Option<&crate::keymap::Trigger>) {}

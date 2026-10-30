@@ -151,6 +151,7 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
+        macos::cleanup_window(&self.window);
         if self.secure_input && self.focused {
             #[cfg(target_os = "macos")]
             macos::set_secure_input(false);
@@ -934,12 +935,12 @@ impl App {
                         let cmd_pressed = s.mods.control_key() || s.mods.super_key();
 
                         if cmd_pressed {
-                            if let Some(link) = &s.hovered_link {
-                                let cwd = s.tabs.get(s.active)
-                                    .and_then(|t| t.pane(link.pane_id))
-                                    .and_then(|p| p.pty.cwd());
+                            if let Some((pane_id, url, is_path)) = s.hovered_link.as_ref().map(|l| (l.pane_id, l.link.url.clone(), l.link.is_path)) {
+                                let cwd = s.tabs.get_mut(s.active)
+                                    .and_then(|t| t.pane_mut(pane_id))
+                                    .and_then(|p| p.cwd());
                                 let cwd_path = cwd.as_deref().map(std::path::Path::new);
-                                open_target(&link.link.url, link.link.is_path, cwd_path);
+                                open_target(&url, is_path, cwd_path);
                                 return;
                             }
                         }
@@ -1273,6 +1274,8 @@ fn spawn_pane(
         pty,
         cached_cwd: None,
         last_cwd_check: std::time::Instant::now() - std::time::Duration::from_secs(10),
+        cached_running: false,
+        last_running_check: std::time::Instant::now() - std::time::Duration::from_secs(10),
     })
 }
 
@@ -1631,6 +1634,7 @@ fn render_active(s: &mut State) {
     if titles_changed || s.titles_refreshed_at.elapsed() >= std::time::Duration::from_secs(1) {
         refresh_tab_titles(s);
     }
+    let inspector = s.inspector.then(|| inspector_lines(s));
     let tab_bar = (s.tabs.len() > 1).then_some((s.tab_titles.as_slice(), s.active));
     let blink_on = cursor_is_visible_now(s);
 
@@ -1653,7 +1657,6 @@ fn render_active(s: &mut State) {
         .collect();
 
     let hovered_link = s.hovered_link.as_ref().map(|l| (l.pane_id, &l.link));
-    let inspector = s.inspector.then(|| inspector_lines(s));
 
     s.renderer.render_panes(
         &render_panes,
@@ -1726,7 +1729,7 @@ pub(crate) fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result
 
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn safe_path_for_linux_open<'a>(path: &'a std::path::Path) -> &'a std::path::Path {
+fn safe_path_for_linux_open(path: &std::path::Path) -> &std::path::Path {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = path
         .metadata()
@@ -1983,6 +1986,36 @@ fn handle_ime(s: &mut State, ime: Ime) {
     }
 }
 
+fn matches_cached_hover_candidate(
+    cached: &grid::Hyperlink,
+    row: usize,
+    col: usize,
+    cand: &grid::HyperlinkCandidate,
+) -> bool {
+    cached.row == row
+        && col >= cached.start_col
+        && col <= cached.end_col
+        && match cand {
+            grid::HyperlinkCandidate::Resolved(l) => {
+                l.start_col == cached.start_col
+                    && l.end_col == cached.end_col
+                    && l.url == cached.url
+                    && l.is_path == cached.is_path
+            }
+            grid::HyperlinkCandidate::ImplicitPath {
+                start_col,
+                end_col,
+                token,
+                ..
+            } => {
+                *start_col == cached.start_col
+                    && *end_col == cached.end_col
+                    && *token == cached.url
+                    && cached.is_path
+            }
+        }
+}
+
 fn update_hovered_link(s: &mut State) {
     #[cfg(target_os = "macos")]
     let cmd_pressed = s.mods.super_key();
@@ -2001,29 +2034,43 @@ fn update_hovered_link(s: &mut State) {
         return;
     }
 
-    let tab = &s.tabs[s.active];
     let show_tabs = s.tabs.len() > 1;
     let (cols, rows) = s.renderer.grid_size_for_tabs(show_tabs);
 
     let new_link = if cmd_pressed && !s.selecting {
         if let Some((cell_row, cell_col)) = s.renderer.pixel_to_cell(s.mouse_pos.0, s.mouse_pos.1, show_tabs, cols, rows) {
-            let rects = tab.compute_pane_rects(cols, rows);
+            let rects = s.tabs[s.active].compute_pane_rects(cols, rows);
             if let Some(target) = rects.iter().find(|r| {
                 cell_col >= r.col
                     && cell_col < r.col + r.cols
                     && cell_row >= r.row
                     && cell_row < r.row + r.rows
             }) {
-                if let Some(pane) = tab.pane(target.id) {
-                    let cwd = pane.cached_cwd.clone().or_else(|| pane.pty.cwd());
-                    let cwd_path = cwd.as_deref().map(std::path::Path::new);
+                if let Some(pane) = s.tabs[s.active].pane_mut(target.id) {
                     let pane_row = cell_row - target.row;
-                    let g = pane.grid.lock();
-                    let pane_col = g.logical_col(pane_row, cell_col - target.col);
-                    g.find_hyperlink_at(pane_row, pane_col, cwd_path).map(|link| HoveredPaneLink {
-                        pane_id: target.id,
-                        link,
-                    })
+                    let (pane_col, candidate) = {
+                        let g = pane.grid.lock();
+                        let lcol = g.logical_col(pane_row, cell_col - target.col);
+                        (lcol, g.find_hyperlink_candidate_at(pane_row, lcol))
+                    };
+                    match candidate {
+                        Some(cand) => {
+                            if let Some(existing) = s.hovered_link.as_ref().filter(|h| {
+                                h.pane_id == target.id
+                                    && matches_cached_hover_candidate(&h.link, pane_row, pane_col, &cand)
+                            }) {
+                                Some(existing.clone())
+                            } else {
+                                let cwd = pane.cwd();
+                                let cwd_path = cwd.as_deref().map(std::path::Path::new);
+                                cand.resolve(cwd_path).map(|link| HoveredPaneLink {
+                                    pane_id: target.id,
+                                    link,
+                                })
+                            }
+                        }
+                        None => None,
+                    }
                 } else {
                     None
                 }
@@ -2698,12 +2745,13 @@ fn describe_key(key: &Key, m: keymap::Mods, bytes: Option<&[u8]>) -> String {
 }
 
 /// What the terminal inspector shows about the active pane.
-fn inspector_lines(s: &State) -> Vec<String> {
-    let Some(tab) = s.tabs.get(s.active) else { return Vec::new() };
-    let Some(pane) = tab.active_pane() else { return Vec::new() };
-    let mouse_cell = pane_cell_at_mouse(s).filter(|&(id, _, _)| id == pane.id);
-    let running = pane.pty.has_running_process();
-    let cwd = pane.pty.cwd().unwrap_or_default();
+fn inspector_lines(s: &mut State) -> Vec<String> {
+    let mouse_cell = pane_cell_at_mouse(s);
+    let Some(tab) = s.tabs.get_mut(s.active) else { return Vec::new() };
+    let Some(pane) = tab.active_pane_mut() else { return Vec::new() };
+    let mouse_cell = mouse_cell.filter(|&(id, _, _)| id == pane.id);
+    let running = pane.has_running_process();
+    let cwd = pane.cwd().unwrap_or_default();
     let g = pane.grid.lock();
     let on = |b: bool| if b { "on" } else { "off" };
     let hex = |c: u32| format!("#{:06x}", c >> 8);
@@ -3181,7 +3229,7 @@ fn copy_to_clipboard(text: &str) {
         return;
     }
     let text = text.to_string();
-    if let Err(_) = std::thread::Builder::new()
+    if std::thread::Builder::new()
         .name("litty-clipboard-copy".into())
         .stack_size(128 * 1024)
         .spawn(move || {
@@ -3220,6 +3268,7 @@ fn copy_to_clipboard(text: &str) {
                 }
             }
         })
+        .is_err()
     {
         IN_FLIGHT_COPIES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
@@ -3670,7 +3719,296 @@ mod latency_benchmarks {
         println!("    - Trước (render_active + request_redraw): 2 passes / WakeUp");
         println!("    - Sau   (render_active duy nhất):         1 pass / WakeUp");
         println!("    --> Giảm 50% số lần dispatch và acquire swapchain drawable thừa");
+
+        // -------------------------------------------------------------
+        // BENCHMARK 6: OSC 104 Full Palette Reset (80x24 grid, 10,000 scrollback cap)
+        // -------------------------------------------------------------
+        let mut g_new = crate::grid::Grid::new(80, 24);
+        let mut parser = vte::Parser::new();
+        let setup_osc = b"\x1b]4;1;rgb:11/22/33\x1b\\\x1b]4;2;rgb:44/55/66\x1b\\\x1b]4;3;rgb:77/88/99\x1b\\\x1b]4;4;rgb:aa/bb/cc\x1b\\";
+        let osc_iters = 20u32;
+        let mut raw_cells = vec![0u32; 10_024 * 80 * 2];
+        let t_osc_old = Instant::now();
+        for _ in 0..osc_iters {
+            for i in 0u32..256 {
+                let target = 0x8000_0000 | (i + 1);
+                let repl = 0x8000_0000 | (i + 2);
+                for w in &mut raw_cells {
+                    if *w == target {
+                        *w = repl;
+                    }
+                }
+            }
+        }
+        let old_osc_dur = t_osc_old.elapsed() / osc_iters;
+
+        let t_osc_new = Instant::now();
+        for _ in 0..osc_iters {
+            for &b in setup_osc {
+                g_new.feed_byte(&mut parser, b);
+            }
+            for &b in b"\x1b]104\x1b\\" {
+                g_new.feed_byte(&mut parser, b);
+            }
+        }
+        let new_osc_dur = t_osc_new.elapsed() / osc_iters;
+        let speedup_osc = old_osc_dur.as_secs_f64() / new_osc_dur.as_secs_f64().max(1e-9);
+        println!("\n[6] OSC 104 Full Palette Reset (80x24 active, 10,000 scrollback cap):");
+        println!("    - Trước (256 passes x 801,920 cells): {:>8.2?} / reset (guard {})", old_osc_dur, raw_cells[0]);
+        println!("    - Sau   (1 batched pass active rows): {:>8.2?} / reset", new_osc_dur);
+        println!("    --> Tốc độ tăng: {:.1}x", speedup_osc);
+
+        // -------------------------------------------------------------
+        // BENCHMARK 7: HistorySearch Front Insert & Reload Deduplication (10,000 entries)
+        // -------------------------------------------------------------
+        let raw_hist: String = (0..10_000)
+            .map(|i| format!(": {}:0;cargo test --release -- --nocapture {}\n", 1700000000 + i, i % 500))
+            .collect();
+
+        // Old: allocate String for every line, then HashSet dedup + Vec::insert(0)
+        let t_hist_old = Instant::now();
+        let mut old_vec: Vec<String> = Vec::new();
+        for i in 0..1000 {
+            old_vec.insert(0, format!("session_cmd_{i}"));
+        }
+        let mut parsed_all: Vec<String> = Vec::with_capacity(10_000);
+        for line in raw_hist.lines() {
+            let cmd = line.split_once(';').map_or(line, |(_, c)| c).trim();
+            if !cmd.is_empty() {
+                parsed_all.push(cmd.to_string());
+            }
+        }
+        let mut seen = std::collections::HashSet::with_capacity(parsed_all.len());
+        let mut old_dedup = Vec::new();
+        for cmd in parsed_all.into_iter().rev() {
+            if seen.insert(cmd.clone()) {
+                old_dedup.push(cmd);
+            }
+        }
+        let old_hist_dur = t_hist_old.elapsed();
+
+        // New: VecDeque::push_front + parse back-to-front deduplicating &str before String allocation
+        let t_hist_new = Instant::now();
+        let mut new_deq: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        for i in 0..1000 {
+            new_deq.push_front(format!("session_cmd_{i}"));
+        }
+        let mut seen_str = std::collections::HashSet::new();
+        let mut new_dedup: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        for line in raw_hist.lines().rev() {
+            let cmd = line.split_once(';').map_or(line, |(_, c)| c).trim();
+            if !cmd.is_empty() && !seen_str.contains(cmd) {
+                let owned = cmd.to_string();
+                seen_str.insert(owned.clone());
+                new_dedup.push_back(owned);
+            }
+        }
+        let new_hist_dur = t_hist_new.elapsed();
+        let speedup_hist_dedup = old_hist_dur.as_secs_f64() / new_hist_dur.as_secs_f64().max(1e-9);
+        println!("\n[7] History Session Insert (1k) + File Reload Dedup (10k lines, 500 unique):");
+        println!("    - Trước (Vec::insert(0) + alloc-all): {:>8.2?} ({} unique)", old_hist_dur, old_dedup.len());
+        println!("    - Sau   (VecDeque + pre-alloc dedup): {:>8.2?} ({} unique)", new_hist_dur, new_dedup.len());
+        println!("    --> Tốc độ tăng: {:.1}x", speedup_hist_dedup);
+
+        // -------------------------------------------------------------
+        // BENCHMARK 8: Wide CJK/Emoji CoreText Rasterization (macOS)
+        // -------------------------------------------------------------
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::c_void;
+            #[link(name = "CoreFoundation", kind = "framework")]
+            extern "C" {
+                fn CFStringCreateWithCharacters(alloc: *const c_void, chars: *const u16, n: isize) -> *const c_void;
+                fn CFRelease(cf: *const c_void);
+            }
+            #[link(name = "CoreText", kind = "framework")]
+            extern "C" {
+                fn CTFontCreateWithName(name: *const c_void, size: f64, matrix: *const c_void) -> *const c_void;
+            }
+
+            let cjk_chars: Vec<char> = (0x4E00u32..0x4E40).filter_map(char::from_u32).collect();
+            let (cw, ch_px) = (18u32, 34u32);
+            let mut wide_buf = vec![0u8; (2 * cw * ch_px) as usize];
+            let mut left_slot = vec![0u8; (cw * ch_px) as usize];
+            let mut right_slot = vec![0u8; (cw * ch_px) as usize];
+            let menlo_u16: Vec<u16> = "Menlo".encode_utf16().collect();
+
+            // Warm up CoreText cascade once
+            let _ = crate::atlas::macos_coretext_rasterize(&mut wide_buf, 2 * cw, ch_px, 26, 28.0, '中');
+
+            // Before: uncached CTFontCreateWithName("Menlo") + rasterize 2*cw twice (once for WIDE_LEFT, once for WIDE_RIGHT)
+            let t_cjk_old = Instant::now();
+            for &ch in &cjk_chars {
+                for half in 0..2 {
+                    unsafe {
+                        let cf_name = CFStringCreateWithCharacters(std::ptr::null(), menlo_u16.as_ptr(), menlo_u16.len() as isize);
+                        let f = CTFontCreateWithName(cf_name, 28.0, std::ptr::null());
+                        if !f.is_null() {
+                            CFRelease(f);
+                        }
+                        if !cf_name.is_null() {
+                            CFRelease(cf_name);
+                        }
+                    }
+                    wide_buf.fill(0);
+                    let _ = crate::atlas::macos_coretext_rasterize(&mut wide_buf, 2 * cw, ch_px, 26, 28.0, ch);
+                    let x0 = half * cw as usize;
+                    for y in 0..ch_px as usize {
+                        left_slot[y * cw as usize..(y + 1) * cw as usize]
+                            .copy_from_slice(&wide_buf[y * 2 * cw as usize + x0..y * 2 * cw as usize + x0 + cw as usize]);
+                    }
+                }
+            }
+            let old_cjk_dur = t_cjk_old.elapsed();
+
+            // After: cached base CTFontRef + single-pass rasterize_wide (2*cw once, split into left & right slots)
+            let t_cjk_new = Instant::now();
+            for &ch in &cjk_chars {
+                wide_buf.fill(0);
+                let _ = crate::atlas::macos_coretext_rasterize(&mut wide_buf, 2 * cw, ch_px, 26, 28.0, ch);
+                for y in 0..ch_px as usize {
+                    left_slot[y * cw as usize..(y + 1) * cw as usize]
+                        .copy_from_slice(&wide_buf[y * 2 * cw as usize..y * 2 * cw as usize + cw as usize]);
+                    right_slot[y * cw as usize..(y + 1) * cw as usize]
+                        .copy_from_slice(&wide_buf[y * 2 * cw as usize + cw as usize..y * 2 * cw as usize + 2 * cw as usize]);
+                }
+            }
+            let new_cjk_dur = t_cjk_new.elapsed();
+            let speedup_cjk = old_cjk_dur.as_secs_f64() / new_cjk_dur.as_secs_f64().max(1e-9);
+            println!("\n[8] Wide CJK CoreText Rasterization ({} double-width glyphs):", cjk_chars.len());
+            println!("    - Trước (2x rasterize + uncached CTFont): {:>8.2?} (guard {})", old_cjk_dur, left_slot[0]);
+            println!("    - Sau   (1x rasterize_wide + cached font):{:>8.2?} (guard {})", new_cjk_dur, right_slot[0]);
+            println!("    --> Tốc độ tăng: {:.2}x (giảm {:.1}% thời gian rasterize CJK)", speedup_cjk, (1.0 - 1.0 / speedup_cjk) * 100.0);
+        }
+
+        // -------------------------------------------------------------
+        // BENCHMARK 9: Mouse Hover Implicit Link Resolution & grid.lock() Hold Time
+        // -------------------------------------------------------------
+        let hover_grid = std::sync::Arc::new(parking_lot::Mutex::new(crate::grid::Grid::new(120, 24)));
+        {
+            let mut g = hover_grid.lock();
+            let mut p = vte::Parser::new();
+            for &b in b" Inspect ./Cargo.toml or src/main.rs for benchmark details\r\n" {
+                g.feed_byte(&mut p, b);
+            }
+        }
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let hover_events = 500usize;
+
+        // Before: every CursorMoved event across the word acquires grid.lock() and runs Path::exists() + canonicalize() inside the lock
+        let mut old_lock_hold = std::time::Duration::ZERO;
+        let t_hover_old = Instant::now();
+        let mut old_resolved = 0usize;
+        for i in 0..hover_events {
+            let col = 9 + (i % 12); // hovering across "./Cargo.toml" (cols 9..=20)
+            let t_lock = Instant::now();
+            let g = hover_grid.lock();
+            if let Some(cand) = g.find_hyperlink_candidate_at(0, col) {
+                let full = manifest_dir.join("./Cargo.toml");
+                let _ = full.canonicalize();
+                if cand.resolve(Some(manifest_dir)).is_some() {
+                    old_resolved += 1;
+                }
+            }
+            old_lock_hold += t_lock.elapsed();
+            drop(g);
+        }
+        let old_hover_total = t_hover_old.elapsed();
+
+        // After: extract candidate under a single short lock, release lock before stat(), and skip stat() when candidate matches cached span
+        let mut new_lock_hold = std::time::Duration::ZERO;
+        let t_hover_new = Instant::now();
+        let mut cached_hover: Option<crate::grid::Hyperlink> = None;
+        let mut new_resolved = 0usize;
+        for i in 0..hover_events {
+            let col = 9 + (i % 12);
+            let t_lock = Instant::now();
+            let (lcol, cand) = {
+                let g = hover_grid.lock();
+                let lcol = g.logical_col(0, col);
+                (lcol, g.find_hyperlink_candidate_at(0, lcol))
+            };
+            new_lock_hold += t_lock.elapsed();
+
+            let link = match cand {
+                Some(c) => {
+                    if let Some(existing) = cached_hover
+                        .as_ref()
+                        .filter(|h| super::matches_cached_hover_candidate(h, 0, lcol, &c))
+                    {
+                        Some(existing.clone())
+                    } else {
+                        c.resolve(Some(manifest_dir))
+                    }
+                }
+                None => None,
+            };
+            if link.is_some() {
+                new_resolved += 1;
+            }
+            cached_hover = link;
+        }
+        let new_hover_total = t_hover_new.elapsed();
+        let speedup_hover = old_hover_total.as_secs_f64() / new_hover_total.as_secs_f64().max(1e-9);
+        let speedup_lock = old_lock_hold.as_secs_f64() / new_lock_hold.as_secs_f64().max(1e-9);
+        println!("\n[9] Mouse Hover Implicit Path Resolution (500 CursorMoved events):");
+        println!("    - Trước (stat+realpath inside grid.lock): total {:>8.2?}, lock hold {:>8.2?} ({} hits)", old_hover_total, old_lock_hold, old_resolved);
+        println!("    - Sau   (lock-free stat + span cache):    total {:>8.2?}, lock hold {:>8.2?} ({} hits)", new_hover_total, new_lock_hold, new_resolved);
+        println!("    --> Tổng thời gian tăng: {:.1}x | Thời gian giữ grid.lock() giảm: {:.1}x", speedup_hover, speedup_lock);
+
+        // -------------------------------------------------------------
+        // BENCHMARK 10: Grapheme Cluster Pool GC (Grid::gc_clusters)
+        // -------------------------------------------------------------
+        let mut g_gc = crate::grid::Grid::new(80, 24);
+        let mut p_gc = vte::Parser::new();
+        g_gc.seed_dead_clusters_for_bench(crate::grid::MAX_CLUSTERS);
+        let before_gc_clusters = g_gc.cluster_count();
+        assert_eq!(before_gc_clusters, crate::grid::MAX_CLUSTERS);
+        // Feeding a new multi-codepoint cluster at MAX_CLUSTERS (65,536) triggers gc_clusters(),
+        // reclaiming all 65,536 dead entries and interning the new active cluster.
+        let t_gc = Instant::now();
+        for &b in "e\u{0301}\u{0327}".as_bytes() {
+            g_gc.feed_byte(&mut p_gc, b);
+        }
+        let gc_dur = t_gc.elapsed();
+        let after_gc_clusters = g_gc.cluster_count();
+        assert_eq!(after_gc_clusters, 1);
+        println!("\n[10] Grapheme Cluster Pool GC at MAX_CLUSTERS (65,536 entries):");
+        println!("    - Trước (No GC on eviction/clear): {} dead entries retained (~3.6 MB leaked, new clusters dropped)", before_gc_clusters);
+        println!("    - Sau   (Grid::gc_clusters):       {} active entry retained (65,536 dead reclaimed + new interned in {:>8.2?})", after_gc_clusters, gc_dur);
+
         println!("==================================================================\n");
+    }
+
+    #[test]
+    fn test_cached_hover_candidate_invalidated_when_row_overwritten() {
+        let mut g = crate::grid::Grid::new(80, 24);
+        let mut p = vte::Parser::new();
+        for &b in b"Open ./Cargo.toml now" {
+            g.feed_byte(&mut p, b);
+        }
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cand1 = g.find_hyperlink_candidate_at(0, 6).expect("initial candidate");
+        let resolved1 = cand1.clone().resolve(Some(manifest_dir)).expect("resolved ./Cargo.toml");
+        assert!(super::matches_cached_hover_candidate(&resolved1, 0, 10, &cand1));
+
+        // Overwrite row 0 in place with a different path of the same length
+        for &b in b"\rOpen ./src/tab.rs now" {
+            g.feed_byte(&mut p, b);
+        }
+        let cand2 = g.find_hyperlink_candidate_at(0, 10).expect("new candidate after overwrite");
+        assert!(
+            !super::matches_cached_hover_candidate(&resolved1, 0, 10, &cand2),
+            "cached link must not match after underlying terminal row text changes"
+        );
+        let resolved2 = cand2.resolve(Some(manifest_dir)).expect("resolved ./src/tab.rs");
+        assert_eq!(resolved2.url, "./src/tab.rs");
+
+        // Overwrite row 0 with plain non-link text
+        for &b in b"\rPlain text only here " {
+            g.feed_byte(&mut p, b);
+        }
+        assert!(g.find_hyperlink_candidate_at(0, 10).is_none());
     }
 
     #[test]

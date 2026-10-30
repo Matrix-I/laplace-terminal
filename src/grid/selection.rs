@@ -61,3 +61,56 @@ pub struct Hyperlink {
     pub url: String,
     pub is_path: bool,
 }
+
+/// Unresolved hyperlink candidate extracted while holding `grid.lock()`.
+/// Implicit paths are validated on the filesystem (`resolve`) outside the lock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HyperlinkCandidate {
+    Resolved(Hyperlink),
+    ImplicitPath {
+        row: usize,
+        start_col: usize,
+        end_col: usize,
+        token: String,
+    },
+}
+
+impl HyperlinkCandidate {
+    /// Validate and resolve this candidate into a [`Hyperlink`], performing any
+    /// filesystem `Path::exists()` checks without holding `grid.lock()`.
+    pub fn resolve(self, cwd: Option<&std::path::Path>) -> Option<Hyperlink> {
+        match self {
+            HyperlinkCandidate::Resolved(link) => Some(link),
+            HyperlinkCandidate::ImplicitPath { row, start_col, end_col, token } => {
+                let is_valid_path = if token.starts_with("~/") || token == "~" {
+                    if let Ok(home) = std::env::var("HOME") {
+                        let rest = token.strip_prefix("~/").unwrap_or("");
+                        let full = std::path::Path::new(&home).join(rest);
+                        full.exists() || !rest.is_empty()
+                    } else {
+                        true
+                    }
+                } else if token.starts_with('/') {
+                    token.len() > 1 || std::path::Path::new(&token).exists()
+                } else if let Some(base) = cwd {
+                    base.join(&token).exists() || std::path::Path::new(&token).exists()
+                } else {
+                    std::path::Path::new(&token).exists()
+                };
+
+                if is_valid_path {
+                    Some(Hyperlink {
+                        row,
+                        start_col,
+                        end_col,
+                        url: token,
+                        is_path: true,
+                    })
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+

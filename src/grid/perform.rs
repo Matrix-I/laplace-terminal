@@ -336,23 +336,7 @@ impl Perform for Grid {
         match params.first().copied().unwrap_or_default() {
             // OSC 104 [; index ...]: reset palette entries (all without indices).
             b"104" => {
-                let all = params.len() < 2 || params[1].is_empty();
-                if !self.palette_override.is_empty() {
-                    let listed = params[1..].iter().filter_map(|p| std::str::from_utf8(p).ok()?.parse::<u8>().ok());
-                    let mut reset = |i: u8| {
-                        let old = palette_with(&self.palette_override, i);
-                        self.palette_override[i as usize] = 0;
-                        self.recolor(old, palette(i));
-                    };
-                    if all {
-                        (0..=255).for_each(&mut reset);
-                    } else {
-                        listed.for_each(&mut reset);
-                    }
-                }
-                if all {
-                    self.palette_override = Vec::new();
-                }
+                self.osc104(params);
                 return;
             }
             code @ (b"110" | b"111" | b"112") => {
