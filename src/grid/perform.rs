@@ -161,6 +161,10 @@ impl Perform for Grid {
                 let (r, c) = (self.cur.row, self.cur.col);
                 let k = arg(0, 1).min(cols - c);
                 let b = self.blank();
+                let had_extra = self.row_mut(r)[cols - k..].iter().any(|cell| ((cell.fg & FG_EXTRA) | (cell.bg & BG_EXTRA)) != 0);
+                if had_extra {
+                    self.extras_dirty = true;
+                }
                 let row = self.row_mut(r);
                 row.copy_within(c..cols - k, c + k);
                 row[c..c + k].fill(b);
@@ -171,6 +175,10 @@ impl Perform for Grid {
                 let (r, c) = (self.cur.row, self.cur.col);
                 let k = arg(0, 1).min(cols - c);
                 let b = self.blank();
+                let had_extra = self.row_mut(r)[c..c + k].iter().any(|cell| ((cell.fg & FG_EXTRA) | (cell.bg & BG_EXTRA)) != 0);
+                if had_extra {
+                    self.extras_dirty = true;
+                }
                 let row = self.row_mut(r);
                 row.copy_within(c + k..cols, c);
                 row[cols - k..].fill(b);
@@ -453,7 +461,8 @@ impl Perform for Grid {
     fn put(&mut self, byte: u8) {
         let limit = if matches!(self.dcs, Some(DcsRequest::Sixel(_))) { MAX_IMAGE_STRING } else { 1024 };
         if self.dcs.is_some() {
-            let timed_out = self.dcs_start.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5));
+            let timed_out = (self.dcs_buf.len() & 0x03ff == 0)
+                && self.dcs_start.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5));
             if !timed_out && self.dcs_buf.len() < limit {
                 self.dcs_buf.push(byte);
             } else {

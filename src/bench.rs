@@ -44,6 +44,8 @@ pub struct LatencyMetrics {
     pub file_read_64kb_ms: f64,
     pub file_read_1mb_ms: f64,
     pub file_read_1mb_throughput_mb_s: f64,
+    pub pty_spawn_avg_ms: f64,
+    pub bidi_cluster_layout_ms: f64,
     pub passed: bool,
 }
 
@@ -324,18 +326,107 @@ pub fn run_latency_benchmark() -> LatencyMetrics {
     let mb_per_sec = (data_1mb.len() as f64 / (1024.0 * 1024.0)) / (dur_1mb_ms / 1000.0);
     println!("      • 1 MB  Data stream read : {:>6.3} ms ({bold}{:.1} MB/s{reset})", dur_1mb_ms, mb_per_sec);
 
+    // 256 KB Kitty APC Graphics Stream
+    let mut apc_stream = Vec::with_capacity(256 * 1024 + 32);
+    apc_stream.extend_from_slice(b"\x1b_Gf=32,s=100,v=100,m=1;");
+    apc_stream.resize(256 * 1024, b'A');
+    apc_stream.extend_from_slice(b"\x1b\\");
+    let t_apc = Instant::now();
+    for &b in &apc_stream {
+        grid.feed_byte(&mut parser, b);
+    }
+    let dur_apc_ms = t_apc.elapsed().as_secs_f64() * 1000.0;
+    println!("      • 256 KB Kitty APC image  : {:>6.3} ms", dur_apc_ms);
+
+    // 256 KB Sixel DCS Graphics Stream
+    let mut sixel_stream = Vec::with_capacity(256 * 1024 + 32);
+    sixel_stream.extend_from_slice(b"\x1bPq\"1;1;100;100#0;2;0;0;0");
+    sixel_stream.resize(256 * 1024, b'~');
+    sixel_stream.extend_from_slice(b"\x1b\\");
+    let t_sixel = Instant::now();
+    for &b in &sixel_stream {
+        grid.feed_byte(&mut parser, b);
+    }
+    let dur_sixel_ms = t_sixel.elapsed().as_secs_f64() * 1000.0;
+    println!("      • 256 KB Sixel DCS image  : {:>6.3} ms", dur_sixel_ms);
+
+    // Saturated Extras / Hyperlinks (500 distinct URLs)
+    let t_extras = Instant::now();
+    for i in 0..500 {
+        let msg = format!("\x1b]8;;https://perf.test/{i}\x1b\\link_{i}\x1b]8;;\x1b\\\r\n");
+        for &b in msg.as_bytes() {
+            grid.feed_byte(&mut parser, b);
+        }
+    }
+    let dur_extras_ms = t_extras.elapsed().as_secs_f64() * 1000.0;
+    println!("      • 500 Saturated extras    : {:>6.3} ms", dur_extras_ms);
+
+    // 3. PTY Shell Spawn Latency (Process creation & FD sanitization)
+    println!("\n  [3] Measuring PTY Shell Spawn Latency (3 iterations)...");
+    let mut spawn_times = Vec::new();
+    for _ in 0..3 {
+        let t_sp = Instant::now();
+        if let Ok(pty) = crate::pty::Pty::spawn_in(80, 24, 8, 16, None, None) {
+            spawn_times.push(t_sp.elapsed().as_secs_f64() * 1000.0);
+            pty.write(b"exit\r");
+        }
+    }
+    let pty_spawn_avg_ms = if !spawn_times.is_empty() {
+        spawn_times.iter().sum::<f64>() / spawn_times.len() as f64
+    } else {
+        0.0
+    };
+    println!("      • PTY Shell Spawn (avg)   : {:>6.3} ms", pty_spawn_avg_ms);
+
+    // 4. BiDi Grapheme Cluster Fast-Reject & Layout (500 rows with accents & emojis)
+    println!("\n  [4] Measuring BiDi Cluster Fast-Reject & Layout (500 rows)...");
+    let mut bidi_grid = Grid::new(80, 500);
+    for i in 0..500 {
+        let msg = format!("Row {i}: hello e\u{0301} emoji \u{2764}\u{fe0f} item_{i}\r\n");
+        for &b in msg.as_bytes() {
+            bidi_grid.feed_byte(&mut parser, b);
+        }
+    }
+    let mut chars = Vec::new();
+    let mut levels = Vec::new();
+    let mut order = Vec::new();
+    let t_bidi = Instant::now();
+    for r in 0..500 {
+        bidi_grid.bidi_order(r, &mut chars, &mut levels, &mut order);
+    }
+    let dur_bidi_ms = t_bidi.elapsed().as_secs_f64() * 1000.0;
+    println!("      • 500 BiDi Cluster rows   : {:>6.3} ms", dur_bidi_ms);
+
     // SLAs
     let pass_pty_avg = avg_ms <= 1.0;
     let pass_pty_p99 = p99_ms <= 3.0;
     let pass_file_64kb = dur_64kb_ms <= 15.0;
     let pass_file_1mb = dur_1mb_ms <= 150.0;
-    let passed = pass_pty_avg && pass_pty_p99 && pass_file_64kb && pass_file_1mb;
+    let pass_apc = dur_apc_ms <= 30.0;
+    let pass_sixel = dur_sixel_ms <= 30.0;
+    let pass_extras = dur_extras_ms <= 30.0;
+    let pass_spawn = pty_spawn_avg_ms <= 25.0;
+    let pass_bidi = dur_bidi_ms <= 10.0;
+    let passed = pass_pty_avg
+        && pass_pty_p99
+        && pass_file_64kb
+        && pass_file_1mb
+        && pass_apc
+        && pass_sixel
+        && pass_extras
+        && pass_spawn
+        && pass_bidi;
 
     println!("\n{bold}Latency SLA Evaluation:{reset}");
     println!("  • PTY Avg Latency   <= 1.0 ms : {}", if pass_pty_avg { format!("{green}PASS{reset}") } else { format!("{red}FAIL ({:.3} ms > 1.0 ms){reset}", avg_ms) });
     println!("  • PTY P99 Latency   <= 3.0 ms : {}", if pass_pty_p99 { format!("{green}PASS{reset}") } else { format!("{red}FAIL ({:.3} ms > 3.0 ms){reset}", p99_ms) });
     println!("  • 64 KB File Read   <= 15 ms  : {}", if pass_file_64kb { format!("{green}PASS{reset}") } else { format!("{red}FAIL ({:.2} ms > 15 ms){reset}", dur_64kb_ms) });
     println!("  • 1 MB File Read    <= 150 ms : {}", if pass_file_1mb { format!("{green}PASS{reset}") } else { format!("{red}FAIL ({:.2} ms > 150 ms){reset}", dur_1mb_ms) });
+    println!("  • 256 KB Kitty APC  <= 30 ms  : {}", if pass_apc { format!("{green}PASS ({:.2} ms){reset}", dur_apc_ms) } else { format!("{red}FAIL ({:.2} ms > 30 ms){reset}", dur_apc_ms) });
+    println!("  • 256 KB Sixel DCS  <= 30 ms  : {}", if pass_sixel { format!("{green}PASS ({:.2} ms){reset}", dur_sixel_ms) } else { format!("{red}FAIL ({:.2} ms > 30 ms){reset}", dur_sixel_ms) });
+    println!("  • 500 Saturated URL <= 30 ms  : {}", if pass_extras { format!("{green}PASS ({:.2} ms){reset}", dur_extras_ms) } else { format!("{red}FAIL ({:.2} ms > 30 ms){reset}", dur_extras_ms) });
+    println!("  • PTY Spawn Latency <= 25 ms  : {}", if pass_spawn { format!("{green}PASS ({:.2} ms){reset}", pty_spawn_avg_ms) } else { format!("{red}FAIL ({:.2} ms > 25 ms){reset}", pty_spawn_avg_ms) });
+    println!("  • 500 BiDi Clusters <= 10 ms  : {}", if pass_bidi { format!("{green}PASS ({:.2} ms){reset}", dur_bidi_ms) } else { format!("{red}FAIL ({:.2} ms > 10 ms){reset}", dur_bidi_ms) });
 
     println!("\n{bold}Latency Verdict:{reset} {}", if passed {
         format!("{green}✔ ALL LATENCY CHECKS PASSED{reset}")
@@ -354,6 +445,8 @@ pub fn run_latency_benchmark() -> LatencyMetrics {
         file_read_64kb_ms: dur_64kb_ms,
         file_read_1mb_ms: dur_1mb_ms,
         file_read_1mb_throughput_mb_s: mb_per_sec,
+        pty_spawn_avg_ms,
+        bidi_cluster_layout_ms: dur_bidi_ms,
         passed,
     }
 }

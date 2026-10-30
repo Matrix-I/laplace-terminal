@@ -249,6 +249,8 @@ pub struct Grid {
     /// Hyperlinks and underline colors referenced by `Cell::extra` (index 0 is
     /// reserved for "none"). Slots no cell uses any more are reclaimed when full.
     extras: Vec<Option<CellExtra>>,
+    extras_dirty: bool,
+    extras_full: bool,
     /// Multi-codepoint graphemes cells refer to (see `CLUSTER_FLAG`), interned.
     clusters: Vec<Box<str>>,
     cluster_ids: std::collections::HashMap<Box<str>, u32>,
@@ -335,6 +337,8 @@ impl Grid {
             all_dirty: true,
             response: Vec::with_capacity(256),
             extras: vec![None],
+            extras_dirty: true,
+            extras_full: false,
             clusters: Vec::new(),
             cluster_ids: std::collections::HashMap::new(),
             cluster_buf: String::new(),
@@ -1248,7 +1252,18 @@ impl Grid {
         order.clear();
         let row = self.display_row(r);
         // Nothing below the Hebrew block is right-to-left.
-        if self.alt_active || !row.iter().any(|c| c.codepoint >= 0x0590) {
+        if self.alt_active
+            || !row.iter().any(|c| {
+                let cp = c.codepoint;
+                if cp & (CLUSTER_FLAG | PH_FLAG) == 0 {
+                    cp >= 0x0590
+                } else if cp & (CLUSTER_FLAG | PH_FLAG) == CLUSTER_FLAG {
+                    self.cluster(cp).is_some_and(|text| text.chars().any(|ch| ch >= '\u{0590}'))
+                } else {
+                    false
+                }
+            })
+        {
             return false;
         }
         chars.clear();
@@ -1445,23 +1460,39 @@ impl Grid {
         let blank = self.blank();
         let cols = self.cols;
         let insert = self.insert_mode;
-        {
+        let prev_extra = {
             let r = self.row_mut(row);
             if insert && col + w < cols {
                 r.copy_within(col..cols - w, col + w);
             }
-            // Never leave half of a double-width character behind.
-            if col > 0 && r[col].codepoint == 0 && is_wide_cp(r[col - 1].codepoint) {
+            let p_prev = if col > 0 && r[col].codepoint == 0 && is_wide_cp(r[col - 1].codepoint) {
+                let e = r[col - 1].extra();
                 r[col - 1] = blank;
-            }
+                e
+            } else {
+                0
+            };
             let last = col + w - 1;
-            if last + 1 < cols && r[last + 1].codepoint == 0 && is_wide_cp(r[last].codepoint) {
+            let p_next = if last + 1 < cols && r[last + 1].codepoint == 0 && is_wide_cp(r[last].codepoint) {
+                let e = r[last + 1].extra();
                 r[last + 1] = blank;
-            }
+                e
+            } else {
+                0
+            };
+            let p_curr = r[col].extra();
             r[col] = Cell { codepoint, fg, bg };
-            if w == 2 {
+            let p_w2 = if w == 2 {
+                let e = r[col + 1].extra();
                 r[col + 1] = Cell { codepoint: 0, fg, bg };
-            }
+                e
+            } else {
+                0
+            };
+            p_prev != 0 || p_next != 0 || p_curr != 0 || p_w2 != 0
+        };
+        if prev_extra {
+            self.extras_dirty = true;
         }
         if col + w >= cols {
             self.set_wrapped(row, false);
@@ -1562,6 +1593,12 @@ impl Grid {
         let b = self.blank();
         let c1 = c1.min(self.cols);
         if c0 < c1 {
+            let had_extra = self.row_mut(r)[c0..c1]
+                .iter()
+                .any(|c| ((c.fg & FG_EXTRA) | (c.bg & BG_EXTRA)) != 0);
+            if had_extra {
+                self.extras_dirty = true;
+            }
             self.row_mut(r)[c0..c1].fill(b);
         }
         if c1 == self.cols {
@@ -1581,6 +1618,10 @@ impl Grid {
         let s = self.row_start(src);
         let d = self.row_start(dst);
         let c = self.cols;
+        let buf = self.buf_mut();
+        if buf[d..d + c].iter().any(|cell| ((cell.fg & FG_EXTRA) | (cell.bg & BG_EXTRA)) != 0) {
+            self.extras_dirty = true;
+        }
         self.buf_mut().copy_within(s..s + c, d);
         if !self.alt_active {
             self.wrapped[d / c] = self.wrapped[s / c];
@@ -1626,12 +1667,15 @@ impl Grid {
                 if self.history + self.rows >= self.cap && self.cap < self.scrollback + self.rows {
                     self.grow_capacity();
                 }
-                if !self.graphics.virtuals.is_empty() && self.history == self.cap - self.rows {
+                if self.history == self.cap - self.rows {
                     let evicted_row = (self.top + self.cap - self.history) % self.cap;
                     let start = evicted_row * self.cols;
                     let end = start + self.cols;
-                    if self.cells[start..end].iter().any(|c| c.codepoint & PH_FLAG != 0) {
+                    if !self.graphics.virtuals.is_empty() && self.cells[start..end].iter().any(|c| c.codepoint & PH_FLAG != 0) {
                         evicted_had_ph = true;
+                    }
+                    if self.cells[start..end].iter().any(|c| ((c.fg & FG_EXTRA) | (c.bg & BG_EXTRA)) != 0) {
+                        self.extras_dirty = true;
                     }
                 }
                 self.top = (self.top + 1) % self.cap;
@@ -1681,7 +1725,10 @@ impl Grid {
     /// are handled here, because vte drops them; everything else goes to `parser`.
     #[inline]
     pub fn feed_byte(&mut self, parser: &mut vte::Parser, b: u8) {
-        if self.apc_state >= 2 && self.apc_start.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5)) {
+        if self.apc_state >= 2
+            && (self.apc_buf.len() & 0x03ff == 0)
+            && self.apc_start.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(5))
+        {
             self.apc_state = 0;
             self.apc_buf.clear();
             self.apc_buf.shrink_to_fit();
@@ -2085,6 +2132,9 @@ impl Grid {
             self.display_offset = 0;
         } else {
             self.alt_active = false;
+            if self.alt.iter().any(|cell| ((cell.fg & FG_EXTRA) | (cell.bg & BG_EXTRA)) != 0) {
+                self.extras_dirty = true;
+            }
             self.alt = Vec::new();
             if save_cursor {
                 self.cur = self.saved_main;
@@ -2336,6 +2386,7 @@ impl Grid {
         self.prompt_input_mark = None;
         self.dirty = vec![true; rows];
         self.all_dirty = true;
+        self.extras_dirty = true;
         if !self.graphics.virtuals.is_empty() {
             self.prune_dead_virtuals();
         }
@@ -2668,13 +2719,21 @@ impl Grid {
     /// Point the pen at `extra` with its underline color replaced.
     fn set_underline_color(&mut self, extra: u8, color: u32) {
         let link = self.extra_at(extra).and_then(|e| e.link.clone());
+        let old = self.cur.pen.extra;
         self.cur.pen.extra = self.intern_extra(CellExtra { link, underline_color: color });
+        if old != 0 && self.cur.pen.extra != old {
+            self.extras_dirty = true;
+        }
     }
 
     /// Point the pen at the current extra with its hyperlink replaced.
     fn set_link(&mut self, link: Option<OscLink>) {
         let underline_color = self.extra_at(self.cur.pen.extra).map_or(0, |e| e.underline_color);
+        let old = self.cur.pen.extra;
         self.cur.pen.extra = self.intern_extra(CellExtra { link, underline_color });
+        if old != 0 && self.cur.pen.extra != old {
+            self.extras_dirty = true;
+        }
     }
 
     /// Index of `extra` in the table, adding it if needed. Runs only when an escape
@@ -2693,7 +2752,13 @@ impl Grid {
         }
         let free = match self.extras.iter().skip(1).position(Option::is_none) {
             Some(i) => Some(i + 1),
-            None => self.collect_extras(),
+            None => {
+                if self.extras_full && !self.extras_dirty {
+                    None
+                } else {
+                    self.collect_extras()
+                }
+            }
         };
         match free {
             Some(i) => {
@@ -2707,30 +2772,83 @@ impl Grid {
     /// Free every extra slot no cell or saved pen refers to; returns the first free one.
     fn collect_extras(&mut self) -> Option<usize> {
         let mut used = [false; 256];
-        if self.cols > 0 && self.cap > 0 {
-            let c = self.cols;
+        let mut used_count = 0usize;
+        let c = self.cols;
+        if c > 0 && self.cap > 0 {
             let active_rows = (self.history + self.rows).min(self.cap);
-            for i in 0..active_rows {
-                let p = (self.top + self.cap - self.history + i) % self.cap;
-                if let Some(row) = self.cells.get(p * c..(p + 1) * c) {
-                    for cell in row {
-                        used[cell.extra() as usize] = true;
+            let start_row = (self.top + self.cap - self.history) % self.cap;
+
+            let mut check_slice = |slice: &[Cell]| -> bool {
+                for cell in slice {
+                    if ((cell.fg & FG_EXTRA) | (cell.bg & BG_EXTRA)) != 0 {
+                        let extra = cell.extra() as usize;
+                        if extra != 0 && !used[extra] {
+                            used[extra] = true;
+                            used_count += 1;
+                            if used_count >= 255 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            };
+
+            let all_in_use = if active_rows == self.cap {
+                check_slice(&self.cells)
+            } else if start_row + active_rows <= self.cap {
+                let s = start_row * c;
+                let e = (start_row + active_rows) * c;
+                check_slice(&self.cells[s..e])
+            } else {
+                let s1 = start_row * c;
+                let s2 = (start_row + active_rows - self.cap) * c;
+                check_slice(&self.cells[s1..]) || check_slice(&self.cells[..s2])
+            };
+
+            if all_in_use {
+                self.extras_full = true;
+                self.extras_dirty = false;
+                return None;
+            }
+        }
+
+        for cell in &self.alt {
+            if ((cell.fg & FG_EXTRA) | (cell.bg & BG_EXTRA)) != 0 {
+                let extra = cell.extra() as usize;
+                if extra != 0 && !used[extra] {
+                    used[extra] = true;
+                    used_count += 1;
+                    if used_count >= 255 {
+                        self.extras_full = true;
+                        self.extras_dirty = false;
+                        return None;
                     }
                 }
             }
         }
-        for cell in &self.alt {
-            used[cell.extra() as usize] = true;
-        }
         for c in [&self.cur, &self.saved, &self.saved_main] {
-            used[c.pen.extra as usize] = true;
+            let extra = c.pen.extra as usize;
+            if extra != 0 && !used[extra] {
+                used[extra] = true;
+                used_count += 1;
+                if used_count >= 255 {
+                    self.extras_full = true;
+                    self.extras_dirty = false;
+                    return None;
+                }
+            }
         }
-        for (slot, used) in self.extras.iter_mut().zip(used).skip(1) {
-            if !used {
+
+        for (slot, &is_used) in self.extras.iter_mut().zip(used.iter()).skip(1) {
+            if !is_used {
                 *slot = None;
             }
         }
-        self.extras.iter().skip(1).position(Option::is_none).map(|i| i + 1)
+        self.extras_dirty = false;
+        let free = self.extras.iter().skip(1).position(Option::is_none).map(|i| i + 1);
+        self.extras_full = free.is_none();
+        free
     }
 
     /// Reclaim unused extra slots and shrink trailing empty entries.
@@ -2739,6 +2857,8 @@ impl Grid {
         while self.extras.len() > 1 && self.extras.last().is_some_and(Option::is_none) {
             self.extras.pop();
         }
+        self.extras_dirty = false;
+        self.extras_full = false;
     }
 
     /// Explicit underline color of a cell as `0xRRGGBB00`, if SGR 58 set one.
@@ -4478,4 +4598,127 @@ mod tests {
         assert!(g.graphics.placements.is_empty(), "placement pruned after scrolling off alt screen");
         assert!(g.graphics.image(id).is_none(), "auto-id image freed after placement pruned");
     }
+
+    #[test]
+    fn test_bidi_order_no_false_trigger_on_clusters_and_placeholders() {
+        let mut g = Grid::new(30, 4);
+        let mut chars = Vec::new();
+        let mut levels = Vec::new();
+        let mut order = Vec::new();
+
+        // 1. Plain ASCII with grapheme cluster (e + combining acute accent)
+        feed(&mut g, "hello e\u{301} world\r\n");
+        let has_bidi = g.bidi_order(0, &mut chars, &mut levels, &mut order);
+        assert!(!has_bidi, "ASCII with grapheme cluster must not trigger BiDi order");
+
+        // 2. Wide emoji cluster (heart with VS16)
+        feed(&mut g, "emoji \u{2764}\u{fe0f} test\r\n");
+        let has_bidi = g.bidi_order(1, &mut chars, &mut levels, &mut order);
+        assert!(!has_bidi, "emoji cluster must not trigger BiDi order");
+
+        // 3. Image placeholder cell
+        let id = g.graphics.insert(0, 10, 10, vec![0; 400]);
+        g.place_virtual(id, 2, 1, 0, 0);
+        let d = |i: usize| char::from_u32(crate::graphics::PLACEHOLDER_DIACRITICS[i]).unwrap();
+        let msb = (id >> 24) as usize;
+        let r = ((id >> 16) & 0xFF) as u8;
+        let g_col = ((id >> 8) & 0xFF) as u8;
+        let b = (id & 0xFF) as u8;
+        feed(&mut g, &format!("\x1b[38;2;{r};{g_col};{b}m\u{10EEEE}{}{}{}\x1b[0m\r\n", d(0), d(0), d(msb)));
+        let has_bidi = g.bidi_order(2, &mut chars, &mut levels, &mut order);
+        assert!(!has_bidi, "image placeholder must not trigger BiDi order");
+
+        // 4. Real RTL Hebrew text MUST trigger BiDi
+        feed(&mut g, "english \u{05E9}\u{05DC}\u{05D5}\u{05DD} hebrew");
+        let has_bidi = g.bidi_order(3, &mut chars, &mut levels, &mut order);
+        assert!(has_bidi, "Hebrew text MUST trigger BiDi order");
+        assert!(!order.is_empty(), "order map must be generated for BiDi row");
+    }
+
+    #[test]
+    fn test_saturated_extras_performance_and_reclamation() {
+        let mut g = Grid::new(80, 24);
+        let t0 = std::time::Instant::now();
+        // Feed 1000 distinct hyperlinks into the grid (exceeds 255 capacity)
+        for i in 0..1000 {
+            feed(&mut g, &format!("\x1b]8;;https://example.com/item/{i}\x1b\\item_{i}\x1b]8;;\x1b\\\r\n"));
+        }
+        let dur = t0.elapsed();
+        assert!(dur < std::time::Duration::from_millis(500), "1000 hyperlinks must not freeze (took {:?})", dur);
+        assert!(g.extras.len() <= 256, "extras table must not exceed 256 entries");
+
+        // 2. Test reclamation with scrollback eviction
+        let mut g2 = Grid::new(40, 2);
+        g2.scrollback = 2;
+        g2.cap = 4;
+        for i in 0..500 {
+            feed(&mut g2, &format!("\x1b]8;;https://reclaim.test/{i}\x1b\\link_{i}\x1b]8;;\x1b\\\r\n"));
+        }
+        assert!(g2.extras.len() <= 256);
+        let link = g2.find_hyperlink_at(0, 0, None).expect("link on row 0 should be found");
+        assert!(link.url.starts_with("https://reclaim.test/"));
+    }
+
+    #[test]
+    fn test_kitty_apc_and_sixel_stream_ingestion() {
+        let mut g = Grid::new(80, 24);
+        let mut parser = vte::Parser::new();
+
+        // 1. Kitty APC stream: 128KB chunk
+        let mut apc_data = Vec::with_capacity(128 * 1024 + 16);
+        apc_data.extend_from_slice(b"\x1b_Gf=32,s=100,v=100,m=1;");
+        apc_data.resize(128 * 1024, b'A');
+        apc_data.extend_from_slice(b"\x1b\\");
+
+        let t0 = std::time::Instant::now();
+        for &b in &apc_data {
+            g.feed_byte(&mut parser, b);
+        }
+        let dur_apc = t0.elapsed();
+        assert!(dur_apc < std::time::Duration::from_millis(100), "128KB Kitty APC took too long: {:?}", dur_apc);
+
+        // 2. Sixel DCS stream: 128KB chunk
+        let mut sixel_data = Vec::with_capacity(128 * 1024 + 16);
+        sixel_data.extend_from_slice(b"\x1bPq\"1;1;100;100#0;2;0;0;0");
+        sixel_data.resize(128 * 1024, b'~');
+        sixel_data.extend_from_slice(b"\x1b\\");
+
+        let t1 = std::time::Instant::now();
+        for &b in &sixel_data {
+            g.feed_byte(&mut parser, b);
+        }
+        let dur_sixel = t1.elapsed();
+        assert!(dur_sixel < std::time::Duration::from_millis(100), "128KB Sixel took too long: {:?}", dur_sixel);
+    }
+
+    #[test]
+    fn test_saturated_extras_reclamation_on_alt_screen_and_edits() {
+        let mut g = Grid::new(80, 24);
+        // Fill 255 extras
+        for i in 1..=255 {
+            feed(&mut g, &format!("\x1b]8;;https://example.com/item/{i}\x1b\\x\x1b]8;;\x1b\\"));
+        }
+        assert_eq!(g.extras.len(), 256);
+
+        // Overwrite cell (0, 0) with a wide character replacing the extra
+        feed(&mut g, "\x1b[1;1H\u{4E16}\x1b[0m");
+        assert!(g.extras_dirty, "extras_dirty must be marked on cell overwrite");
+
+        // Now feed a brand new URL; it should reclaim the freed slot
+        feed(&mut g, "\x1b[1;10H\x1b]8;;https://example.com/new_item\x1b\\NEW\x1b]8;;\x1b\\");
+        assert!(g.extras.len() <= 256);
+        let link = g.find_hyperlink_at(0, 10, None).expect("new link must be interned into reclaimed slot");
+        assert_eq!(&*link.url, "https://example.com/new_item");
+
+        // Test alt-screen exit reclamation
+        feed(&mut g, "\x1b[?1049h"); // enter alt
+        assert!(g.alt_active);
+        feed(&mut g, "\x1b[?1049l"); // exit alt
+        assert!(!g.alt_active);
+
+        // Test character deletion (DCH) and insertion (ICH)
+        feed(&mut g, "\x1b[1;10H\x1b[1P"); // delete character with link
+        assert!(g.extras_dirty, "extras_dirty must be set after DCH");
+    }
 }
+

@@ -226,6 +226,13 @@ cat <<EOF > "$REPORT_FILE"
   - 4 KB Config: $\le$ 1.0 ms
   - 64 KB Source code: $\le$ 15.0 ms
   - 1 MB Data stream: $\ge$ 50 MB/s
+- **Image & Extras Stream Ingestion**:
+  - 256 KB Kitty Graphics APC: $\le$ 30.0 ms
+  - 256 KB Sixel Graphics DCS: $\le$ 30.0 ms
+  - Saturated Extras GC (500 distinct URLs): $\le$ 30.0 ms
+- **Process Lifecycle & Unicode Layout**:
+  - PTY Shell Spawn (macOS/Linux): $\le$ 25.0 ms
+  - BiDi Grapheme Cluster Fast-Reject (500 rows): $\le$ 10.0 ms
 - **Status**: **$PERF_PASSED**
 
 ## 3. Large Log Stress Test & Frame Stalls

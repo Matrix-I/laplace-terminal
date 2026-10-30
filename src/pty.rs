@@ -164,7 +164,7 @@ impl Pty {
             4096
         };
         let sys_max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-        let max_fd = sys_max.max(rlim_max).clamp(256, 65536) as libc::c_int;
+        let _max_fd = sys_max.max(rlim_max).clamp(256, 65536) as libc::c_int;
 
         let mut ws = winsize(cols, rows, cell_w, cell_h);
         let (mut master, mut slave): (libc::c_int, libc::c_int) = (-1, -1);
@@ -189,6 +189,17 @@ impl Pty {
                 libc::tcsetattr(slave, libc::TCSANOW, &tio);
             }
 
+            #[cfg(target_os = "macos")]
+            let open_fds: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter_map(|e| e.file_name().to_string_lossy().parse::<libc::c_int>().ok())
+                        .filter(|&fd| fd >= 3)
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let pid = libc::fork();
             if pid < 0 {
                 let e = io::Error::last_os_error();
@@ -203,16 +214,46 @@ impl Pty {
                 libc::dup2(slave, 0);
                 libc::dup2(slave, 1);
                 libc::dup2(slave, 2);
+                if slave > 2 {
+                    libc::close(slave);
+                }
+                libc::close(master);
                 // Close all inherited file descriptors >= 3 so no PTY masters, sockets,
                 // or driver handles leak into the shell.
                 #[cfg(all(target_os = "linux", target_env = "gnu"))]
                 if libc::close_range(3, !0, 0) != 0 {
-                    for fd in 3..max_fd {
+                    for fd in 3.._max_fd {
                         libc::close(fd);
                     }
                 }
-                #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-                for fd in 3..max_fd {
+                #[cfg(any(
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "dragonfly"
+                ))]
+                libc::closefrom(3);
+                #[cfg(target_os = "macos")]
+                {
+                    if !open_fds.is_empty() {
+                        for &fd in &open_fds {
+                            libc::close(fd);
+                        }
+                    } else {
+                        for fd in 3.._max_fd {
+                            libc::close(fd);
+                        }
+                    }
+                }
+                #[cfg(not(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "dragonfly"
+                )))]
+                for fd in 3.._max_fd {
                     libc::close(fd);
                 }
                 // Rust ignores SIGPIPE; ignored dispositions survive exec, so reset them.
@@ -643,6 +684,29 @@ mod tests {
             frames.iter().any(|t| t.contains("AFTER") && !t.contains("PROMPT")),
             "the newline after Enter was only shown together with the prompt"
         );
+    }
+
+    #[test]
+    fn shell_spawn_closes_inherited_fds() {
+        let mut pipe_fds = [-1; 2];
+        unsafe {
+            assert_eq!(libc::pipe(pipe_fds.as_mut_ptr()), 0);
+        }
+
+        let pty = Pty::spawn_in(80, 24, 8, 16, None, None).expect("spawn pty");
+        unsafe {
+            // Close the write end in the parent process.
+            libc::close(pipe_fds[1]);
+
+            // If the spawned child process closed inherited file descriptors >= 3,
+            // all write ends are closed, so read(pipe_fds[0]) must immediately return 0 (EOF)
+            // without blocking, even while the spawned shell is still alive.
+            let mut buf = [0u8; 1];
+            let n = libc::read(pipe_fds[0], buf.as_mut_ptr() as _, 1);
+            libc::close(pipe_fds[0]);
+            assert_eq!(n, 0, "child process must have closed inherited write pipe end");
+        }
+        pty.write(b"exit\r");
     }
 
     #[test]
