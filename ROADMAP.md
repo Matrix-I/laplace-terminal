@@ -515,3 +515,12 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Support standard X11 color names in config `parse_color` consistent with terminal OSC palette (`src/config.rs`)
 - [x] Propagate config reload renderer changes to all open windows in multi-window mode (`src/main.rs`)
 - [ ] Fix `OSC 104` color aliasing corruption when two overridden palette indices swap colors across sequential in-place `Grid::recolor` passes (`src/grid/perform.rs`, `src/grid/mod.rs`)
+
+## Planned Features (v0.7.0 — Post v0.6.0 Release)
+
+- [ ] **Built-in LLM Shell Assistant (`yo <query>`, Yosh Parity)** — see [yosh_implementation_plan.md](./yosh_implementation_plan.md)
+  - Natural-language `yo <intent>` command across `zsh`, `bash`, `fish`, and `nushell` via `OSC 778` shell integration bridge
+  - Safe command prefill into live shell prompt buffer, inline Markdown Q&A rendering, and zero-copy terminal scrollback awareness via `Grid` + `OSC 133` marks
+  - Multi-step continuation workflows (`pending: true`), per-pane session memory, and automatic 50% context window compaction
+  - Multi-provider support (Anthropic Claude, OpenAI, OpenRouter, DeepSeek, Kimi, Qwen, local Ollama) configured via `~/.litty/config` (`ai-*` keys) with `~/.yoconf` compatibility
+
