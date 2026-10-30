@@ -471,13 +471,20 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Check and report errors from `codesign` and `touch` in macOS app bundle updater (`src/update.rs`)
 - [x] Avoid duplicate KVO observer registrations on macOS effective appearance changes (`src/macos.rs`)
 
-## Code Health & Hardening (v0.5.1 Audit Backlog)
+## Code Health & Hardening (v0.6.0 Audit Backlog)
 
 ### Security Fixes
 - [x] Fix updater signature verification pass-through, enforce key pinning, and propagate signature errors (`src/update.rs`)
 - [x] Restrict OSC 52 clipboard writes to active/focused panes to prevent background tab clipboard poisoning (`src/main.rs`, `src/grid/perform.rs`)
 - [x] Bound PNG decoder buffer allocation to `STORE_LIMIT` before decoding (`src/graphics.rs`)
 - [x] Guard `open_target` on Linux against executing executable files or scripts via `xdg-open` (`src/main.rs`)
+- [ ] **CWE-347 / CWE-321 / CWE-494**: Fail closed in `verify_signature` when `minisign`/`gpg` is missing or when release signature assets are absent, replace placeholder `PINNED_PUBKEY` (and remove `LITTY_PUBKEY`/`LAPLACE_PUBKEY` env overrides), pin GPG key fingerprint, and restrict `browser_download_url` to GitHub domains (`src/update.rs`)
+- [ ] **CWE-200 / CWE-22**: Eliminate sensitive-file existence oracle (`ENOENT` vs `EPERM`) in `decode_kitty` by checking path sensitivity before `canonicalize()`, block macOS `~/Library` and non-temp paths in `t=f`, and return uniform error responses (`src/graphics.rs`)
+- [ ] **CWE-400 / CWE-770 / CWE-789**: Cap Sixel (`decode_sixel`) and raw RGB/RGBA Kitty (`decode_kitty`) image allocations to `STORE_LIMIT` (preventing 512 MiB Sixel bombs), fix single-image eviction bypass (`self.order.len() > 1`) in `Store::evict`, and bound `Store::placements` length (`src/graphics.rs`)
+- [ ] **CWE-78 / CWE-150**: Prevent unintended immediate shell execution of multi-line history commands when pressing `Tab` ("Edit" / "Insert") in `Ctrl+R` History Search by wrapping in bracketed paste or escaping newlines (`src/main.rs`)
+- [ ] **CWE-400**: Bound concurrent clipboard paste helper threads (`IN_FLIGHT_PASTES`) and kill hung `wl-paste`/`xclip`/`xsel` subprocesses when the 100ms timeout expires in `paste_from_clipboard` (`src/main.rs`)
+- [ ] **CWE-150**: Sanitize control characters (`\a`, `\e`, `0x00..=0x1F`, `0x7F`) in `$PWD` and `$cmd` across all shell integration scripts (`OSC 7` / `OSC 2`) (`src/shell/litty.elv`, `src/shell/litty-integration.zsh`, `src/shell/litty.bash`, `src/shell/litty-integration.fish`)
+- [ ] **CWE-377**: Avoid predictable `/tmp/litty_ram_bench.json` write without `O_NOFOLLOW` / `create_new(true)` (`src/bench.rs`) and remove dead `#[cfg(windows)] cmd /c start` code in `open_target` (`src/main.rs`)
 
 ### Memory Leaks & Resource Management
 - [x] Add timeout and cleanup for abandoned chunked Kitty transmission buffers in `Store.pending` (`src/graphics.rs`)
@@ -486,6 +493,8 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Prune stale `Placement.alt` entries during linefeed scroll in alternate screen (`src/graphics.rs`, `src/grid/mod.rs`)
 - [x] Prevent Carbon `EnableSecureEventInput` reference counter drift on duplicate focus events (`src/macos.rs`, `src/main.rs`)
 - [x] Accelerate GPU texture VRAM deallocation for scrolled-off/closed images on idle terminals (`src/image_layer.rs`, `src/renderer.rs`)
+- [ ] Garbage-collect unreferenced grapheme clusters in `Grid::clusters` and `Grid::cluster_ids` on scrollback eviction / `clear_history` so multi-codepoint combining marks and ZWJ emoji do not permanently stop working after `MAX_CLUSTERS` (65,536) (`src/grid/mod.rs`)
+- [ ] Clean up stale `SAVED_FRAMES` entries on macOS window close, remove `NSVisualEffectView` when `background-blur = 0` or `background-opacity = 1.0` on config reload (`src/macos.rs`), and cap `Shaper::pieces` / `Shaper::piece_ids` at 4,096 entries (`src/atlas.rs`)
 
 ### Performance & Concurrency Fixes
 - [x] Reduce `grid.lock()` mutex hold duration in `renderer.rs` across rasterization and GPU texture uploads (`src/renderer.rs`)
@@ -494,10 +503,15 @@ Comprehensive memory leak, cache accumulation, lifecycle, and zombie process aud
 - [x] Eliminate synchronous main-thread 750ms blocking on clipboard paste (`src/main.rs`)
 - [x] Memoize parsed font metadata in `fontdb.rs` to eliminate massive synchronous disk I/O on font cache miss (`src/fontdb.rs`)
 - [x] Increase default glyph atlas dimensions and prevent invisible `BLANK_SLOT` drops under high Unicode/CJK glyph diversity (`src/atlas.rs`, `src/renderer.rs`)
+- [ ] Move blocking filesystem `Path::exists()` (`stat`) and `Path::canonicalize()` (`realpath`) calls in `resolve_implicit_link` out of `pane.grid.lock()`, and cache `pane.pty.cwd()` / `has_running_process()` on mouse movement in `update_hovered_link` and `inspector_lines` (`src/main.rs`, `src/grid/mod.rs`)
+- [ ] Batch `OSC 104` full palette reset into a single pass over active cells (`0..history + rows`) instead of scanning all `cap * cols` cells 256 times ($O(256 \times \text{cap} \times \text{cols})$) (`src/grid/perform.rs`, `src/grid/mod.rs`)
+- [ ] Dynamically grow the glyph atlas texture (`512 -> 1024 -> 2048 -> 4096`) when all slots are active in the same frame to avoid 512×512 slot thrashing and double full-grid rebuilds per frame on CJK/emoji screens (`src/atlas.rs`, `src/renderer.rs`)
+- [ ] Replace $O(N)$ `Vec::insert(0, ...)` shifts in `HistorySearch::add_session_command` with `VecDeque`, deduplicate history lines before heap-allocating `String`s, and offload `remove_from_disk_history` (`fsync`) from the main UI thread (`src/history.rs`)
+- [ ] Cache the base `CTFontRef` across CoreText fallback calls and upload both `WIDE_LEFT` and `WIDE_RIGHT` atlas slots from a single `2 * cell_w` rasterization pass on macOS (`src/atlas.rs`)
 
 ### Code Quality & Logic Integrity
 - [x] Fix zero-width character column calculation (`char_width(c).max(1)`) in search match selections (`src/search.rs`)
 - [x] Clamp wheel delta bursts in `alt_screen_scroll` to avoid flooding PTY with arrow keys (`src/main.rs`)
 - [x] Support standard X11 color names in config `parse_color` consistent with terminal OSC palette (`src/config.rs`)
 - [x] Propagate config reload renderer changes to all open windows in multi-window mode (`src/main.rs`)
-
+- [ ] Fix `OSC 104` color aliasing corruption when two overridden palette indices swap colors across sequential in-place `Grid::recolor` passes (`src/grid/perform.rs`, `src/grid/mod.rs`)
