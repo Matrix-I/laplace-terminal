@@ -1,126 +1,44 @@
-# Litty Terminal — Claude Code Rules
+# Litty Terminal — Rules
 
-## Cross-Platform Keyboard Shortcuts & Modifier Mapping Rules
+Cross-platform, zero-latency GPU terminal emulator (macOS Metal / Linux Vulkan, Wayland, X11).
 
-Litty is designed to run natively and with zero latency on both **macOS** (Metal) and **Linux** (Vulkan/Wayland/X11). Every time a new shortcut, mouse gesture, or window interaction is added or modified, you **MUST** ensure full feature parity between macOS and Linux.
+## Core Invariants & Safety
+- **Performance**: < 50MB idle RAM, 0% idle CPU (`ControlFlow::Wait`), zero heap allocation on hot paths (PTY parsing, scrolling, render loop).
+- **Grid Cell**: `Cell` struct must stay exactly 12 bytes (`static_assert`). Pack new state into existing bits.
+- **Concurrency & Locking**: Minimize grid `Mutex` hold time. Never perform blocking I/O (PTY writes, subprocesses, file ops) while holding it.
+- **Process & Security**:
+  - Only async-signal-safe calls after `fork()`; prepare all allocations beforehand.
+  - Strip `ESC` (`\x1b[201~`) from pasted text to prevent bracketed paste escapes.
+  - User/terminal URLs to `open` / `xdg-open` must pass as a single argument (never via shell).
+  - Shell history writes: mutate raw bytes, write temp file, atomic `rename`.
 
----
+## Keybinding & Platform Parity
+- **Modifier Rules**: macOS uses `Cmd`. Linux terminal actions (Copy, Paste, Tab, Quit) **MUST** use `Ctrl+Shift` (or `Super`) to avoid clashing with shell/readline control characters (`Ctrl+C/V/W/N/T`). Navigation/UI can use `Ctrl` or `Alt`.
+- **Primary Bindings Matrix (macOS vs Linux)**:
+  - Copy / Paste: `Cmd+C` / `Cmd+V` ↔ `Ctrl+Shift+C` / `Ctrl+Shift+V`
+  - Tabs (New / Close): `Cmd+T` / `Cmd+W` ↔ `Ctrl+Shift+T` / `Ctrl+Shift+W`
+  - Window (New / Quit): `Cmd+N` / `Cmd+Q` ↔ `Ctrl+Shift+N` / `Ctrl+Shift+Q`
+  - Splits (V / H): `Cmd+D` / `Cmd+Shift+D` ↔ `Ctrl+Shift+D` / `Ctrl+Shift+E` (or `Super+Shift+D`)
+  - Clear Scrollback: `Cmd+K` ↔ `Ctrl+Shift+K`
+  - Quick Zoom: `Cmd + / - / 0` ↔ `Ctrl + / - / 0`
+  - Tabs 1..9: `Cmd+1..9` ↔ `Ctrl+1..9` / `Alt+1..9`
+  - Jump Word: `Opt+Left/Right` ↔ `Ctrl+Left/Right` (avoid macOS Mission Control collision)
+  - Search / History: `Cmd+F` ↔ `Ctrl+Shift+F`; `Ctrl+R` fuzzy search (preserve vim redo in alt screen)
+  - UI hints: macOS renders `⌘`, Linux renders `^` or `Alt+`.
 
-### 1. Modifier Mapping Conventions
+## Architecture & Modules
+- `src/main.rs`: winit loop, state coordination, action dispatch, mouse & IME.
+- `src/keymap.rs`: Pure key-to-byte / shortcut resolution for `Platform::MacOs` & `Platform::Linux` + Kitty protocol.
+- `src/pty.rs`: `openpty` + `fork`/`execve`, reader thread pushing bytes to grid.
+- `src/grid.rs`: 12-byte `Cell`, ring buffer, `vte::Perform`. Responses (DSR, DA) go to `Grid::response`.
+- `src/renderer.rs` & `src/atlas.rs`: wgpu pipelines, single instanced draw call (`shader.wgsl`), glyph cache, font fallback.
+- `src/split.rs`: Pane tree layout management.
 
-On macOS, terminal applications use `Command` (`super_key`) as the primary modifier. On Linux, `Command` does not exist on standard keyboards; instead, `Control` (`ctrl`) and the `Super` (Windows) key are used.
-
-#### Terminal Collision Rule (Crucial for Linux)
-In a terminal emulator, bare `Ctrl + <letter>` keys are reserved for shell/readline control characters (e.g., `Ctrl+C` sends SIGINT, `Ctrl+V` sends verbatim byte, `Ctrl+W` deletes backward word, `Ctrl+T` transposes characters, `Ctrl+N` navigates command history).
-* **Terminal actions on Linux** (Copy, Paste, New Tab, Close Tab, Quit) **MUST** use `Ctrl + Shift + <Key>` (and should accept `Super + <Key>` as an alternate modern desktop binding).
-* **Navigation & UI actions on Linux** (Open Config, Direct Tab Switch 1..9, Zoom, Click Link) can use `Ctrl + <Key>` or `Ctrl + Alt + <Key>` because they do not collide with shell input.
-
----
-
-### 2. Standard Shortcut Matrix
-
-| Feature | macOS (`target_os = "macos"`) | Linux (`not(target_os = "macos")`) | Rationale / Behavior |
-| :--- | :--- | :--- | :--- |
-| **New / Duplicate Tab** | `Cmd + T` | `Ctrl + Shift + T` *(or `Super + T`)* | Bare `Ctrl+T` is needed for shell transpose/fzf. |
-| **New Window** | `Cmd + N` | `Ctrl + Shift + N` *(or `Super + N`)* | Opens in the active pane's directory; bare `Ctrl+N` is history next. |
-| **Close Tab** | `Cmd + W` | `Ctrl + Shift + W` *(or `Super + W`)* | Bare `Ctrl+W` is delete word in bash/zsh. |
-| **Copy Selection** | `Cmd + C` | `Ctrl + Shift + C` *(or `Super + C`)* | Bare `Ctrl+C` sends SIGINT (`\x03`). |
-| **Paste Clipboard** | `Cmd + V` | `Ctrl + Shift + V` *(or `Super + V`)* | Bare `Ctrl+V` sends verbatim escape (`\x16`). |
-| **Quit Application** | `Cmd + Q` | `Ctrl + Shift + Q` *(or `Super + Q`)* | Bare `Ctrl+Q` is XON resume flow control. |
-| **Minimize Window** | `Cmd + M` | `Ctrl + Shift + M` *(or `Super + M`)* | Bare `Ctrl+M` is carriage return (`\r`) in terminal. |
-| **Open Config** | `Cmd + ,` | `Ctrl + ,` *(or `Super + ,`)* | Opens `~/.litty/config` in `$EDITOR`. |
-| **Reload Config** | `Cmd + Shift + ,` (or `Cmd + <`) | `Ctrl + Shift + ,` (or `Ctrl + <`) | Reloads config on the fly. |
-| **Select Tab 1..9** | `Cmd + 1..9` | `Ctrl + 1..9` *(matches `^1..^9` badge)*, `Alt + 1..9`, `Super + 1..9` | Tab 9 jumps to last tab if $\ge 9$ tabs. |
-| **Cycle Tabs (Prev / Next)** | `Cmd + Shift + [` / `Cmd + Shift + ]` | `Ctrl + Shift + [` / `Ctrl + Shift + ]` | Works alongside `Ctrl + Tab` and `Ctrl + PageUp / PageDown`. |
-| **Navigate Tabs (Left / Right)**| `Cmd + Option + Left / Right` | `Ctrl + Alt + Left / Right` *(or `Super + Alt`)* | Direct parallel mapping. |
-| **Zoom In** | `Cmd + =` / `Cmd + +` | `Ctrl + =` / `Ctrl + +` *(with or without Shift, or Super)* | Increments font size by +1.0 pt. |
-| **Zoom Out** | `Cmd + -` | `Ctrl + -` / `Ctrl + _` *(with or without Shift, or Super)* | Decrements font size by -1.0 pt. |
-| **Reset Zoom** | `Cmd + 0` | `Ctrl + 0` *(with or without Shift, or Super)* | Resets font size to configured default. |
-| **Open URL / Path Click** | `Cmd + Click` | `Ctrl + Click` *(or `Super + Click`)* | Opens target with `open` (macOS), `xdg-open` (Linux). |
-| **Hover URL Underline** | `Cmd + Mouse Move` | `Ctrl + Mouse Move` *(or `Super + Mouse Move`)* | Shows pointer cursor and URL preview pill. |
-| **Jump to Prompt (Prev / Next)** | `Cmd + Shift + ↑ / ↓` | `Ctrl + Shift + ↑ / ↓` *(or `Super + Shift + ↑ / ↓`)* | Scrolls to the previous / next shell prompt from OSC 133 marks (shell integration). `Cmd + ↑/↓` keeps navigating splits. |
-| **Select Last Command Output** | `Cmd + Shift + O` | `Ctrl + Shift + O` *(or `Super + Shift + O`)* | Selects and copies the output of the last finished command (OSC 133 C..D). Bare `Ctrl+O` is bash operate-and-get-next. |
-| **Terminal Inspector** | `Cmd + Option + I` | `Ctrl + Shift + I` *(or `Super + Alt + I`)* | Debug overlay (bottom-right): grid size, cursor, modes, mouse/keyboard protocols, the cell under the mouse and the last key's bytes. Bare `Ctrl+I` is Tab. |
-| **Select All** | `Cmd + A` | `Ctrl + Shift + A` *(or `Super + A`)* | Selects all scrollback and screen text (then copy with `Cmd+C` / `Ctrl+Shift+C`). Bare `Ctrl+A` is readline beginning-of-line. |
-| **Extend Selection** | `Shift + Click / Drag` | `Shift + Click / Drag` | Moves the nearest end of the current selection to the mouse (the far end stays anchored) and copies it; without a selection it starts a new one. |
-| **Bypass Mouse Reporting** | `Shift + Click / Drag` | `Shift + Click / Drag` | Local selection while an app tracks the mouse; `Cmd`/`Super + Click` still opens links. |
-| **CLI History Search** | `Ctrl + R` *(or `Cmd + R`)* | `Ctrl + R` *(or `Super + R` / `Ctrl + Shift + R`)* | Zero-latency fuzzy history search; preserves vim redo in alternate screen. |
-| **Find in Terminal** | `Cmd + F` | `Ctrl + Shift + F` *(or `Super + F`)* | Regex search box in the top-right corner (smart case, `Ctrl+R` toggles literal). `Enter`/`↑`/`Cmd+G`: older match, `Shift+Enter`/`↓`/`Cmd+Shift+G`: newer. Bare `Ctrl+F` stays readline forward-char. |
-| **Split Pane Right (Vertical)** | `Cmd + D` | `Ctrl + Shift + D` *(or `Super + D`)* | Splits active pane vertically with hairline divider. |
-| **Split Pane Down (Horizontal)** | `Cmd + Shift + D` | `Ctrl + Shift + E` / `Super + Shift + D` / `Ctrl + Alt + D` | Splits active pane horizontally. |
-| **Clear Screen & Scrollback** | `Cmd + K` | `Ctrl + Shift + K` | Clears scrollback history buffer and redraws prompt at top (matches iTerm2/Terminal.app/Ghostty). |
-| **Delete Before Cursor** | `Ctrl + U` | `Ctrl + U` | Deletes text from prompt to cursor (preserves prompt & text after cursor; preserves vim half-page scroll in alt screen). |
-| **Delete After Cursor** | `Ctrl + K` | `Ctrl + K` | Deletes text from cursor to end of command line (`kill-line`). |
-| **Jump Word Backward / Forward** | `Option + Left / Right` | `Ctrl + Left / Right` *(or `Alt + Left / Right`)* | Jumps cursor backward/forward by word (`\x1bb` / `\x1bf`). On macOS, strictly `Option+Arrows` to avoid Mission Control Spaces collision. |
-| **Toggle Split Zoom** | `Cmd + Shift + Enter` | `Ctrl + Shift + Enter` *(or `Super + Shift + Enter`)* | Zooms active split to full tab size and back. |
-| **Equalize Splits** | `Cmd + Option + =` / `Cmd + Ctrl + =` | `Ctrl + Alt + =` *(or `Super + Alt + =`)* | Balances split ratios evenly across pane tree. |
-| **Navigate Splits / Tabs** | `Cmd + Arrows` *(or `Cmd + Option + Arrows`)* | `Ctrl + Alt + Arrows` *(or `Super + Arrows`)* | Directional spatial navigation between splits (cycles tabs at edges). |
-| **Cycle Splits (Prev / Next)** | `Cmd + [` / `Cmd + ]` | `Ctrl + Alt + [` / `Ctrl + Alt + ]` *(or `Super + [` / `]`)* | Cycles focus across split panes in active tab. |
-| **Resize Active Split** | `Cmd + Ctrl + Arrows` | `Super + Ctrl + Arrows` / `Ctrl + Alt + Shift + Arrows` | Dynamically nudges layout tree split ratios. |
-
----
-
-### 3. Implementation Checklist for New Shortcuts
-
-When introducing any new key binding, add it to `src/keymap.rs` (`resolve_char` / `resolve_named`) and execute it in `run_action` / `run_tab_action` in `src/main.rs`; mouse interactions live in `src/main.rs` (encoding in `src/mouse.rs`):
-1. **Define both platforms in the keymap** (`Platform::MacOs` / `Platform::Linux`) and add a case to the keymap tests — both tables are tested on any host.
-2. **Check for PTY collisions**: Verify if the proposed `Ctrl + <Key>` combination emits an ASCII control code (`\x00`..`\x1f`) needed by shell or text editors (vim, nano). If it does, use `Ctrl + Shift` instead.
-3. **Verify UI representation**: If the UI renders a badge or hint (e.g. `src/renderer.rs`), ensure macOS displays `⌘` and Linux displays `^` (for Ctrl) or `Alt+`, and ensure the actual key handler matches the visual symbol.
-4. **Compile verification**:
-   - Check macOS build: `cargo check`
-   - Check Linux build: `cargo check --target x86_64-unknown-linux-gnu`
-
----
-
-## Project Layout
-
-| Module | Responsibility |
-| :--- | :--- |
-| `src/main.rs` | winit event loop, tabs/panes state, shortcut execution, mouse & IME handling, clipboard |
-| `src/keymap.rs` | Pure shortcut resolution and key-to-byte encoding for macOS and Linux, legacy and Kitty keyboard protocol (unit-tested) |
-| `src/mouse.rs` | Mouse reporting encoding (X10 / SGR) for applications that track the mouse |
-| `src/pty.rs` | `openpty` + `fork`/`execve`, PTY reader thread (parses into the grid) |
-| `src/grid.rs` | 12-byte `Cell` (grapheme clusters and image placeholders encoded in `codepoint`), scrollback ring buffer, `vte::Perform` implementation, APC filter for Kitty graphics |
-| `src/renderer.rs` | wgpu pipeline, instance buffer, tab bar, history popup |
-| `src/atlas.rs` | Glyph atlas (R8 + RGBA color emoji), procedural sprites, font fallback chain, CoreText fallback, ligature shaping |
-| `src/shader.wgsl` | Single instanced draw call for all cells |
-| `src/split.rs` | Split-pane layout tree |
-| `src/history.rs` | Shell history search (fzf-style matching) |
-| `src/search.rs` | Find-in-terminal box state and regex matching over a scrollback snapshot |
-| `src/config.rs` | Ghostty-compatible config parsing and themes |
-| `src/macos.rs` | Objective-C FFI (`msg_send!`) for window/vibrancy/dock integration; no-op stubs elsewhere |
-| `src/update.rs` | Auto-update checking, SHA-256 verification, asset download, self-replacement |
-| `src/graphics.rs` | Kitty graphics (transmission, placements, animation, placeholders) and Sixel decoding; per-terminal image store |
-| `src/image_layer.rs` / `src/image.wgsl` | GPU side of inline images: textures and per-placement quads, drawn below or above the cells by z |
-| `src/postfx.rs` | `custom-shader` passes (Shadertoy GLSL compiled through naga) |
-| `src/shell_integration.rs` / `src/shell/` | Automatic shell integration scripts (zsh, bash, fish, nushell, elvish) |
-| `src/x11colors.rs` | X11 color names for OSC color specs |
-| `src/bidi.rs` | Visual order of right-to-left lines (implicit UAX #9) and Arabic contextual forms, applied at draw and hit-test time |
-| `src/hotkey.rs` | Quick Terminal global hotkey outside macOS (X11 key grab) and the `+toggle-quick-terminal` control socket |
-
-## Core Invariants
-
-- **Memory / CPU budget:** target < 15 MB RAM and 0% idle CPU. Never introduce a continuous render loop; keep `ControlFlow::Wait` and redraw only on PTY output, input, or cursor blink.
-- **`Cell` stays exactly 12 bytes** (enforced by a compile-time assert). Pack new attributes into existing bits instead of growing the struct.
-- **No allocation on hot paths:** PTY parsing, scrolling, and per-frame rendering must not allocate. The grid may only allocate on resize or ring-buffer growth.
-- **After `fork()` only async-signal-safe calls** — prepare every `CString`/`Vec` before forking.
-- **Locking:** hold the grid `Mutex` for as short as possible; never perform blocking I/O (PTY writes, subprocesses, file I/O) while holding it.
-- **PTY replies** (DSR, DA, DECRQM, OSC queries) must be pushed to `Grid::response`, never written directly from `Perform` handlers.
-
-## Security Rules
-
-- Sanitize pasted text before sending it to the PTY: strip `ESC` (at least `\x1b[201~`) so clipboard content cannot break out of bracketed paste.
-- Never rewrite the user's shell history files in place: operate on raw bytes (zsh metafied encoding), write to a temp file and `rename` atomically.
-- Pass user/terminal-derived strings to `open` / `xdg-open` as a single argument — never through a shell.
-
-## Workflow
-
-- Before finishing any change, run:
-  - `cargo check` (macOS)
-  - `cargo check --target x86_64-unknown-linux-gnu` (Linux parity)
-  - `cargo test`
-  - `cargo clippy --all-targets` — do not add new warnings.
-- Add unit tests next to the code (`#[cfg(test)] mod tests`) for parser, grid, and keybinding behavior changes; use the existing `feed()` helper in `grid.rs` tests.
-- PTY tests call `openpty`, which the Claude Code sandbox blocks (EPERM); run `cargo test` outside the sandbox.
-- Every new or changed shortcut must also update the Standard Shortcut Matrix above and the README.
-- Commit messages follow Conventional Commits (`feat(scope): ...`, `fix(scope): ...`, `docs(scope): ...`).
+## Workflow & PR Checklist
+1. All keybinding additions must update `src/keymap.rs` for both platforms with dedicated unit tests.
+2. Verification steps:
+   - `cargo check`
+   - `cargo check --target x86_64-unknown-linux-gnu`
+   - `cargo test` (run outside sandbox; PTY tests require `openpty`)
+   - `cargo clippy --all-targets` (zero warnings tolerated)
+3. Conventional Commits format (`feat(scope):`, `fix(scope):`, `docs(scope):`).
