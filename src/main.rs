@@ -3895,12 +3895,12 @@ mod latency_benchmarks {
         {
             use std::ffi::c_void;
             #[link(name = "CoreFoundation", kind = "framework")]
-            extern "C" {
+            unsafe extern "C" {
                 fn CFStringCreateWithCharacters(alloc: *const c_void, chars: *const u16, n: isize) -> *const c_void;
                 fn CFRelease(cf: *const c_void);
             }
             #[link(name = "CoreText", kind = "framework")]
-            extern "C" {
+            unsafe extern "C" {
                 fn CTFontCreateWithName(name: *const c_void, size: f64, matrix: *const c_void) -> *const c_void;
             }
 

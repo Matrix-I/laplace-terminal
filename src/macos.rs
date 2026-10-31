@@ -37,7 +37,7 @@ mod imp {
     }
 
     #[link(name = "objc", kind = "dylib")]
-    extern "C" {
+    unsafe extern "C" {
         fn objc_getClass(name: *const std::ffi::c_char) -> Id;
         fn sel_registerName(name: *const std::ffi::c_char) -> Id;
         fn objc_msgSend();
@@ -49,7 +49,7 @@ mod imp {
         fn objc_registerClassPair(cls: Id);
     }
 
-    extern "C" {
+    unsafe extern "C" {
         fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
     }
 
@@ -68,7 +68,7 @@ mod imp {
     type EventHandler = extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32;
 
     #[link(name = "Carbon", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn EnableSecureEventInput() -> i32;
         fn DisableSecureEventInput() -> i32;
         fn GetApplicationEventTarget() -> *mut c_void;
@@ -136,12 +136,12 @@ mod imp {
     }
 
     #[link(name = "AppKit", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn NSBeep();
     }
 
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGEventSourceFlagsState(state_id: i32) -> u64;
     }
 
@@ -186,39 +186,39 @@ mod imp {
     /// `msg_send!(receiver, c"selector:", arg: Type, ... => ReturnType)`.
     /// Must be used inside `unsafe`: the signature has to match the method.
     macro_rules! msg_send {
-        ($recv:expr, $sel:expr $(, $arg:expr => $ty:ty)* ; -> $ret:ty) => {{
+        ($recv:expr_2021, $sel:expr_2021 $(, $arg:expr_2021 => $ty:ty)* ; -> $ret:ty) => {{
             let f: unsafe extern "C" fn(Id, Id $(, $ty)*) -> $ret =
                 std::mem::transmute(objc_msgSend as *const ());
             f($recv, sel($sel) $(, $arg)*)
         }};
-        ($recv:expr, $sel:expr $(, $arg:expr => $ty:ty)*) => {
+        ($recv:expr_2021, $sel:expr_2021 $(, $arg:expr_2021 => $ty:ty)*) => {
             msg_send!($recv, $sel $(, $arg => $ty)* ; -> ())
         };
     }
 
     /// Send a message that returns an object; `None` for nil.
-    unsafe fn send_id(receiver: Id, selector: &CStr) -> Option<Id> {
+    unsafe fn send_id(receiver: Id, selector: &CStr) -> Option<Id> { unsafe {
         let obj = msg_send!(receiver, selector; -> Id);
         (!obj.is_null()).then_some(obj)
-    }
+    }}
 
-    unsafe fn responds_to(obj: Id, selector: &CStr) -> bool {
+    unsafe fn responds_to(obj: Id, selector: &CStr) -> bool { unsafe {
         msg_send!(obj, c"respondsToSelector:", sel(selector) => Id; -> bool)
-    }
+    }}
 
-    unsafe fn ns_string(s: &str) -> Option<Id> {
+    unsafe fn ns_string(s: &str) -> Option<Id> { unsafe {
         let c = std::ffi::CString::new(s).ok()?;
         let obj = msg_send!(class(c"NSString")?, c"stringWithUTF8String:", c.as_ptr() => *const std::ffi::c_char; -> Id);
         (!obj.is_null()).then_some(obj)
-    }
+    }}
 
-    unsafe fn ns_string_to_string(ns_str: Id) -> Option<String> {
+    unsafe fn ns_string_to_string(ns_str: Id) -> Option<String> { unsafe {
         let utf8_ptr = msg_send!(ns_str, c"UTF8String"; -> *const std::ffi::c_char);
         if utf8_ptr.is_null() {
             return None;
         }
         std::ffi::CStr::from_ptr(utf8_ptr).to_str().ok().map(|s| s.to_string())
-    }
+    }}
 
     /// Read plain text directly from NSPasteboard without thread spawning or pbpaste subprocess.
     pub fn clipboard_string() -> Option<String> {
@@ -251,12 +251,12 @@ mod imp {
         }
     }
 
-    unsafe fn shared_application() -> Option<Id> {
+    unsafe fn shared_application() -> Option<Id> { unsafe {
         send_id(class(c"NSApplication")?, c"sharedApplication")
-    }
+    }}
 
     /// Call `f` for each element of an `NSArray`.
-    unsafe fn for_each_in_array(array: Id, mut f: impl FnMut(Id)) {
+    unsafe fn for_each_in_array(array: Id, mut f: impl FnMut(Id)) { unsafe {
         let count = msg_send!(array, c"count"; -> usize);
         for i in 0..count {
             let obj = msg_send!(array, c"objectAtIndex:", i => usize; -> Id);
@@ -264,7 +264,7 @@ mod imp {
                 f(obj);
             }
         }
-    }
+    }}
 
     fn ns_window_of(window: &Window) -> Option<(Id, Id)> {
         let handle = window.window_handle().ok()?;
@@ -277,7 +277,7 @@ mod imp {
 
     /// Return freed heap pages to the OS (keeps idle RSS low after closing tabs).
     pub fn release_free_memory() {
-        extern "C" {
+        unsafe extern "C" {
             fn mi_collect(force: bool);
         }
         unsafe {
@@ -384,7 +384,7 @@ mod imp {
         NSRect { x, y, w, h }
     }
 
-    unsafe fn toggle_window_zoom(this: Id) {
+    unsafe fn toggle_window_zoom(this: Id) { unsafe {
         let screen = send_id(this, c"screen").or_else(|| {
             let sc_cls = class(c"NSScreen")?;
             send_id(sc_cls, c"mainScreen")
@@ -422,9 +422,9 @@ mod imp {
             map.insert(key, curr_frame);
             msg_send!(this, c"setFrame:display:animate:", visible_frame => NSRect, true => bool, true => bool);
         }
-    }
+    }}
 
-    unsafe fn is_in_window_header(this: Id, event: Id) -> bool {
+    unsafe fn is_in_window_header(this: Id, event: Id) -> bool { unsafe {
         let loc = msg_send!(event, c"locationInWindow"; -> NSPoint);
         let frame = msg_send!(this, c"frame"; -> NSRect);
 
@@ -447,7 +447,7 @@ mod imp {
         };
 
         loc.y >= header_bottom && loc.y <= frame.h + 10.0
-    }
+    }}
 
     extern "C" fn custom_zoom(this: Id, _cmd: Id, _sender: Id) {
         unsafe {
@@ -493,7 +493,7 @@ mod imp {
         }
     }
 
-    unsafe fn install_header_double_click_hook(ns_window: Id) {
+    unsafe fn install_header_double_click_hook(ns_window: Id) { unsafe {
         if HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -537,10 +537,10 @@ mod imp {
             };
             ORIGINAL_ZOOM.store(prev as *mut c_void, Ordering::SeqCst);
         }
-    }
+    }}
 
     /// Set the window and CAMetalLayer color space so Metal outputs sRGB or Display P3.
-    unsafe fn apply_color_space(ns_view: Id, ns_window: Id, space: ColorSpace) {
+    unsafe fn apply_color_space(ns_view: Id, ns_window: Id, space: ColorSpace) { unsafe {
         let Some(cls) = class(c"NSColorSpace") else { return };
         let ctor = match space {
             ColorSpace::DisplayP3 => c"displayP3ColorSpace",
@@ -565,9 +565,9 @@ mod imp {
                 }
             });
         }
-    }
+    }}
 
-    unsafe fn apply_layer_colorspace(layer: Id, cg_cs: Id) {
+    unsafe fn apply_layer_colorspace(layer: Id, cg_cs: Id) { unsafe {
         for setter in [c"setColorspace:", c"setColorSpace:"] {
             if responds_to(layer, setter) {
                 msg_send!(layer, setter, cg_cs => Id);
@@ -576,10 +576,10 @@ mod imp {
         if let Some(sublayers) = send_id(layer, c"sublayers") {
             for_each_in_array(sublayers, |sub| apply_layer_colorspace(sub, cg_cs));
         }
-    }
+    }}
 
     /// Background blur: an NSVisualEffectView behind the window content.
-    unsafe fn setup_visual_effect_view(ns_window: Id) {
+    unsafe fn setup_visual_effect_view(ns_window: Id) { unsafe {
         let Some(content_view) = send_id(ns_window, c"contentView") else { return };
         // Avoid duplicate effect views if config is re-applied to the same window
         if let Some(effect_cls) = class(c"NSVisualEffectView") {
@@ -616,10 +616,10 @@ mod imp {
             effect_view => Id, -1 => i64, std::ptr::null_mut() => Id
         );
         msg_send!(effect_view, c"release");
-    }
+    }}
 
     /// Remove any attached NSVisualEffectView when blur is disabled or opacity is 1.0.
-    unsafe fn remove_visual_effect_view(ns_window: Id) {
+    unsafe fn remove_visual_effect_view(ns_window: Id) { unsafe {
         let Some(content_view) = send_id(ns_window, c"contentView") else { return };
         let Some(effect_cls) = class(c"NSVisualEffectView") else { return };
         let mut to_remove: Vec<Id> = Vec::new();
@@ -633,7 +633,7 @@ mod imp {
         for view in to_remove {
             msg_send!(view, c"removeFromSuperview");
         }
-    }
+    }}
 
     static REOPEN_PROXY: parking_lot::Mutex<Option<winit::event_loop::EventLoopProxy<crate::AppEvent>>> =
         parking_lot::Mutex::new(None);

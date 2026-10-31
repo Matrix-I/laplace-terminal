@@ -1963,18 +1963,18 @@ fn macos_coretext_rasterize(_buf: &mut [u8], _cw: u32, _ch_px: u32, _baseline: i
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn cached_ct_base_font(is_emoji: bool, size: f64) -> *const std::ffi::c_void {
+unsafe fn cached_ct_base_font(is_emoji: bool, size: f64) -> *const std::ffi::c_void { unsafe {
     use std::ffi::c_void;
     use std::ptr;
 
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CFStringCreateWithCharacters(alloc: *const c_void, chars: *const u16, n: isize) -> *const c_void;
         fn CFRetain(cf: *const c_void) -> *const c_void;
         fn CFRelease(cf: *const c_void);
     }
     #[link(name = "CoreText", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CTFontCreateWithName(name: *const c_void, size: f64, matrix: *const c_void) -> *const c_void;
     }
 
@@ -2009,7 +2009,7 @@ unsafe fn cached_ct_base_font(is_emoji: bool, size: f64) -> *const std::ffi::c_v
         }
     }
     CFRetain(font)
-}
+}}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_coretext_rasterize(
@@ -2052,7 +2052,7 @@ pub(crate) fn macos_coretext_rasterize(
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CFStringCreateWithCharacters(
             alloc: *const c_void,
             chars: *const u16,
@@ -2064,7 +2064,7 @@ pub(crate) fn macos_coretext_rasterize(
     }
 
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGColorSpaceCreateDeviceGray() -> *mut c_void;
         fn CGColorSpaceRelease(space: *mut c_void);
         fn CGBitmapContextCreate(
@@ -2085,7 +2085,7 @@ pub(crate) fn macos_coretext_rasterize(
     }
 
     #[link(name = "CoreText", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CTFontCreateWithName(
             name: *const c_void,
             size: f64,
@@ -2301,7 +2301,7 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CFStringCreateWithCharacters(alloc: *const c_void, chars: *const u16, n: isize) -> *const c_void;
         fn CFDictionaryCreate(
             alloc: *const c_void,
@@ -2318,7 +2318,7 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
         static kCFBooleanTrue: *const c_void;
     }
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
         fn CGColorSpaceCreateDeviceGray() -> *mut c_void;
         fn CGContextSetGrayFillColor(c: *mut c_void, gray: f64, alpha: f64);
@@ -2336,7 +2336,7 @@ fn coretext_line(buf: &mut [u8], w: u32, h: u32, px: f32, text: &str, baseline: 
         fn CGContextSetTextPosition(c: *mut c_void, x: f64, y: f64);
     }
     #[link(name = "CoreText", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CTLineCreateWithAttributedString(s: *const c_void) -> *const c_void;
         fn CTLineGetBoundsWithOptions(line: *const c_void, options: usize) -> CGRect;
         fn CTLineDraw(line: *const c_void, ctx: *mut c_void);

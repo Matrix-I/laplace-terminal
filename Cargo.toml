@@ -1,7 +1,7 @@
 [package]
 name = "litty"
 version = "0.6.0"
-edition = "2021"
+edition = "2024"
 description = "Minimal GPU terminal: <50MB RAM, 0% idle CPU (Metal on macOS, Vulkan on Linux)"
 
 [[bin]]
