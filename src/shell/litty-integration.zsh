@@ -15,8 +15,12 @@ _litty_precmd() {
     builtin print -n "\e]133;D;${ret}\a"
     _litty_running=0
   fi
-  builtin print -n "\e]7;file://${HOST}${PWD// /%20}\a"
-  _litty_has title && builtin print -Pn "\e]2;%~\a"
+  local _litty_pwd="${PWD//[[:cntrl:]]/}"
+  builtin print -rn -- $'\e]7;file://'"${HOST//[[:cntrl:]]/}${_litty_pwd// /%20}"$'\a'
+  if _litty_has title; then
+    local _litty_title="${(%):-%~}"
+    builtin print -rn -- $'\e]2;'"${_litty_title//[[:cntrl:]]/}"$'\a'
+  fi
   _litty_has cursor && builtin print -n "\e[5 q"
   # Prompt start / end marks, re-added whenever a theme rebuilds PS1.
   [[ $PS1 == *$'\e]133;A'* ]] || PS1=$'%{\e]133;A\a%}'"$PS1"

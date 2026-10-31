@@ -85,7 +85,7 @@ const API_RELEASES_URL: &str = "https://api.github.com/repos/Matrix-I/litty-term
 const WEB_LATEST_URL: &str = "https://github.com/Matrix-I/litty-terminal/releases/latest";
 const WEB_TAG_PREFIX: &str = "https://github.com/Matrix-I/litty-terminal/releases/tag/";
 const WEB_DOWNLOAD_PREFIX: &str = "https://github.com/Matrix-I/litty-terminal/releases/download/";
-const SUMS_NAME: &str = "SHA256SUMS.txt";
+pub(crate) const SUMS_NAME: &str = "SHA256SUMS.txt";
 
 /// Path to cache directory `~/.cache/litty`.
 fn cache_dir() -> PathBuf {
@@ -421,7 +421,9 @@ fn parse_release(v: &Json) -> Option<ReleaseInfo> {
                     download_url: a
                         .get("browser_download_url")?
                         .as_str()
-                        .filter(|u| u.starts_with("https://"))?
+                        // Release assets are served from github.com only; anything
+                        // else (look-alike hosts included) is ignored.
+                        .filter(|u| u.starts_with("https://github.com/"))?
                         .to_string(),
                 })
             })
@@ -433,7 +435,7 @@ fn parse_release(v: &Json) -> Option<ReleaseInfo> {
 
 /// Parse an API response: `/releases/latest` (one object) for `stable`, or `/releases`
 /// (a list, prereleases included) for `tip`, where the highest version wins.
-fn parse_release_json(body: &str, channel: AutoUpdateChannel) -> Result<ReleaseInfo, String> {
+pub(crate) fn parse_release_json(body: &str, channel: AutoUpdateChannel) -> Result<ReleaseInfo, String> {
     let json = Json::parse(body)?;
     match channel {
         AutoUpdateChannel::Stable => {
@@ -517,6 +519,7 @@ fn fetch_latest_release_redirect() -> Result<ReleaseInfo, String> {
     let assets = platform_asset_candidates()
         .into_iter()
         .chain([SUMS_NAME.to_string()])
+        .chain(SIG_NAMES.iter().map(|s| (*s).to_string()))
         .map(|name| ReleaseAsset { download_url: format!("{WEB_DOWNLOAD_PREFIX}{tag_name}/{name}"), name })
         .collect();
 
@@ -719,98 +722,103 @@ fn verify_checksum(sums: &str, asset_name: &str, downloaded_file: &Path) -> Resu
     Ok(())
 }
 
-/// Pinned public key for Minisign verification.
-pub const PINNED_PUBKEY: &str = "RWTPtQ8tZ89sE7J9HqZqKj3j2t1r8w7x6y5z4a3b2c1d0e9f8g7h6i";
+/// Release signing keys, baked in at build time (never read from the runtime
+/// environment, where any process that can set variables could swap them):
+///
+/// ```text
+/// LITTY_MINISIGN_PUBKEY=RWQ...  LITTY_GPG_FINGERPRINT=ABCD...  cargo build --release
+/// ```
+///
+/// A build without a key cannot verify releases signed with that tool and
+/// refuses to install them (fail closed).
+pub const MINISIGN_PUBKEY: Option<&str> = option_env!("LITTY_MINISIGN_PUBKEY");
+/// Full 40-hex-digit fingerprint of the release GPG key (spaces allowed).
+pub const GPG_FINGERPRINT: Option<&str> = option_env!("LITTY_GPG_FINGERPRINT");
+
+/// Signature assets looked for next to `SHA256SUMS.txt`, in order of preference.
+const SIG_NAMES: [&str; 3] = ["SHA256SUMS.txt.minisig", "SHA256SUMS.txt.sig", "SHA256SUMS.txt.asc"];
+
+fn normalize_fingerprint(fpr: &str) -> String {
+    fpr.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_uppercase()
+}
+
+/// The release's signature over `SHA256SUMS.txt`: one this build has a pinned
+/// key for if possible, else any (which then fails verification, closed).
+fn signature_asset(release: &ReleaseInfo) -> Option<&ReleaseAsset> {
+    let has_key = |name: &str| {
+        if name.ends_with(".minisig") {
+            MINISIGN_PUBKEY.is_some()
+        } else {
+            GPG_FINGERPRINT.is_some()
+        }
+    };
+    let find = |name: &str| release.assets.iter().find(|a| a.name == name);
+    SIG_NAMES.iter().filter(|n| has_key(n)).find_map(|n| find(n)).or_else(|| SIG_NAMES.iter().find_map(|n| find(n)))
+}
 
 /// Cryptographic signature verification (Minisign or GPG) with key pinning.
-fn verify_signature(sums_path: &Path, sig_path: &Path) -> Result<(), String> {
+/// Fails closed: a missing verifier, a missing pinned key or an unknown
+/// signature type is an error, never a silent pass.
+pub(crate) fn verify_signature(sums_path: &Path, sig_path: &Path) -> Result<(), String> {
     let ext = sig_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let is_minisig = ext.eq_ignore_ascii_case("minisig");
-    let is_gpg = ext.eq_ignore_ascii_case("sig") || ext.eq_ignore_ascii_case("asc");
+    let find_bin = |name: &str| {
+        ["/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/"]
+            .into_iter()
+            .map(|dir| format!("{dir}{name}"))
+            .find(|b| Path::new(b).is_file())
+    };
 
-    let minisign_bin = ["/usr/bin/minisign", "/usr/local/bin/minisign", "/opt/homebrew/bin/minisign"]
-        .into_iter()
-        .find(|b| Path::new(b).exists());
-
-    let gpg_bin = ["/usr/bin/gpg", "/usr/local/bin/gpg", "/opt/homebrew/bin/gpg"]
-        .into_iter()
-        .find(|b| Path::new(b).exists());
-
-    if is_minisig {
-        if let Some(bin) = minisign_bin {
-            let pubkey = std::env::var("LITTY_PUBKEY")
-                .or_else(|_| std::env::var("LAPLACE_PUBKEY"))
-                .unwrap_or_else(|_| PINNED_PUBKEY.to_string());
-            let mut cmd = Command::new(bin);
-            cmd.args(["-V", "-m"]).arg(sums_path).arg("-x").arg(sig_path);
-            if !pubkey.is_empty() {
-                cmd.arg("-P").arg(&pubkey);
-            }
-            match cmd.status() {
-                Ok(status) if status.success() => Ok(()),
-                Ok(status) => Err(format!(
-                    "minisign signature verification failed (exit code: {:?})",
-                    status.code()
-                )),
-                Err(e) => Err(format!("failed to execute minisign: {e}")),
-            }
-        } else {
-            eprintln!("litty: warning: minisign signature file present but minisign is not installed to verify it");
-            Ok(())
+    if ext.eq_ignore_ascii_case("minisig") {
+        let pubkey = MINISIGN_PUBKEY
+            .filter(|k| !k.trim().is_empty())
+            .ok_or("this build has no pinned minisign key; refusing an unverifiable update")?;
+        let bin = find_bin("minisign")
+            .ok_or("minisign is required to verify this update (install it, e.g. `brew install minisign`)")?;
+        let status = Command::new(bin)
+            .args(["-V", "-q", "-m"])
+            .arg(sums_path)
+            .arg("-x")
+            .arg(sig_path)
+            .arg("-P")
+            .arg(pubkey.trim())
+            .status()
+            .map_err(|e| format!("failed to execute minisign: {e}"))?;
+        if !status.success() {
+            return Err(format!("minisign signature verification failed (exit code: {:?})", status.code()));
         }
-    } else if is_gpg {
-        if let Some(bin) = gpg_bin {
-            let mut cmd = Command::new(bin);
-            cmd.args(["--verify"]).arg(sig_path).arg(sums_path);
-            match cmd.status() {
-                Ok(status) if status.success() => Ok(()),
-                Ok(status) => Err(format!(
-                    "GPG signature verification failed (exit code: {:?})",
-                    status.code()
-                )),
-                Err(e) => Err(format!("failed to execute GPG: {e}")),
-            }
-        } else {
-            eprintln!("litty: warning: GPG signature file present but gpg is not installed to verify it");
-            Ok(())
-        }
-    } else {
-        if let Some(bin) = minisign_bin {
-            let pubkey = std::env::var("LITTY_PUBKEY")
-                .or_else(|_| std::env::var("LAPLACE_PUBKEY"))
-                .unwrap_or_else(|_| PINNED_PUBKEY.to_string());
-            let mut cmd = Command::new(bin);
-            cmd.args(["-V", "-m"]).arg(sums_path).arg("-x").arg(sig_path);
-            if !pubkey.is_empty() {
-                cmd.arg("-P").arg(&pubkey);
-            }
-            match cmd.status() {
-                Ok(status) if status.success() => return Ok(()),
-                Ok(status) => {
-                    return Err(format!(
-                        "minisign signature verification failed (exit code: {:?})",
-                        status.code()
-                    ));
-                }
-                Err(e) => return Err(format!("failed to execute minisign: {e}")),
-            }
-        }
-        if let Some(bin) = gpg_bin {
-            let mut cmd = Command::new(bin);
-            cmd.args(["--verify"]).arg(sig_path).arg(sums_path);
-            match cmd.status() {
-                Ok(status) if status.success() => return Ok(()),
-                Ok(status) => {
-                    return Err(format!(
-                        "GPG signature verification failed (exit code: {:?})",
-                        status.code()
-                    ));
-                }
-                Err(e) => return Err(format!("failed to execute GPG: {e}")),
-            }
-        }
-        eprintln!("litty: warning: signature file present but neither minisign nor gpg is installed to verify it");
         Ok(())
+    } else if ext.eq_ignore_ascii_case("sig") || ext.eq_ignore_ascii_case("asc") {
+        let pinned = GPG_FINGERPRINT
+            .map(normalize_fingerprint)
+            .filter(|f| f.len() == 40 && f.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or("this build has no pinned GPG key fingerprint; refusing an unverifiable update")?;
+        let bin = find_bin("gpg").ok_or("gpg is required to verify this update")?;
+        let out = Command::new(bin)
+            .args(["--batch", "--no-tty", "--status-fd", "1", "--verify"])
+            .arg(sig_path)
+            .arg(sums_path)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("failed to execute GPG: {e}"))?;
+        // A good signature from *any* key in the user's keyring is not enough:
+        // require VALIDSIG from the pinned key (signing subkey or primary).
+        let status = String::from_utf8_lossy(&out.stdout);
+        let pinned_ok = status.lines().any(|line| {
+            let mut f = line.split_whitespace();
+            f.next() == Some("[GNUPG:]")
+                && f.next() == Some("VALIDSIG")
+                && line.split_whitespace().skip(2).any(|tok| normalize_fingerprint(tok) == pinned)
+        });
+        if !out.status.success() || !pinned_ok {
+            return Err(format!(
+                "GPG signature verification failed (exit code: {:?}, pinned key {})",
+                out.status.code(),
+                if pinned_ok { "matched" } else { "not matched" }
+            ));
+        }
+        Ok(())
+    } else {
+        Err(format!("unsupported signature file `{}`", sig_path.display()))
     }
 }
 
@@ -956,7 +964,7 @@ impl UpdateLock {
 
 /// Download (or reuse) the release asset for `candidates` into `dir/<tag>/` and verify it.
 /// Returns the verified file and its asset name. The caller holds the `UpdateLock`.
-fn download_and_verify_in(
+pub(crate) fn download_and_verify_in(
     dir: &Path,
     release: &ReleaseInfo,
     candidates: &[String],
@@ -964,22 +972,19 @@ fn download_and_verify_in(
     let release_dir = dir.join(&release.tag_name);
     let sums_path = release_dir.join(SUMS_NAME);
 
-    // Reuse a build that an earlier `auto-update = download` run already fetched.
+    // Reuse a build that an earlier `auto-update = download` run already fetched,
+    // but only together with a signature that still verifies.
     if let Ok(sums) = fs::read_to_string(&sums_path) {
         if let Ok(asset) = pick_asset(release, &sums, candidates) {
             let path = release_dir.join(&asset.name);
             if path.is_file() && verify_checksum(&sums, &asset.name, &path).is_ok() {
-                if let Some(sig_asset) = release
-                    .assets
-                    .iter()
-                    .find(|a| a.name == "SHA256SUMS.txt.minisig" || a.name == "SHA256SUMS.txt.sig")
-                {
+                if let Some(sig_asset) = signature_asset(release) {
                     let sig_path = release_dir.join(&sig_asset.name);
                     if sig_path.is_file() {
                         verify_signature(&sums_path, &sig_path)?;
+                        return Ok((path, asset.name.clone()));
                     }
                 }
-                return Ok((path, asset.name.clone()));
             }
         }
     }
@@ -989,18 +994,20 @@ fn download_and_verify_in(
         .iter()
         .find(|a| a.name == SUMS_NAME)
         .ok_or_else(|| format!("release {} does not contain {SUMS_NAME}", release.tag_name))?;
+    // Unsigned releases are refused before anything is downloaded (fail closed).
+    let sig_asset = signature_asset(release).ok_or_else(|| {
+        format!("release {} is not signed (no {SUMS_NAME}.minisig / .sig / .asc); refusing to install it", release.tag_name)
+    })?;
     fs::create_dir_all(&release_dir).map_err(|e| format!("cannot create {}: {e}", release_dir.display()))?;
     download_file(&sums_asset.download_url, &sums_path)?;
     let sums = fs::read_to_string(&sums_path).map_err(|e| format!("cannot read {SUMS_NAME}: {e}"))?;
 
-    if let Some(sig_asset) = release
-        .assets
-        .iter()
-        .find(|a| a.name == "SHA256SUMS.txt.minisig" || a.name == "SHA256SUMS.txt.sig")
-    {
-        let sig_path = release_dir.join(&sig_asset.name);
-        download_file(&sig_asset.download_url, &sig_path)?;
-        verify_signature(&sums_path, &sig_path)?;
+    let sig_path = release_dir.join(&sig_asset.name);
+    download_file(&sig_asset.download_url, &sig_path)?;
+    if let Err(e) = verify_signature(&sums_path, &sig_path) {
+        let _ = fs::remove_file(&sums_path);
+        let _ = fs::remove_file(&sig_path);
+        return Err(e);
     }
 
     let asset = pick_asset(release, &sums, candidates)?;
@@ -1584,10 +1591,8 @@ mod tests {
         fs::write(release_dir.join("litty-test"), b"binary").unwrap();
         fs::write(release_dir.join(SUMS_NAME), format!("{}  litty-test\n", sha256_digest(b"binary"))).unwrap();
 
-        // Asset URLs are unreachable, so success proves the cached copy was used.
-        let (path, name) = download_and_verify_in(&dir, &r, &["litty-test".to_string()]).unwrap();
-        assert_eq!(name, "litty-test");
-        assert_eq!(path, release_dir.join("litty-test"));
+        // Unsigned release in cache must be rejected (fail closed).
+        assert!(download_and_verify_in(&dir, &r, &["litty-test".to_string()]).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1617,35 +1622,11 @@ mod tests {
         fs::write(&minisig_file, b"untrusted comment: signature\nWRONGSIG\n").unwrap();
         fs::write(&gpg_file, b"-----BEGIN PGP SIGNATURE-----\ninvalid\n-----END PGP SIGNATURE-----\n").unwrap();
 
-        let has_minisign = [
-            "/usr/bin/minisign",
-            "/usr/local/bin/minisign",
-            "/opt/homebrew/bin/minisign",
-        ]
-        .iter()
-        .any(|b| Path::new(b).exists());
-
-        let has_gpg = [
-            "/usr/bin/gpg",
-            "/usr/local/bin/gpg",
-            "/opt/homebrew/bin/gpg",
-        ]
-        .iter()
-        .any(|b| Path::new(b).exists());
-
         let res_mini = verify_signature(&sums_file, &minisig_file);
-        if has_minisign {
-            assert!(res_mini.is_err(), "tampered minisign signature must be rejected");
-        } else {
-            assert!(res_mini.is_ok(), "fallback without minisign should return Ok");
-        }
+        assert!(res_mini.is_err(), "tampered or unverifiable minisign signature must be rejected");
 
         let res_gpg = verify_signature(&sums_file, &gpg_file);
-        if has_gpg {
-            assert!(res_gpg.is_err(), "tampered GPG signature must be rejected");
-        } else {
-            assert!(res_gpg.is_ok(), "fallback without gpg should return Ok");
-        }
+        assert!(res_gpg.is_err(), "tampered or unverifiable GPG signature must be rejected");
 
         let _ = fs::remove_dir_all(&dir);
     }

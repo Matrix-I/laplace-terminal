@@ -26,8 +26,9 @@ _litty_prompt_command() {
   local ret=$?
   _litty_armed=
   printf '\e]133;D;%s\a' "$ret"
-  printf '\e]7;file://%s%s\a' "$HOSTNAME" "${PWD// /%20}"
-  _litty_has title && printf '\e]2;%s\a' "${PWD/#$HOME/\~}"
+  local _litty_pwd="${PWD//[[:cntrl:]]/}"
+  printf '\e]7;file://%s%s\a' "${HOSTNAME//[[:cntrl:]]/}" "${_litty_pwd// /%20}"
+  _litty_has title && printf '\e]2;%s\a' "${_litty_pwd/#$HOME/\~}"
   _litty_has cursor && printf '\e[5 q'
   # Prompt start / end marks, re-added whenever something rebuilds PS1.
   [[ $PS1 == *'133;A'* ]] || PS1='\[\e]133;A\a\]'"$PS1"

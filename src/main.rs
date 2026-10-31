@@ -19,6 +19,8 @@ mod postfx;
 mod pty;
 mod renderer;
 mod search;
+#[cfg(test)]
+mod security_poc;
 mod shell_integration;
 mod split;
 mod tab;
@@ -898,12 +900,9 @@ impl App {
                                             s.history_search.close();
                                             s.renderer.invalidate();
                                             if let Some(cmd) = cmd_opt {
-                                                let mut payload = Vec::with_capacity(cmd.len() + 3);
-                                                payload.extend_from_slice(b"\x05\x15");
-                                                payload.extend_from_slice(cmd.as_bytes());
-                                                payload.push(b'\r');
                                                 if let Some(pane) = s.tabs[s.active].active_pane() {
-                                                    pane.pty.write(&payload);
+                                                    let bracketed = pane.grid.lock().bracketed_paste;
+                                                    pane.pty.write(&history_insert_payload(&cmd, true, bracketed));
                                                 }
                                             }
                                             s.window.request_redraw();
@@ -1794,10 +1793,6 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
             let open_path = safe_path_for_linux_open(&path);
             spawn_detached(std::process::Command::new(system_bin("xdg-open")).arg("--").arg(open_path))
         };
-        #[cfg(windows)]
-        let res = std::process::Command::new("cmd")
-            .args(["/c", "start", "", path.to_str().unwrap_or(target)])
-            .spawn();
 
         if let Err(e) = res {
             eprintln!("litty: failed to open path {path:?}: {e}");
@@ -1807,10 +1802,6 @@ fn open_target(target: &str, is_path: bool, cwd: Option<&std::path::Path>) {
         let res = spawn_detached(std::process::Command::new(system_bin("open")).arg("-u").arg(target));
         #[cfg(target_os = "linux")]
         let res = spawn_detached(std::process::Command::new(system_bin("xdg-open")).arg("--").arg(target));
-        #[cfg(windows)]
-        let res = std::process::Command::new("cmd")
-            .args(["/c", "start", "", target])
-            .spawn();
 
         if let Err(e) = res {
             eprintln!("litty: failed to open URL {target}: {e}");
@@ -2861,16 +2852,10 @@ fn handle_history_search_key(s: &mut State, key: &Key, m: keymap::Mods) -> bool 
             let cmd = hs.selected_command().map(str::to_string);
             hs.close();
             if let (Some(cmd), Some(tab)) = (cmd, s.tabs.get(s.active)) {
-                // Ctrl+E Ctrl+U clears the current line before inserting the command;
                 // Enter runs it, Tab leaves it for editing.
-                let mut payload = Vec::with_capacity(cmd.len() + 3);
-                payload.extend_from_slice(b"\x05\x15");
-                payload.extend_from_slice(cmd.as_bytes());
-                if *k == NamedKey::Enter {
-                    payload.push(b'\r');
-                }
                 if let Some(pane) = tab.active_pane() {
-                    pane.pty.write(&payload);
+                    let bracketed = pane.grid.lock().bracketed_paste;
+                    pane.pty.write(&history_insert_payload(&cmd, *k == NamedKey::Enter, bracketed));
                 }
             }
         }
@@ -3304,6 +3289,42 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     payload
 }
 
+/// Bytes that put a history entry on the shell's command line. Ctrl+E Ctrl+U
+/// clears the current line first; `run` appends Enter.
+///
+/// Multi-line entries and control characters are sanitized: when `bracketed` is
+/// true, the command is wrapped in `\x1b[200~...\x1b[201~` (with ESC, C1 CSI,
+/// and non-newline C0/DEL control bytes stripped so a crafted entry cannot break
+/// out of bracketed paste); when `bracketed` is false and `run` is false (Tab /
+/// edit), newlines are flattened to spaces so the shell never executes lines
+/// prematurely.
+fn history_insert_payload(cmd: &str, run: bool, bracketed: bool) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(cmd.len() + 16);
+    payload.extend_from_slice(b"\x05\x15");
+    if bracketed {
+        payload.extend_from_slice(b"\x1b[200~");
+    }
+    let mut buf = [0u8; 4];
+    for ch in cmd.chars() {
+        match ch {
+            '\n' | '\r' if !bracketed && !run => payload.push(b' '),
+            '\n' | '\t' => payload.push(ch as u8),
+            c if c.is_control() || c == '\u{9b}' => {}
+            c => payload.extend_from_slice(c.encode_utf8(&mut buf).as_bytes()),
+        }
+    }
+    if bracketed {
+        payload.extend_from_slice(b"\x1b[201~");
+    }
+    if run {
+        payload.push(b'\r');
+    }
+    payload
+}
+
+static IN_FLIGHT_PASTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CONCURRENT_PASTES: usize = 2;
+
 fn paste_from_clipboard() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
@@ -3312,39 +3333,96 @@ fn paste_from_clipboard() -> Option<String> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    let cmds: &'static [(&'static str, &'static [&'static str])] = &[("/usr/bin/pbpaste", &[])];
+    #[cfg(not(target_os = "macos"))]
+    let cmds: &'static [(&'static str, &'static [&'static str])] = &[
+        ("wl-paste", &["-n"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["-ob"]),
+    ];
+    read_clipboard_with(cmds)
+}
+
+/// Run the clipboard helpers in order on a worker thread and return the first
+/// successful output, waiting at most 100ms and killing any hung child process.
+fn read_clipboard_with(cmds: &'static [(&'static str, &'static [&'static str])]) -> Option<String> {
+    if IN_FLIGHT_PASTES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONCURRENT_PASTES {
+        IN_FLIGHT_PASTES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return None;
+    }
     let (tx, rx) = std::sync::mpsc::channel();
-    let _ = std::thread::Builder::new()
+    if std::thread::Builder::new()
         .name("litty-clipboard-paste".into())
         .stack_size(128 * 1024)
         .spawn(move || {
+            struct Guard;
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    IN_FLIGHT_PASTES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = Guard;
+            use std::io::Read;
             use std::process::Stdio;
+            use std::time::{Duration, Instant};
 
-            #[cfg(target_os = "macos")]
-            let cmds: &[(&str, &[&str])] = &[("/usr/bin/pbpaste", &[])];
-            #[cfg(not(target_os = "macos"))]
-            let cmds: &[(&str, &[&str])] = &[
-                ("wl-paste", &["-n"]),
-                ("xclip", &["-selection", "clipboard", "-o"]),
-                ("xsel", &["-ob"]),
-            ];
-
+            let deadline = Instant::now() + Duration::from_millis(95);
             for (bin, args) in cmds {
-                if let Ok(out) = clipboard_command(bin)
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let Ok(mut child) = clipboard_command(bin)
                     .args(*args)
                     .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
                     .stderr(Stdio::null())
-                    .output()
-                {
-                    if out.status.success() {
-                        if let Ok(s) = String::from_utf8(out.stdout) {
-                            let _ = tx.send(Some(s));
-                            return;
+                    .spawn()
+                else {
+                    continue;
+                };
+                let mut stdout = child.stdout.take();
+                let mut exited_ok = false;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            exited_ok = status.success();
+                            break;
+                        }
+                        Ok(None) => {
+                            if Instant::now() >= deadline {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
+                }
+                if exited_ok {
+                    if let Some(out) = stdout.take() {
+                        let mut buf = Vec::new();
+                        if out.take(16 << 20).read_to_end(&mut buf).is_ok() {
+                            if let Ok(s) = String::from_utf8(buf) {
+                                let _ = tx.send(Some(s));
+                                return;
+                            }
                         }
                     }
                 }
             }
             let _ = tx.send(None);
-        });
+        })
+        .is_err()
+    {
+        IN_FLIGHT_PASTES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return None;
+    }
 
     rx.recv_timeout(std::time::Duration::from_millis(100)).ok().flatten()
 }

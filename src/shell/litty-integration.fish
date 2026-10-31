@@ -30,7 +30,8 @@ function __litty_prompt_start --on-event fish_prompt
         printf '\e]133;D;%s\a' $ret
         set -e __litty_running
     end
-    printf '\e]7;file://%s%s\a' (prompt_hostname) (string replace -a ' ' '%20' -- $PWD)
+    set -l _litty_pwd (string replace -ra '[[:cntrl:]]' '' -- $PWD)
+    printf '\e]7;file://%s%s\a' (string replace -ra '[[:cntrl:]]' '' -- (prompt_hostname)) (string replace -a ' ' '%20' -- $_litty_pwd)
     __litty_has cursor; and printf '\e[5 q'
     printf '\e]133;A\a'
 end

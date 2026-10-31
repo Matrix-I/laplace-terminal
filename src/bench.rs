@@ -225,7 +225,7 @@ pub fn run_ram_benchmark_thread(proxy: EventLoopProxy<AppEvent>) {
                 metrics.after_cleanup_rss_mb, metrics.after_cleanup_footprint_mb,
                 metrics.leak_delta_footprint_mb, metrics.passed
             );
-            let _ = std::fs::write("/tmp/litty_ram_bench.json", json_str);
+            let _ = write_bench_report(std::path::Path::new("/tmp/litty_ram_bench.json"), &json_str);
 
             println!("{bold}{cyan}=================================================================={reset}\n");
 
@@ -233,6 +233,30 @@ pub fn run_ram_benchmark_thread(proxy: EventLoopProxy<AppEvent>) {
             let _ = proxy.send_event(AppEvent::BenchAction(BenchCommand::Exit));
         })
         .expect("spawn ram bench thread");
+}
+
+/// Write the RAM benchmark report read by `scripts/pre-release-check.sh`.
+/// Refuses to follow symlinks (`O_NOFOLLOW`) or overwrite pre-planted files
+/// (`create_new(true)` after unlinking any existing entry).
+pub(crate) fn write_bench_report(path: &std::path::Path, json: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refusing to write benchmark report through a symlink",
+            ));
+        }
+        let _ = std::fs::remove_file(path);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(json.as_bytes())
 }
 
 /// Run interactive latency benchmarks:

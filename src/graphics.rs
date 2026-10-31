@@ -10,9 +10,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Decoded images kept per terminal, in bytes of RGBA; the oldest go first.
-const STORE_LIMIT: usize = 64 << 20;
+pub(crate) const STORE_LIMIT: usize = 64 << 20;
 /// Largest image accepted, per side.
 const MAX_SIDE: u32 = 8192;
+/// Largest decoded image, in pixels: its RGBA must fit in the store.
+const MAX_PIXELS: usize = STORE_LIMIT / 4;
+/// Regular placements kept per terminal; the oldest go first.
+const MAX_PLACEMENTS: usize = 4096;
+/// Virtual (`U=1`) placements kept per terminal; the oldest go first.
+const MAX_VIRTUALS: usize = 1024;
 /// Maximum number of additional animation frames per image.
 const MAX_ANIMATION_FRAMES: usize = 256;
 /// Maximum bytes allocated to a single animated image.
@@ -243,6 +249,11 @@ impl Store {
     pub fn insert(&mut self, id: u32, width: u32, height: u32, rgba: Vec<u8>) -> u32 {
         let id = if id == 0 { self.auto_id() } else { id };
         self.remove_image(id, false);
+        // Reject a single root frame above the store limit up front without
+        // wiping existing images or converting `Vec<u8>` into `Arc<[u8]>`.
+        if rgba.len() > STORE_LIMIT {
+            return id;
+        }
         self.bytes += rgba.len();
         self.images.insert(id, Image::new(width, height, rgba));
         self.order.push(id);
@@ -250,9 +261,10 @@ impl Store {
         id
     }
 
-    /// Over the limit: evict the oldest images (and their placements).
+    /// Over the limit: evict the oldest images (and their placements). The
+    /// newest image goes too when it alone exceeds the limit.
     fn evict(&mut self) {
-        while self.bytes > STORE_LIMIT && self.order.len() > 1 {
+        while self.bytes > STORE_LIMIT && !self.order.is_empty() {
             let oldest = self.order[0];
             self.remove_image(oldest, true);
         }
@@ -426,12 +438,19 @@ impl Store {
         if p.placement_id != 0 {
             self.placements.retain(|q| !(q.image_id == p.image_id && q.placement_id == p.placement_id));
         }
+        if self.placements.len() >= MAX_PLACEMENTS {
+            // Drop the oldest in one batch so a flood stays amortized O(1).
+            self.placements.drain(..MAX_PLACEMENTS / 8);
+        }
         self.placements.push(p);
     }
 
     /// Add a virtual placement, replacing one with the same image and placement id.
     pub fn place_virtual(&mut self, v: VirtualPlacement) {
         self.virtuals.retain(|q| !(q.image_id == v.image_id && q.placement_id == v.placement_id));
+        if self.virtuals.len() >= MAX_VIRTUALS {
+            self.virtuals.drain(..MAX_VIRTUALS / 8);
+        }
         self.virtuals.push(v);
     }
 
@@ -798,59 +817,125 @@ fn is_temp_dir(dir: &std::path::Path) -> bool {
     })
 }
 
+/// The one reply for every failed `t=f` / `t=t` read. Distinct errors
+/// (`ENOENT` vs `EPERM` vs `EINVAL`) let any program that can print to the
+/// terminal probe which private files exist (CWE-200).
+const FILE_DENIED: &str = "EPERM:access denied";
+
+/// Resolve `.` and `..` without touching the filesystem.
+fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 fn is_sensitive_path(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy();
     for c in path.components() {
         let name = c.as_os_str().to_string_lossy();
         if name.starts_with('.') && name != "." && name != ".." {
             return true;
         }
     }
-    path_str.starts_with("/etc")
-        || path_str.starts_with("/private/etc")
-        || path_str.starts_with("/dev")
-        || path_str.starts_with("/proc")
-        || path_str.starts_with("/sys")
-        || path_str.starts_with("/var/root")
-        || path_str.starts_with("/root")
+    // APFS and HFS+ are case-insensitive by default: `/ETC/hosts` is `/etc/hosts`.
+    let path_str = if cfg!(target_os = "macos") {
+        path.to_string_lossy().to_lowercase()
+    } else {
+        path.to_string_lossy().into_owned()
+    };
+    let under = |prefix: &str| {
+        path_str.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    if ["/etc", "/private/etc", "/dev", "/proc", "/sys", "/var/root", "/root", "/private/var/root"]
+        .into_iter()
+        .any(under)
+    {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        // Keychains, cookies, mail, messages and app containers.
+        if ["/library/keychains", "/private/var/db"].into_iter().any(under) {
+            return true;
+        }
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let lib = std::path::Path::new(&home).join("Library").to_string_lossy().to_lowercase();
+            if under(&lib) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Read a `t=f` (file) or `t=t` (temporary file) transmission. Every
+/// failure, including a missing file, returns [`FILE_DENIED`].
+fn read_file_medium(c: &KittyCommand, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let denied = || FILE_DENIED.to_string();
+    let path_str = String::from_utf8(raw).map_err(|_| denied())?;
+    let path = std::path::Path::new(&path_str);
+    // A relative path would resolve against Litty's own working directory.
+    if !path.is_absolute() {
+        return Err(denied());
+    }
+    // Reject sensitive locations before any filesystem access, so that the
+    // answer cannot depend on whether the file exists.
+    let lexical = lexical_normalize(path);
+    if c.medium == b'f' && is_sensitive_path(&lexical) {
+        return Err(denied());
+    }
+    let canonical = path.canonicalize().map_err(|_| denied())?;
+    if c.medium == b't' {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !file_name.contains("tty-graphics-protocol")
+            || !path.parent().is_some_and(is_temp_dir)
+            || !canonical.parent().is_some_and(is_temp_dir)
+        {
+            return Err(denied());
+        }
+    } else if is_sensitive_path(&canonical) {
+        return Err(denied());
+    }
+    // O_NOFOLLOW: the canonical path has no symlinks, so one appearing now is a
+    // swap. O_NONBLOCK: never hang on a FIFO. The type and size are checked on
+    // the opened descriptor, not on the path (no TOCTOU window).
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&canonical)
+        .map_err(|_| denied())?;
+    let meta = file.metadata().map_err(|_| denied())?;
+    if !meta.is_file() || meta.len() > STORE_LIMIT as u64 {
+        return Err(denied());
+    }
+    let data = read_range(file, c.offset, c.size).map_err(|_| denied())?;
+    // Temporary files are deleted once read, but only verified temp files.
+    if c.medium == b't' {
+        let _ = std::fs::remove_file(&canonical);
+    }
+    Ok(data)
 }
 
 /// Decode a transmission into `(width, height, rgba)`.
-fn decode_kitty(c: &KittyCommand, payload: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+pub(crate) fn decode_kitty(c: &KittyCommand, payload: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    if matches!(c.format, 24 | 32) {
+        let (w, h) = (c.width, c.height);
+        if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || (w as usize) * (h as usize) > MAX_PIXELS {
+            return Err("EINVAL:bad image size".into());
+        }
+    }
     let raw = base64_decode(payload).ok_or("EINVAL:bad base64")?;
     let data = match c.medium {
         b'd' => raw,
-        b'f' | b't' => {
-            let path_str = String::from_utf8(raw).map_err(|_| "EINVAL:bad path")?;
-            let path = std::path::Path::new(&path_str);
-            let canonical = path.canonicalize().map_err(|_| "ENOENT:file not found")?;
-
-            if c.medium == b't' {
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let parent = path.parent();
-                let canonical_parent = canonical.parent();
-                if !file_name.contains("tty-graphics-protocol")
-                    || !parent.is_some_and(is_temp_dir)
-                    || !canonical_parent.is_some_and(is_temp_dir)
-                {
-                    return Err("EPERM:temporary file must be in temporary directory".into());
-                }
-            } else if is_sensitive_path(&canonical) {
-                return Err("EPERM:access denied".into());
-            }
-
-            let meta = std::fs::metadata(&canonical).map_err(|_| "ENOENT:file not found")?;
-            if !meta.is_file() || meta.len() > STORE_LIMIT as u64 {
-                return Err("EINVAL:not a regular file".into());
-            }
-            let file = std::fs::File::open(&canonical).map_err(|_| "ENOENT:cannot read file")?;
-            let data = read_range(file, c.offset, c.size)?;
-            // Temporary files are deleted once read, but only verified temp files.
-            if c.medium == b't' {
-                let _ = std::fs::remove_file(&canonical);
-            }
-            data
-        }
+        b'f' | b't' => read_file_medium(c, raw)?,
         b's' => {
             // POSIX shared memory, unlinked once read (as kitty does).
             let name_str = String::from_utf8(raw.clone()).map_err(|_| "EINVAL:bad name")?;
@@ -894,7 +979,13 @@ fn decode_kitty(c: &KittyCommand, payload: &[u8]) -> Result<(u32, u32, Vec<u8>),
         24 | 32 => {
             let (w, h) = (c.width, c.height);
             let bpp = if c.format == 24 { 3 } else { 4 };
-            if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || data.len() < (w * h * bpp) as usize {
+            if w == 0
+                || h == 0
+                || w > MAX_SIDE
+                || h > MAX_SIDE
+                || (w as usize) * (h as usize) > MAX_PIXELS
+                || data.len() < (w * h * bpp) as usize
+            {
                 return Err("EINVAL:bad image size".into());
             }
             let rgba = if bpp == 4 {
@@ -999,10 +1090,11 @@ const SIXEL_PALETTE: [u32; 16] = [
 pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>)> {
     let mut palette = [0u32; 256];
     palette[..16].copy_from_slice(&SIXEL_PALETTE);
-    // Pixels as palette color + 1 (0 = never drawn), grown as needed.
+    // Pixels as palette color + 1 (0 = never drawn), grown as needed. `u16`
+    // holds all 257 values at half the memory of `u32`.
     let (mut w, mut h) = (0usize, 0usize);
     let (mut max_w, mut max_h) = (0usize, 0usize);
-    let mut px: Vec<u32> = Vec::new();
+    let mut px: Vec<u16> = Vec::new();
     let (mut x, mut band) = (0usize, 0usize);
     let mut color = 0usize;
     let mut i = 0;
@@ -1039,9 +1131,16 @@ pub fn decode_sixel(data: &[u8], transparent: bool) -> Option<(u32, u32, Vec<u8>
             b'"' => {
                 i += 1;
                 let p = params(&mut i);
-                // Raster attributes: aspect, then the size hint Ph x Pv.
+                // Raster attributes: aspect, then the size hint Ph x Pv. A hint
+                // above the pixel cap is ignored (a 30-byte "8192x8192" bomb).
                 let (pw, ph) = (p[2] as usize, p[3] as usize);
-                if pw > 0 && ph > 0 && pw <= MAX_SIDE as usize && ph <= MAX_SIDE as usize && canvas.px.is_empty() {
+                if pw > 0
+                    && ph > 0
+                    && pw <= MAX_SIDE as usize
+                    && ph <= MAX_SIDE as usize
+                    && pw * ph <= MAX_PIXELS
+                    && canvas.px.is_empty()
+                {
                     *canvas.w = pw;
                     *canvas.h = ph;
                     *canvas.max_w = pw;
@@ -1110,7 +1209,7 @@ fn rgb_bytes(c: u32) -> [u8; 4] {
 }
 
 struct SixelCanvas<'a> {
-    px: &'a mut Vec<u32>,
+    px: &'a mut Vec<u16>,
     w: &'a mut usize,
     h: &'a mut usize,
     max_w: &'a mut usize,
@@ -1126,9 +1225,16 @@ impl SixelCanvas<'_> {
             return None;
         }
         if need_w > *self.w || need_h > *self.h {
-            let nw = need_w.max(*self.w).max(64).next_power_of_two().min(MAX_SIDE as usize).max(need_w);
-            let nh = need_h.max(*self.h).max(64).next_power_of_two().min(MAX_SIDE as usize).max(need_h);
-            let mut grown = vec![0u32; nw * nh];
+            let mut nw = need_w.max(*self.w).max(64).next_power_of_two().min(MAX_SIDE as usize).max(need_w);
+            let mut nh = need_h.max(*self.h).max(64).next_power_of_two().min(MAX_SIDE as usize).max(need_h);
+            if nw * nh > MAX_PIXELS {
+                // Geometric growth would overshoot the cap: grow exactly instead.
+                (nw, nh) = (need_w.max(*self.w), need_h.max(*self.h));
+                if nw * nh > MAX_PIXELS {
+                    return None;
+                }
+            }
+            let mut grown = vec![0u16; nw * nh];
             for y in 0..*self.max_h {
                 grown[y * nw..y * nw + *self.max_w].copy_from_slice(&self.px[y * *self.w..y * *self.w + *self.max_w]);
             }
@@ -1140,7 +1246,7 @@ impl SixelCanvas<'_> {
         *self.max_h = (*self.max_h).max(need_h);
         for k in 0..6 {
             if bits & (1 << k) != 0 {
-                self.px[(band * 6 + k) * *self.w + x] = color as u32 + 1;
+                self.px[(band * 6 + k) * *self.w + x] = color as u16 + 1;
             }
         }
         Some(())

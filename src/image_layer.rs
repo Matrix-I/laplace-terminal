@@ -327,7 +327,9 @@ mod tests {
         let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
             return;
         };
-        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default(), None)).unwrap();
+        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default(), None)) else {
+            return;
+        };
         let mut layer = ImageLayer::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb);
 
         let draw = ImageDraw {

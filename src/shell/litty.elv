@@ -4,6 +4,7 @@
 # (XDG_DATA_DIRS). Emits OSC 133 prompt / command marks, OSC 7 and, per
 # LITTY_SHELL_INTEGRATION_FEATURES, a bar cursor and the window title.
 use str
+use re
 use platform
 
 # Do not leak Litty's data dir to programs started from this shell.
@@ -34,15 +35,16 @@ set edit:before-readline = [$@edit:before-readline {
     print "\e]133;D\a"
     set running = $false
   }
-  print "\e]7;file://"(platform:hostname)(str:replace ' ' '%20' $pwd)"\a"
+  var clean_pwd = (re:replace '[[:cntrl:]]+' '' $pwd)
+  print "\e]7;file://"(re:replace '[[:cntrl:]]+' '' (platform:hostname))(str:replace ' ' '%20' $clean_pwd)"\a"
   if (has-value $features cursor) { print "\e[5 q" }
-  if (has-value $features title) { print "\e]2;"(tilde-abbr $pwd)"\a" }
+  if (has-value $features title) { print "\e]2;"(re:replace '[[:cntrl:]]+' '' (tilde-abbr $pwd))"\a" }
   print "\e]133;A\a"
 }]
 
 set edit:after-readline = [$@edit:after-readline {|cmd|
   if (has-value $features cursor) { print "\e[0 q" }
-  if (has-value $features title) { print "\e]2;"(str:replace "\e" '' $cmd)"\a" }
+  if (has-value $features title) { print "\e]2;"(re:replace '[[:cntrl:]]+' '' $cmd)"\a" }
   print "\e]133;C\a"
   set running = $true
 }]
