@@ -1,8 +1,8 @@
 [package]
 name = "litty"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
-description = "Minimal GPU terminal: <15MB RAM, 0% idle CPU (Metal on macOS, Vulkan on Linux)"
+description = "Minimal GPU terminal: <50MB RAM, 0% idle CPU (Metal on macOS, Vulkan on Linux)"
 
 [[bin]]
 name = "litty"
@@ -36,10 +36,15 @@ x11rb = "0.13"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 panic = "abort"
 strip = true
+
+[profile.fast-release]
+inherits = "release"
+lto = false
+codegen-units = 16
 
 [patch.crates-io]
 block = { path = "patches/block" }
